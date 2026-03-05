@@ -19,6 +19,8 @@ Goal: iterate aggressively until ANE direct is 10x faster than Core ML across co
 ## ANE 10x Decode + KV Cache (2026-03-05)
 Goal: land autoregressive decode with persistent FP16 KV-cache surfaces and prove >=10x tokens/sec vs fastest Core ML naive decode baseline.
 
+- Decision log: `tasks/ane-10x-optimization-decision-log.md`
+
 - [x] Group 0: Add decode tests first (SurfaceIO slice edge-cases, decode state sequencing, hardware-gated decode correctness)
 - [x] Group 1: Add decode MIL generators (`decode_attn_qkv`, `decode_ffn`) with byte-contract and structure tests
 - [x] Group 2: Add runtime decode path (`DecodeKernelSet`, `DecodeSurfaceHandles`, `ForwardPass.runDecodeTimed`) with KV-cache + mask updates
