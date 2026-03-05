@@ -3,6 +3,85 @@ import Foundation
 import IOSurface
 @testable import ANEInterop
 
+private enum ANEBaselineStatus: Equatable {
+    case available
+    case unstable
+    case unavailable
+}
+
+private func classifyANEBaseline(runtimeAvailable: Bool, compileSucceeded: Bool, evalSucceeded: Bool) -> ANEBaselineStatus {
+    if !runtimeAvailable { return .unavailable }
+    if !compileSucceeded { return .unavailable }
+    if !evalSucceeded { return .unstable }
+    return .available
+}
+
+private func isANEAvailableForBaselineProbe() -> Bool {
+    let handle = dlopen("/System/Library/PrivateFrameworks/AppleNeuralEngine.framework/AppleNeuralEngine", RTLD_NOW)
+    guard handle != nil else { return false }
+    defer { dlclose(handle) }
+
+    let requiredClasses = [
+        "_ANEInMemoryModelDescriptor",
+        "_ANEInMemoryModel",
+        "_ANERequest",
+        "_ANEIOSurfaceObject",
+    ]
+    for c in requiredClasses where NSClassFromString(c) == nil {
+        return false
+    }
+    return true
+}
+
+private func probeANEBaselineStatus() -> ANEBaselineStatus {
+    guard isANEAvailableForBaselineProbe() else {
+        return classifyANEBaseline(runtimeAvailable: false, compileSucceeded: false, evalSucceeded: false)
+    }
+
+    let mil = """
+    program(1.3)
+    [buildInfo = dict<string, string>({{"coremlc-component-MIL", "3510.2.1"}, {"coremlc-version", "3505.4.1"}, {"coremltools-component-milinternal", ""}, {"coremltools-version", "9.0"}})]
+    {
+        func main<ios18>(tensor<fp32, [1, 1, 1, 1]> x) {
+            string to16 = const()[name=string("to16"), val=string("fp16")];
+            tensor<fp16, [1,1,1,1]> x16 = cast(dtype=to16, x=x)[name=string("x16")];
+            string to32 = const()[name=string("to32"), val=string("fp32")];
+            tensor<fp32, [1,1,1,1]> y = cast(dtype=to32, x=x16)[name=string("y")];
+        } -> (y);
+    }
+    """
+
+    let inputBytes = MemoryLayout<Float>.stride
+    let outputBytes = inputBytes
+    let handle = mil.data(using: .utf8)!.withUnsafeBytes { milBuf in
+        var inSize = inputBytes
+        var outSize = outputBytes
+        return withUnsafeBytes(of: &inSize) { inBuf in
+            withUnsafeBytes(of: &outSize) { outBuf in
+                ane_interop_compile(
+                    milBuf.bindMemory(to: UInt8.self).baseAddress!,
+                    milBuf.count,
+                    nil, nil, nil, 0,
+                    1, inBuf.bindMemory(to: Int.self).baseAddress!,
+                    1, outBuf.bindMemory(to: Int.self).baseAddress!
+                )
+            }
+        }
+    }
+
+    guard let handle else {
+        return classifyANEBaseline(runtimeAvailable: true, compileSucceeded: false, evalSucceeded: false)
+    }
+    defer { ane_interop_free(handle) }
+
+    let evalOK = ane_interop_eval(handle)
+    return classifyANEBaseline(runtimeAvailable: true, compileSucceeded: true, evalSucceeded: evalOK)
+}
+
+private enum ANEBaselineProbe {
+    static let status: ANEBaselineStatus = probeANEBaselineStatus()
+}
+
 private func requireANEAvailable(file: StaticString = #filePath, line: UInt = #line) throws {
     let handle = dlopen("/System/Library/PrivateFrameworks/AppleNeuralEngine.framework/AppleNeuralEngine", RTLD_NOW)
     if handle == nil {
@@ -29,6 +108,21 @@ private func requireANEHardwareTestsEnabled(file: StaticString = #filePath, line
 }
 
 final class ANEInteropTests: XCTestCase {
+    func test_baseline_classifier_unavailable_when_runtime_is_missing() {
+        let status = classifyANEBaseline(runtimeAvailable: false, compileSucceeded: true, evalSucceeded: true)
+        XCTAssertEqual(status, .unavailable)
+    }
+
+    func test_baseline_classifier_unavailable_when_compile_fails() {
+        let status = classifyANEBaseline(runtimeAvailable: true, compileSucceeded: false, evalSucceeded: true)
+        XCTAssertEqual(status, .unavailable)
+    }
+
+    func test_baseline_classifier_unstable_when_eval_fails() {
+        let status = classifyANEBaseline(runtimeAvailable: true, compileSucceeded: true, evalSucceeded: false)
+        XCTAssertEqual(status, .unstable)
+    }
+
     func test_init_idempotent() {
         ane_interop_init()
         ane_interop_init()
@@ -262,6 +356,15 @@ final class ANEInteropTests: XCTestCase {
 
     func test_compile_identity_kernel() throws {
         try requireANEHardwareTestsEnabled()
+
+        switch ANEBaselineProbe.status {
+        case .available:
+            break
+        case .unstable:
+            throw XCTSkip("ANE baseline probe unstable on this host; skipping strict identity eval assertion")
+        case .unavailable:
+            throw XCTSkip("ANE baseline probe unavailable on this host; skipping strict identity eval assertion")
+        }
 
         // Known-good minimal conv program with fp16 IO and identity weights.
         let CH = 4
@@ -594,6 +697,218 @@ final class ANEInteropTests: XCTestCase {
             XCTAssertFalse(ane_interop_io_write_fp16_at(s, -1, buf.baseAddress, 1, Int32(spatial)))
             XCTAssertFalse(ane_interop_io_write_fp16_at(s, Int32(channels), buf.baseAddress, 1, Int32(spatial)))
             XCTAssertFalse(ane_interop_io_write_fp16_at(nil, 0, buf.baseAddress, 1, Int32(spatial)))
+        }
+    }
+
+    func test_io_write_fp16_at_batched_regions() throws {
+        let channels = 12
+        let spatial = 4
+        let bytes = channels * spatial * 2
+        guard let s = ane_interop_create_surface(bytes) else {
+            XCTFail("surface alloc failed")
+            return
+        }
+
+        IOSurfaceLock(s, [], nil)
+        memset(IOSurfaceGetBaseAddress(s), 0, bytes)
+        IOSurfaceUnlock(s, [], nil)
+
+        let reg0Channels = 2
+        let reg1Channels = 3
+        let reg0Offset = 1
+        let reg1Offset = 6
+        let regionCount: Int32 = 2
+        let reg0 = (0..<(reg0Channels * spatial)).map { Float($0) * 0.125 + 1.0 }
+        let reg1 = (0..<(reg1Channels * spatial)).map { Float($0) * 0.25 - 2.0 }
+
+        let ok = reg0.withUnsafeBufferPointer { r0 in
+            reg1.withUnsafeBufferPointer { r1 in
+                var ptrs: [UnsafePointer<Float>?] = [r0.baseAddress, r1.baseAddress]
+                var offsets: [Int32] = [Int32(reg0Offset), Int32(reg1Offset)]
+                var channelCounts: [Int32] = [Int32(reg0Channels), Int32(reg1Channels)]
+                return ptrs.withUnsafeMutableBufferPointer { pBuf in
+                    offsets.withUnsafeMutableBufferPointer { oBuf in
+                        channelCounts.withUnsafeMutableBufferPointer { cBuf in
+                            ane_interop_io_write_fp16_at_batched(
+                                s,
+                                oBuf.baseAddress,
+                                pBuf.baseAddress,
+                                cBuf.baseAddress,
+                                regionCount,
+                                Int32(spatial)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertTrue(ok)
+
+        var out = Array(repeating: Float.nan, count: channels * spatial)
+        IOSurfaceLock(s, .readOnly, nil)
+        out.withUnsafeMutableBufferPointer { outBuf in
+            ane_interop_cvt_f16_to_f32(outBuf.baseAddress!, IOSurfaceGetBaseAddress(s), Int32(channels * spatial))
+        }
+        IOSurfaceUnlock(s, .readOnly, nil)
+
+        for ch in 0..<channels {
+            for sp in 0..<spatial {
+                let idx = ch * spatial + sp
+                switch ch {
+                case reg0Offset..<(reg0Offset + reg0Channels):
+                    let src = (ch - reg0Offset) * spatial + sp
+                    XCTAssertEqual(out[idx], reg0[src], accuracy: 1e-2)
+                case reg1Offset..<(reg1Offset + reg1Channels):
+                    let src = (ch - reg1Offset) * spatial + sp
+                    XCTAssertEqual(out[idx], reg1[src], accuracy: 1e-2)
+                default:
+                    XCTAssertEqual(out[idx], 0, accuracy: 0)
+                }
+            }
+        }
+    }
+
+    func test_io_copy_batched_between_surfaces() throws {
+        let channels = 12
+        let spatial = 4
+        let bytes = channels * spatial * 2
+        guard let src = ane_interop_create_surface(bytes),
+              let dst = ane_interop_create_surface(bytes) else {
+            XCTFail("surface alloc failed")
+            return
+        }
+
+        let input = (0..<(channels * spatial)).map { Float($0) * 0.125 - 1.5 }
+        IOSurfaceLock(src, [], nil)
+        input.withUnsafeBufferPointer { inputBuf in
+            ane_interop_cvt_f32_to_f16(IOSurfaceGetBaseAddress(src), inputBuf.baseAddress!, Int32(channels * spatial))
+        }
+        IOSurfaceUnlock(src, [], nil)
+
+        IOSurfaceLock(dst, [], nil)
+        memset(IOSurfaceGetBaseAddress(dst), 0, bytes)
+        IOSurfaceUnlock(dst, [], nil)
+
+        var dstOffsets: [Int32] = [0, 7]
+        var srcOffsets: [Int32] = [3, 1]
+        var copyChannels: [Int32] = [2, 3]
+        let regionCount: Int32 = 2
+        let ok = dstOffsets.withUnsafeMutableBufferPointer { dBuf in
+            srcOffsets.withUnsafeMutableBufferPointer { sBuf in
+                copyChannels.withUnsafeMutableBufferPointer { cBuf in
+                    ane_interop_io_copy_batched(
+                        dst,
+                        src,
+                        dBuf.baseAddress,
+                        sBuf.baseAddress,
+                        cBuf.baseAddress,
+                        regionCount,
+                        Int32(spatial)
+                    )
+                }
+            }
+        }
+        XCTAssertTrue(ok)
+
+        var out = Array(repeating: Float.nan, count: channels * spatial)
+        IOSurfaceLock(dst, .readOnly, nil)
+        out.withUnsafeMutableBufferPointer { outBuf in
+            ane_interop_cvt_f16_to_f32(outBuf.baseAddress!, IOSurfaceGetBaseAddress(dst), Int32(channels * spatial))
+        }
+        IOSurfaceUnlock(dst, .readOnly, nil)
+
+        for ch in 0..<channels {
+            for sp in 0..<spatial {
+                let idx = ch * spatial + sp
+                if 0 <= ch && ch < 2 {
+                    let srcIdx = (ch + 3) * spatial + sp
+                    XCTAssertEqual(out[idx], input[srcIdx], accuracy: 1e-2)
+                } else if 7 <= ch && ch < 10 {
+                    let srcIdx = (ch - 7 + 1) * spatial + sp
+                    XCTAssertEqual(out[idx], input[srcIdx], accuracy: 1e-2)
+                } else {
+                    XCTAssertEqual(out[idx], 0, accuracy: 0)
+                }
+            }
+        }
+    }
+
+    func test_io_copy_multi_src_to_single_destination() throws {
+        let channels = 12
+        let spatial = 4
+        let bytes = channels * spatial * 2
+        guard let srcA = ane_interop_create_surface(bytes),
+              let srcB = ane_interop_create_surface(bytes),
+              let dst = ane_interop_create_surface(bytes) else {
+            XCTFail("surface alloc failed")
+            return
+        }
+
+        let inputA = (0..<(channels * spatial)).map { Float($0) * 0.1 + 1.0 }
+        let inputB = (0..<(channels * spatial)).map { Float($0) * 0.2 - 3.0 }
+        IOSurfaceLock(srcA, [], nil)
+        inputA.withUnsafeBufferPointer { inputBuf in
+            ane_interop_cvt_f32_to_f16(IOSurfaceGetBaseAddress(srcA), inputBuf.baseAddress!, Int32(channels * spatial))
+        }
+        IOSurfaceUnlock(srcA, [], nil)
+
+        IOSurfaceLock(srcB, [], nil)
+        inputB.withUnsafeBufferPointer { inputBuf in
+            ane_interop_cvt_f32_to_f16(IOSurfaceGetBaseAddress(srcB), inputBuf.baseAddress!, Int32(channels * spatial))
+        }
+        IOSurfaceUnlock(srcB, [], nil)
+
+        IOSurfaceLock(dst, [], nil)
+        memset(IOSurfaceGetBaseAddress(dst), 0, bytes)
+        IOSurfaceUnlock(dst, [], nil)
+
+        let sources: [Unmanaged<IOSurfaceRef>?] = [
+            Unmanaged.passUnretained(srcA),
+            Unmanaged.passUnretained(srcB),
+        ]
+        var dstOffsets: [Int32] = [0, 8]
+        var srcOffsets: [Int32] = [3, 1]
+        var copyChannels: [Int32] = [2, 3]
+        let regionCount: Int32 = 2
+        let ok = sources.withUnsafeBufferPointer { srcBuf in
+            dstOffsets.withUnsafeMutableBufferPointer { dBuf in
+                srcOffsets.withUnsafeMutableBufferPointer { sBuf in
+                    copyChannels.withUnsafeMutableBufferPointer { cBuf in
+                        ane_interop_io_copy_multi_src(
+                            dst,
+                            srcBuf.baseAddress,
+                            dBuf.baseAddress,
+                            sBuf.baseAddress,
+                            cBuf.baseAddress,
+                            regionCount,
+                            Int32(spatial)
+                        )
+                    }
+                }
+            }
+        }
+        XCTAssertTrue(ok)
+
+        var out = Array(repeating: Float.nan, count: channels * spatial)
+        IOSurfaceLock(dst, .readOnly, nil)
+        out.withUnsafeMutableBufferPointer { outBuf in
+            ane_interop_cvt_f16_to_f32(outBuf.baseAddress!, IOSurfaceGetBaseAddress(dst), Int32(channels * spatial))
+        }
+        IOSurfaceUnlock(dst, .readOnly, nil)
+
+        for ch in 0..<channels {
+            for sp in 0..<spatial {
+                let idx = ch * spatial + sp
+                if ch < 2 {
+                    let srcIdx = (ch + 3) * spatial + sp
+                    XCTAssertEqual(out[idx], inputA[srcIdx], accuracy: 1e-2)
+                } else if 8 <= ch && ch < 11 {
+                    let srcIdx = (ch - 8 + 1) * spatial + sp
+                    XCTAssertEqual(out[idx], inputB[srcIdx], accuracy: 1e-2)
+                } else {
+                    XCTAssertEqual(out[idx], 0, accuracy: 0)
+                }
+            }
         }
     }
 

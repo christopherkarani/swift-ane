@@ -304,6 +304,8 @@ enum EspressoTrainMain {
         let dlogits = TensorBuffer(count: vocab * seqLen, zeroed: false)
         let dy = TensorBuffer(count: dim * seqLen, zeroed: false)
         let bwdScratch = BackwardScratch(dim: dim, hidden: hidden, seqLen: seqLen)
+        let rmsWorkspace = RMSNorm.Workspace(seqLen: seqLen)
+        let crossEntropyWorkspace = CrossEntropy.Workspace(vocabSize: vocab, seqLen: seqLen)
 
         var totalCompileMs: Double = 0
         var totalTrainMs: Double = 0
@@ -395,6 +397,14 @@ enum EspressoTrainMain {
             let cms = MachTime.ms(MachTime.now() - tc0)
             totalCompileMs += cms
 
+            let surfaceHandles: [LayerSurfaceHandles]
+            do {
+                surfaceHandles = try SurfaceHandleCache.build(kernels: kernelStorage, staticKernels: staticKernels)
+            } catch {
+                try? CompileBudget.setCount(ModelConfig.maxCompiles)
+                continue
+            }
+
             // Zero gradient accumulators (accumulate across micro-steps).
             for L in 0..<nLayers { grads[L].zero() }
             grmsFinal.zero()
@@ -402,10 +412,14 @@ enum EspressoTrainMain {
 
             var stepsBatch = 0
             let tt0 = MachTime.now()
+            var batchTimings = StepTimingBreakdown()
+            var batchStepMsAccum: Double = 0
 
             for _ in 0..<ModelConfig.accumSteps where step < totalSteps {
                 let stepT0 = MachTime.now()
                 let currentStep = step
+                var stepTimings = StepTimingBreakdown()
+                var t0 = MachTime.now()
 
                 let pos = Sampler.samplePosition(maxPos: maxPos)
                 let inputTokens = dataset[pos]
@@ -424,20 +438,46 @@ enum EspressoTrainMain {
                         )
                     }
                 }
+                stepTimings.tElem += MachTime.ms(MachTime.now() - t0)
+
+                // Wait for prior async dW work before touching layer IO for this step.
+                t0 = MachTime.now()
+                accumulator.barrier()
+                stepTimings.tCblasWait += MachTime.ms(MachTime.now() - t0)
 
                 // Forward pass (12 layers).
-                try ForwardPass.run(xCur: xCur, acts: acts, kernels: kernelStorage, accumulator: accumulator)
+                try ForwardPass.runTimed(
+                    xCur: xCur,
+                    acts: acts,
+                    kernels: kernelStorage,
+                    accumulator: accumulator,
+                    dim: dim,
+                    hidden: hidden,
+                    seqLen: seqLen,
+                    surfaceHandles: surfaceHandles,
+                    timings: &stepTimings
+                )
 
                 // Final RMSNorm.
+                t0 = MachTime.now()
                 xFinal.withUnsafeMutablePointer { outPtr in
                     xCur.withUnsafePointer { inPtr in
                         rmsFinal.withUnsafePointer { wPtr in
-                            RMSNorm.forward(output: outPtr, input: inPtr, weights: wPtr, dim: dim, seqLen: seqLen)
+                            RMSNorm.forward(
+                                output: outPtr,
+                                input: inPtr,
+                                weights: wPtr,
+                                dim: dim,
+                                seqLen: seqLen,
+                                workspace: rmsWorkspace
+                            )
                         }
                     }
                 }
+                stepTimings.tRms += MachTime.ms(MachTime.now() - t0)
 
                 // Classifier: logits = embed @ xFinal.
+                t0 = MachTime.now()
                 logits.withUnsafeMutablePointer { logitsPtr in
                     embed.withUnsafePointer { ePtr in
                         xFinal.withUnsafePointer { xPtr in
@@ -453,8 +493,10 @@ enum EspressoTrainMain {
                         }
                     }
                 }
+                stepTimings.tCls += MachTime.ms(MachTime.now() - t0)
 
                 // Cross-entropy loss + dlogits.
+                t0 = MachTime.now()
                 let loss = dlogits.withUnsafeMutablePointer { dlogitsPtr in
                     logits.withUnsafePointer { logitsPtr in
                         CrossEntropy.lossAndGradient(
@@ -462,11 +504,13 @@ enum EspressoTrainMain {
                             logits: logitsPtr,
                             targets: targetTokens,
                             vocabSize: vocab,
-                            seqLen: seqLen
+                            seqLen: seqLen,
+                            workspace: crossEntropyWorkspace
                         )
                     }
                 }
                 lastLoss = loss
+                stepTimings.tElem += MachTime.ms(MachTime.now() - t0)
 
                 // Classifier backward: dy = embed^T @ dlogits.
                 dy.withUnsafeMutablePointer { dyPtr in
@@ -514,7 +558,8 @@ enum EspressoTrainMain {
                                         x: xPtr,
                                         weights: wPtr,
                                         dim: dim,
-                                        seqLen: seqLen
+                                        seqLen: seqLen,
+                                        workspace: rmsWorkspace
                                     )
                                 }
                             }
@@ -528,7 +573,7 @@ enum EspressoTrainMain {
                 }
 
                 // Backward pass (12 layers, reverse).
-                try BackwardPass.run(
+                try BackwardPass.runTimed(
                     dy: dy,
                     acts: acts,
                     kernels: kernelStorage,
@@ -540,7 +585,9 @@ enum EspressoTrainMain {
                     dim: dim,
                     hidden: hidden,
                     seqLen: seqLen,
-                    heads: heads
+                    heads: heads,
+                    surfaceHandles: surfaceHandles,
+                    timings: &stepTimings
                 )
 
                 // Embedding backward (accumulates into gembed).
@@ -563,13 +610,28 @@ enum EspressoTrainMain {
                 }
 
                 let stepMs = MachTime.ms(MachTime.now() - stepT0)
+                batchStepMsAccum += stepMs
+                let completedSteps = stepsBatch + 1
+                batchTimings.tAne += stepTimings.tAne
+                batchTimings.tIO += stepTimings.tIO
+                batchTimings.tCls += stepTimings.tCls
+                batchTimings.tElem += stepTimings.tElem
+                batchTimings.tRms += stepTimings.tRms
+                batchTimings.tCblasWait += stepTimings.tCblasWait
                 stderrLine(
                     String(
-                        format: "{\"type\":\"step\",\"step\":%d,\"loss\":%.6f,\"ms\":%.3f,\"compiles\":%d}",
+                        format: "{\"type\":\"step\",\"step\":%d,\"loss\":%.6f,\"ms\":%.3f,\"ms_per_step\":%.3f,\"t_ane\":%.3f,\"t_io\":%.3f,\"t_cls\":%.3f,\"t_elem\":%.3f,\"t_rms\":%.3f,\"t_cblas_wait\":%.3f,\"compiles\":%d}",
                         locale: posix,
                         currentStep,
                         lastLoss,
                         stepMs,
+                        batchStepMsAccum / Double(completedSteps),
+                        batchTimings.tAne / Double(completedSteps),
+                        batchTimings.tIO / Double(completedSteps),
+                        batchTimings.tCls / Double(completedSteps),
+                        batchTimings.tElem / Double(completedSteps),
+                        batchTimings.tRms / Double(completedSteps),
+                        batchTimings.tCblasWait / Double(completedSteps),
                         CompileBudget.currentCount
                     )
                 )
@@ -626,15 +688,33 @@ enum EspressoTrainMain {
                     CompileBudget.currentCount
                 )
             )
+            print(
+                String(
+                    format: "    ane=%.1f io=%.1f cls=%.1f elem=%.1f rms=%.1f cblas_wait=%.1f ms/step",
+                    locale: posix,
+                    batchTimings.tAne / Double(stepsBatch),
+                    batchTimings.tIO / Double(stepsBatch),
+                    batchTimings.tCls / Double(stepsBatch),
+                    batchTimings.tElem / Double(stepsBatch),
+                    batchTimings.tRms / Double(stepsBatch),
+                    batchTimings.tCblasWait / Double(stepsBatch)
+                )
+            )
 
             stderrLine(
                 String(
-                    format: "{\"type\":\"batch\",\"batch\":%d,\"compile_ms\":%.1f,\"train_ms\":%.1f,\"ms_per_step\":%.1f}",
+                    format: "{\"type\":\"batch\",\"batch\":%d,\"compile_ms\":%.1f,\"train_ms\":%.1f,\"ms_per_step\":%.1f,\"t_ane\":%.3f,\"t_io\":%.3f,\"t_cls\":%.3f,\"t_elem\":%.3f,\"t_rms\":%.3f,\"t_cblas_wait\":%.3f}",
                     locale: posix,
                     stepsBatch,
                     cms,
                     tms,
-                    tms / Double(stepsBatch)
+                    tms / Double(stepsBatch),
+                    batchTimings.tAne / Double(stepsBatch),
+                    batchTimings.tIO / Double(stepsBatch),
+                    batchTimings.tCls / Double(stepsBatch),
+                    batchTimings.tElem / Double(stepsBatch),
+                    batchTimings.tRms / Double(stepsBatch),
+                    batchTimings.tCblasWait / Double(stepsBatch)
                 )
             )
 

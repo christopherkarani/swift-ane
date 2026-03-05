@@ -46,8 +46,54 @@ void ane_interop_cvt_f16_to_f32(float *dst, const void *src, int count);
 bool ane_interop_io_copy(IOSurfaceRef dst, int dst_ch_off,
                          IOSurfaceRef src, int src_ch_off,
                          int channels, int spatial);
+bool ane_interop_io_write_fp16(IOSurfaceRef surface,
+                               const float *data, int channels, int spatial);
+bool ane_interop_io_read_fp16(IOSurfaceRef surface, int ch_off,
+                              float *data, int channels, int spatial);
+bool ane_interop_io_read_fp16_batched(IOSurfaceRef surface, int spatial,
+                                      float * const *destinations,
+                                      const int *channel_offsets,
+                                      const int *channels,
+                                      int region_count);
 bool ane_interop_io_write_fp16_at(IOSurfaceRef surface, int ch_off,
                                   const float *data, int channels, int spatial);
+bool ane_interop_io_write_fp16_at_batched(IOSurfaceRef surface,
+                                          const int *channel_offsets,
+                                          const float * const *sources,
+                                          const int *channels,
+                                          int region_count,
+                                          int spatial);
+bool ane_interop_io_copy_batched(IOSurfaceRef dst,
+                                 IOSurfaceRef src,
+                                 const int *dst_channel_offsets,
+                                 const int *src_channel_offsets,
+                                 const int *channels,
+                                 int region_count,
+                                 int spatial);
+bool ane_interop_io_copy_multi_src(IOSurfaceRef dst,
+                                   IOSurfaceRef const *sources,
+                                   const int *dst_channel_offsets,
+                                   const int *src_channel_offsets,
+                                   const int *channels,
+                                   int region_count,
+                                   int spatial);
+
+/// Lock/unlock surfaces independently for batched I/O sequences.
+/// Use these to amortize lock overhead across write→eval→read cycles.
+bool ane_interop_io_lock_write(IOSurfaceRef surface);
+bool ane_interop_io_unlock_write(IOSurfaceRef surface);
+bool ane_interop_io_lock_read(IOSurfaceRef surface);
+bool ane_interop_io_unlock_read(IOSurfaceRef surface);
+
+/// Write FP16 data to a surface that is already locked for write.
+/// Caller must hold a write lock via `ane_interop_io_lock_write()`.
+bool ane_interop_io_write_fp16_unlocked(IOSurfaceRef surface,
+                                         const float *data, int channels, int spatial);
+
+/// Read FP16 data from a surface that is already locked for read.
+/// Caller must hold a read lock via `ane_interop_io_lock_read()`.
+bool ane_interop_io_read_fp16_unlocked(IOSurfaceRef surface, int ch_off,
+                                        float *data, int channels, int spatial);
 
 #ifdef __cplusplus
 } // extern "C"

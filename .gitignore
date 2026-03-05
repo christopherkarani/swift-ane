@@ -25,3 +25,11 @@ xcuserdata/
 # Golden test fixtures are tracked; add entries here for actual model weights
 *.gguf
 *.safetensors
+
+# Benchmark outputs
+benchmarks/results/
+benchmarks/models/*.mlpackage
+
+# Generated artifacts (bench logs, history) and Python caches
+artifacts/
+scripts/__pycache__/

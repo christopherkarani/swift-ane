@@ -1,5 +1,12 @@
 # Lessons Learned
 
+## 2026-03-04 — Phase 8 Benchmarking + Gates
+- Keep cross-validation strictness split explicit: required probes must fail the run, optional probes may warn but must never mask required artifact failures.
+- Emit benchmark metrics from tests in machine-readable JSON (`PHASE8_BENCHMARKS=1`) so grading/parity logic does not depend on brittle text parsing.
+- Benchmark reports must always include timestamp + git SHA (or `no git repo`) in every artifact format (`json`, `csv`, `md`) to preserve auditability.
+- If performance cannot be measured (host/repo limitation), mark perf as `N/A`, redistribute score weights proportionally, and attach exact blocker evidence; never silently treat missing perf data as pass.
+- For Python orchestration that shells out to Swift tools, either route execution through an allowed context (elevated run) or force local cache/module paths to avoid environment-dependent failures.
+
 ## 2026-03-04 — Phase 7 Golden Fixtures, Cross-Validation, Archival
 - Cross-validation fixtures must be generated from ObjC kernels, not from Swift outputs; Swift-vs-Swift fixture generation is circular and invalid as an oracle.
 - When archival changes source locations (`training` -> `archive/training`), all build/capture scripts must resolve both active and archived paths to avoid silently breaking maintenance workflows.

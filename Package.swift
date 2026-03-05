@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "espresso-train", targets: ["EspressoTrain"]),
+        .executable(name: "espresso-bench", targets: ["EspressoBench"]),
         .library(name: "Espresso", targets: ["Espresso"]),
     ],
     targets: [
@@ -63,6 +64,17 @@ let package = Package(
             dependencies: ["Espresso"],
             path: "Sources/EspressoTrain",
             swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .executableTarget(
+            name: "EspressoBench",
+            dependencies: ["Espresso", "ANERuntime", "ANETypes", "CPUOps"],
+            path: "Sources/EspressoBench",
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+                .linkedFramework("IOSurface"),
+                .linkedFramework("CoreML"),
+            ]
         ),
         .testTarget(name: "ANEInteropTests", dependencies: ["ANEInterop"], swiftSettings: [.swiftLanguageMode(.v6)]),
         .testTarget(name: "ANETypesTests", dependencies: ["ANETypes"], swiftSettings: [.swiftLanguageMode(.v6)]),

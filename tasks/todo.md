@@ -2,6 +2,104 @@
 
 ## Status: Phase 1–7 Implemented (Swift rewrite complete; ObjC archived as reference)
 
+## Benchmark Suite v1 (2026-03-05)
+- [x] Task 1: Add EspressoBench target scaffold to Package.swift
+- [x] Task 2: BenchmarkRunner — measurement harness (stats, signposts, progress)
+- [x] Task 3: FLOPCalculator — TFLOPS and utilization metrics
+- [x] Task 4: ResultsFormatter — report + CSV output
+- [x] Task 5: ThermalMonitor — thermal state tracking
+- [x] Task 6: ANEDirectBench — core ANE benchmark (inlined loop, ~Copyable safe)
+- [x] Task 7: CoreMLBench — Core ML baseline with 3 compute unit configs
+- [x] Task 8: Python coremltools model generator script
+- [x] Task 9: Main entry point — CLI orchestration
+- [x] Task 10: Integration test — build + smoke test
+- [x] Task 11: Power benchmark script (powermetrics wrapper)
+- [x] Task 12: Gitignore and cleanup
+
+### Benchmark v1 Smoke Test Results (2026-03-05)
+- `swift build -c release --product espresso-bench` => clean, 0 warnings
+- `.build/release/espresso-bench --ane-only --warmup 3 --iterations 5` => success
+- Chip detected: Apple M3 Max
+- Mean: 1.207 ms, Median: 1.208 ms (5 iterations)
+- Sustained TFLOPS: 3.17, ANE Utilization: 17.6%
+- Time breakdown: ANE 81.9%, I/O 16.3%, CPU 1.8%
+- CSV + summary.txt output verified in benchmarks/results/
+
+## Forward Pass Inference Optimizations (2026-03-05)
+- [x] Opt 1: Inference MIL generators with fused residuals (SDPAForwardInferenceGenerator, FFNForwardInferenceGenerator)
+- [x] Opt 2: InferenceKernelSet — lightweight 2-kernel compilation (~Copyable struct)
+- [x] Opt 3: ForwardPass.runInference() — streamlined inference path (no LayerActivations, no CPU residuals)
+- [x] Opt 4: Unlocked I/O variants — lock/unlock primitives + unlocked read/write in C + Swift wrappers
+- [x] Opt 5: Benchmark integration — --inference flag, ANEDirectBench.runInference(), results formatting
+
+### Verification
+- [x] `swift build` => 0 errors, 0 warnings
+- [x] `swift test` => 168 tests, 0 failures (no regressions to training path)
+
+### Files Created
+- `Sources/MILGenerator/SDPAForwardInferenceGenerator.swift`
+- `Sources/MILGenerator/FFNForwardInferenceGenerator.swift`
+- `Sources/ANERuntime/InferenceKernelSet.swift`
+
+### Files Modified
+- `Sources/Espresso/ForwardPass.swift` — added InferenceSurfaceHandles, runInference(), runInferenceTimed()
+- `Sources/ANEInterop/surface_io.c` — added lock/unlock + unlocked read/write
+- `Sources/ANEInterop/include/ane_interop.h` — declared new C functions
+- `Sources/ANETypes/SurfaceIO.swift` — added Swift wrappers for lock/unlock/unlocked I/O
+- `Sources/EspressoBench/ANEDirectBench.swift` — added runInference() benchmark
+- `Sources/EspressoBench/main.swift` — added --inference flag
+- `Sources/EspressoBench/ResultsFormatter.swift` — inference results + comparison formatting
+
+## Phase 10 Performance Push (2026-03-05)
+- [ ] Group 0: Add TDD coverage for C-side batched `write-at` and batched `copy` SurfaceIO APIs
+- [ ] Group 1: Implement C interop batched `write-at` + batched `copy` and Swift wrappers
+- [ ] Group 2: Repack SDPA backward flow to reduce per-layer ANE dispatches
+- [ ] Group 3: Add benchmark warmup + median aggregation controls (strict gates unchanged)
+- [ ] Group 4: Run targeted + full verification and capture perf deltas in artifacts/README
+
+## Phase 9 Performance Investigation & Optimization (2026-03-05)
+- [x] Group 0: Baseline hardening + evidence capture
+- [x] Group 1: Add ObjC-style Swift step telemetry (`t_ane`, `t_io`, `t_cls`, `t_elem`, `t_rms`, `t_cblas_wait`, `ms_per_step`)
+- [x] Group 2: Extend Phase 8 benchmark parser/artifacts to capture and report timing breakdown
+- [x] Group 3: Optimization batch O1 (surface handle caching in hot loops)
+- [x] Group 4: Optimization batch O2 (batched SurfaceIO read paths with fewer lock/unlock cycles)
+- [x] Group 5: Optimization batch O3 (CPU workspace reuse for CrossEntropy and RMSNorm)
+- [x] Group 6: Optimization batch O4 (synchronization/barrier tuning + attribution)
+- [x] Group 7: Full gate rerun + benchmark artifacts refresh
+- [x] Group 8: README performance baseline/progress update + final report notes
+
+### Phase 9 Verification Commands
+- [x] `swift build`
+- [x] `swift test`
+- [x] `ANE_HARDWARE_TESTS=1 swift test --filter "ANERuntimeTests|EspressoTests|CrossValidationTests"`
+- [x] `OBJC_CROSS_VALIDATION=1 ANE_HARDWARE_TESTS=1 PHASE8_BENCHMARKS=1 swift test --filter CrossValidationTests`
+- [x] `./scripts/phase8_benchmark.py --regression-threshold-pct 5 --max-retries 1`
+
+### Phase 9 Review
+- [x] Baseline reproduced and documented with timestamp/hardware/toolchain
+- [x] Per-batch hypothesis/result table captured (delta vs baseline, pass/fail notes)
+- [x] Numerical parity + stability confirmed non-regressed
+- [x] Remaining bottlenecks and next ROI actions recorded
+
+### Phase 9 Outcome Summary (2026-03-05)
+- Baseline reference copied into README:
+  - timestamp `2026-03-04T21:07:16.203258+00:00`
+  - hardware `Mac15,11 (Apple M3 Max)`
+  - OS `macOS 26.0 (25A354)`
+  - toolchain `Swift 6.2.4`
+  - performance `Swift 267.8 ms/step`, `ObjC 163.6 ms/step`, ratio `1.636919`
+- Iteration outcomes captured in README "Performance Baseline & Progress":
+  - `O1` (telemetry + surface/cache/workspace changes): `271.7 ms/step`, ratio `1.747267` (regressed vs baseline)
+  - `O2` (build fairness release mode + ObjC breakdown parsing fix): `149.8 ms/step`, ObjC `143.3 ms/step`, ratio `1.045359`
+  - `O3` (C fast-path SurfaceIO read/write/batched read): `131.2 ms/step`, ObjC `145.5 ms/step`, ratio `0.901718` (Swift faster than ObjC)
+- Current best benchmark artifact set:
+  - `artifacts/benchmarks/phase8/latest.json`
+  - `artifacts/benchmarks/phase8/latest.csv`
+  - `artifacts/benchmarks/phase8/latest.md`
+  - metadata timestamp `2026-03-04T22:26:15.868381+00:00`
+- Gate status (current best run): `G0..G5 pass`, overall `S+ (100.00)`.
+- Remaining bottlenecks from breakdown: `t_ane` and `t_io` dominate Swift-vs-ObjC delta.
+
 ## Phase 7 Execution Checklist (2026-03-04)
 - [x] Group 0 pre-flight complete
 - [x] Group 1 fixture binaries generated from ObjC oracle and committed
@@ -36,6 +134,30 @@
 - `ANEInteropTests.test_compile_identity_kernel` remains flaky in unfiltered full-hardware runs; use filtered hardware sweeps as documented.
 - Several ObjC probe executables are unstable on this host (`test_weight_reload`, `test_perf_stats`, `test_ane_advanced`, `test_fused_bwd`, `test_ane_sdpa5`); `scripts/cross_validate.sh` now fails fast (strict mode) instead of reporting success with stale/mixed artifacts.
 - Failed cross-validation capture logs are emitted to `.build/phase7-cross-validate/failed/` for diagnosis.
+
+## Phase 8 Implementation Checklist (2026-03-04)
+- [x] Group 0: Read source docs/context (`tasks/phase8-plan.md` if present, `tasks/phase7-todolist.md`, `tasks/todo.md`, `tasks/lessons.md`)
+- [x] Group 1: ANEInterop baseline stabilization for host-unstable identity probe
+- [x] Group 2: Cross-validation strictness split (required vs optional probes) + benchmark metric emission in `CrossValidationTests`
+- [x] Group 3: Benchmark artifacts + grading pipeline (`latest.json`, `latest.csv`, `latest.md`)
+- [x] Group 4: CI/doc updates for Phase 8 lanes and env gates
+- [x] Group 5: Final verification sweep + review evidence + lessons update
+
+### Phase 8 Gate Checklist
+- [x] G0 Build/Test baseline
+- [x] G1 Hardware correctness lane
+- [x] G2 ObjC cross-validation lane
+- [x] G3 Benchmark artifact completeness
+- [x] G4 Grading gate
+- [x] G5 Regression gate
+
+### Phase 8 Review Evidence
+- G0: `swift build` + `swift test` => pass (`artifacts/benchmarks/phase8/logs/g0_swift_build-attempt1.log`, `g0_swift_test-attempt1.log`), `159` tests executed, `41` skipped, `0` failures.
+- G1: `ANE_HARDWARE_TESTS=1 swift test --filter "ANERuntimeTests|EspressoTests|CrossValidationTests"` => pass (`66` executed, `17` skipped, `0` failures). Host-expected skips captured (baseline unavailable for one eval test, integration env off, ObjC CV env off).
+- G2: `OBJC_CROSS_VALIDATION=1 ANE_HARDWARE_TESTS=1 PHASE8_BENCHMARKS=1 swift test --filter CrossValidationTests` => pass (`6` executed, `0` failures). Emitted metric JSON rows for `full_fused_forward` + `fused_backward`.
+- G3: `artifacts/benchmarks/phase8/latest.json`, `latest.csv`, `latest.md` exist and include current timestamp (`2026-03-04T20:58:01.288988+00:00`) + git SHA (`f2d1da0e30c3cc964297c9b3112f55a1191730da`).
+- G4: Overall grade present (`S+ + 100.00`), parity section includes tolerance checks (`max_abs_diff=0`, `mean_abs_diff=0`, pass), and missing performance metrics are explicitly marked `N/A` with evidence (`archive/training/train_large.m` missing).
+- G5: Regression comparison executed against previous snapshot in `latest.json`; status `PASS` (`Within threshold`, abs change `0.0`, pct change `0.0%`, threshold `5%`).
 
 ## Phase 6b Execution Checklist (2026-03-04)
 - [x] Group 0 pre-flight baseline green (`swift build`, `swift test`, `ANE_HARDWARE_TESTS=1 swift test --filter ANERuntimeTests`)
