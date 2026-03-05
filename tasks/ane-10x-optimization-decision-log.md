@@ -1,9 +1,9 @@
 # ANE 10x Optimization Decision Log
 
-Date: 2026-03-05  
+Date: 2026-03-06  
 Repo/worktree: `/private/tmp/espresso-mainworktree-clean`  
 Branch: `feat/ane-10x-max`  
-Latest commit at time of this document: `5c016ec`
+Latest commit at time of this document: `13d21df`
 
 ---
 
@@ -236,3 +236,57 @@ Prefill profile run:
   - `ane_inference_latencies.csv`
   - `ane_inference_kernel_profile.csv`
   - Core ML latency CSVs
+
+---
+
+## 9) Tried vs Regressed (2026-03-06 update)
+
+### Shipped improvements (kept)
+- A13 decode tile-sync optimization (`5c016ec`) is a real win for tiled decode contexts:
+  - `maxSeq=128`: median `0.685 -> 0.483 ms/token`, throughput `1445 -> 2040 tok/s`
+  - `maxSeq=256`: median `0.685 -> 0.492 ms/token`, throughput `1448 -> 1869 tok/s`
+  - Primary bottleneck shift: IO `~0.219/0.217 ms` down to `~0.032/0.035 ms` per token.
+
+### Regressions or non-reproducible results (not kept)
+- Strict decode speedup headline regressed vs earlier best:
+  - Earlier best snapshot: `~2.67x–2.72x` (at `maxSeq=32`)
+  - Recent strict snapshots: `~2.02x–2.20x`
+  - Evidence: `/tmp/decode_syncopt_coreml_max128_20260305`, `/tmp/decode_syncopt_coreml_max32_20260305`, `/tmp/decode_syncopt_coreml_max32_r2_20260305`
+  - Note: mixed ANE+CoreML run ordering showed thermal drift; ANE-only confirm still measured `~0.486 ms` median at `maxSeq=32` (`/tmp/decode_syncopt_confirm_max32_20260305`).
+- Decode runtime option candidate (`ANE_EVAL_PATH=clientDirect`) regressed on confirmation:
+  - One-shot looked faster, but 3x confirmations showed parity/slight regression vs baseline.
+  - Evidence: `/tmp/decode_syncopt_opts_max128_20260305`, `/tmp/decode_syncopt_confirm_evalpath_max128_20260305`
+  - Decision: `ABANDON`.
+- Prefill high-ROI combo (`ANE_QUEUE_DEPTH=32 + ANE_MEMORY_POOL_ID=1`) regressed in sequential re-check:
+  - Baseline median `1.855 ms`
+  - Combo median `1.927 ms`
+  - Evidence: `/tmp/prefill_syncopt_baseline_seq_20260305`, `/tmp/prefill_syncopt_combo_qd32_pool1_seq_20260305`
+  - Decision: `ABANDON`.
+
+### Invalid/discarded evidence
+- Parallel prefill benchmark invocation was discarded as non-defensible due host contention; only sequential reruns are used for conclusions in this document.
+
+---
+
+## 10) Tried vs Hypothesis (Max-Performance Plan)
+
+### Proven tried paths (evidence-backed)
+- Decode tiled IO reduction (A13): **works** and should be preserved as baseline.
+- Decode runtime option stacking after A13 (A14): **no stable gain**; keep default path.
+- Prefill queue-depth/memory-pool combo (A15): **regressed** under sequential rerun; do not reuse.
+- Perf-stats fallback hacks (A10): **unsafe/abandoned**; do not pursue private selector spoofing.
+
+### Performance-maximization hypotheses (next experiments)
+
+| H# | Hypothesis | Why it could move needle | Expected impact (decode first) | Validation plan | Ship gate |
+|---|---|---|---|---|---|
+| H1 | **Dispatch reduction**: collapse per-token eval count (attn+ffn fusion/chaining) | Current decode still pays 2 evals/layer/token, so host dispatch overhead remains structural | High (largest remaining decode constant-factor lever) | Implement behind flag, run A/B at `maxSeq=32/128/256`, verify hardware correctness tests + parity checks | `SHIP` only if median gain holds across repeated runs (not one-shot) |
+| H2 | **Boundary CPU-touch minimization**: reduce/avoid token pack/unpack copies where safe | Even after A13, boundary copies exist and can add jitter/tail latency | Medium | Add targeted micro-profiler counters around boundary I/O; compare before/after p95/p99 | `SHIP` only if tails and median both improve |
+| H3 | **Stable thermal/fairness protocol**: isolate ANE/CoreML run-order effects | Current strict speedup is sensitive to thermal drift, masking real regression/improvement signal | Medium (measurement quality + defensibility) | Interleaved repeated runs with cooldown windows + median-of-medians reporting | `SHIP` as reporting protocol once reproducible |
+| H4 | **Decode maxSeq scaling by contract-safe tiling variants** | If ANE contract permits wider auxiliary inputs safely, fewer sync events may be needed | Medium-to-high if contract-safe | Probe-guided shape expansion tests, then benchmark only passing families | `SHIP` only with stable eval + correctness |
+| H5 | **Prefill fusion/dispatch tuning only** (no risky option combos) | Prefill appears host-eval dominated; options alone did not hold | Low-to-medium | Evaluate only high-ROI fusion/chaining variants with strict repeated runs | `ITERATE` unless repeatable gain > noise floor |
+| H6 | **Stateful Core ML decode baseline (reported separately)** | Tightens fairness and prevents overstating speedup claims | Reporting impact, not direct speed gain | Add optional baseline mode and keep strict naive baseline unchanged | `SHIP` if stable and reproducible |
+
+### Practical ceiling hypothesis (current evidence)
+- With current kernel contract and 2-eval decode dispatch, decode speedups above current `~2x` strict likely require **architectural dispatch reduction (H1)** rather than additional runtime option sweeps.
+- Prefill large multi-x gains are unlikely on this host path without a meaningful reduction in host eval overhead; short-term expectation is parity-to-modest gains, not 3–6x.

@@ -44,6 +44,13 @@ Goal: deliver maximum defensible ANE decode throughput and best-justified prefil
   - `ANE_QUEUE_DEPTH=32` + `ANE_MEMORY_POOL_ID=1`: `/tmp/prefill_syncopt_combo_qd32_pool1_seq_20260305` median `1.927 ms`
   - verdict: regresses prefill; `ABANDON`.
 
+### Hypothesis-Driven Next Steps (for max performance)
+- [ ] H1: Implement decode dispatch-reduction path behind flag (target: fewer evals per token/layer).
+- [ ] H2: Minimize decode boundary CPU-touch copies and measure p95/p99 impact.
+- [ ] H3: Lock thermal/fairness benchmark protocol (interleaved repeats + cooldown + median-of-medians).
+- [ ] H4: Probe contract-safe decode tiling variants beyond current auxiliary-shape constraints.
+- [ ] H5: Prefill-only high-ROI fusion/chaining experiments (exclude unstable runtime option combos).
+
 ## ANE 10x Tuning Program (2026-03-05)
 Goal: iterate aggressively until ANE direct is 10x faster than Core ML across compute-only + end-to-end benchmarks, or prove a hard floor via ANE `hwExecutionTime`.
 
