@@ -2,6 +2,20 @@
 
 ## Status: Phase 1–7 Implemented (Swift rewrite complete; ObjC archived as reference)
 
+## ANE Max Throughput Execution (2026-03-06)
+Goal: deliver maximum defensible ANE decode throughput and best-justified prefill constant-factor gains with reproducible artifacts and strict fairness gates.
+
+- [ ] Step 0: Lock execution environment on `feat/ane-10x-max` clean worktree, seed/config defaults, and reproducibility metadata contract
+- [ ] Step 1: Add sweep harness for decode/prefill ANE runtime options with aggregate `summary.csv` and `best_of.json`
+- [ ] Step 2: Tighten benchmark metadata (`schema_version`, artifact manifest, effective ANE options) and strict option-application checks
+- [ ] Step 3: TDD for decode decoupled contract (`laneSpatial=32`, `decodeMaxSeq in {32,64,128,256}`) and tile-boundary progression
+- [ ] Step 4: Implement decode logical max-seq expansion via 32-lane tiled cache/mask handling while preserving KV/mask update order
+- [ ] Step 5: Reduce decode host overhead (batched copies/packing minimization) and evaluate optional dispatch-reduction path behind flags
+- [ ] Step 6: Run decode sweep matrix (1-layer search), capture per-change before/after tables, and classify each optimization `SHIP`/`ITERATE`/`ABANDON`
+- [ ] Step 7: Run prefill high-ROI option/fusion sweep and produce bottleneck-ceiling argument from repeated profiles
+- [ ] Step 8: 12-layer final confirmation runs for best decode + prefill settings, with strict Core ML naive baseline fairness
+- [ ] Step 9: Final verification (`swift test`, targeted/hardware-gated tests, decode probe matrix), update decision log + review section, and ensure clean committed branch
+
 ## ANE 10x Tuning Program (2026-03-05)
 Goal: iterate aggressively until ANE direct is 10x faster than Core ML across compute-only + end-to-end benchmarks, or prove a hard floor via ANE `hwExecutionTime`.
 
