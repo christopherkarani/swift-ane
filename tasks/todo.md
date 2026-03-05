@@ -5,7 +5,7 @@
 ## ANE Max Throughput Execution (2026-03-06)
 Goal: deliver maximum defensible ANE decode throughput and best-justified prefill constant-factor gains with reproducible artifacts and strict fairness gates.
 
-- [ ] Step 0: Lock execution environment on `feat/ane-10x-max` clean worktree, seed/config defaults, and reproducibility metadata contract
+- [x] Step 0: Lock execution environment on `feat/ane-10x-max` clean worktree, seed/config defaults, and reproducibility metadata contract
 - [ ] Step 1: Add sweep harness for decode/prefill ANE runtime options with aggregate `summary.csv` and `best_of.json`
 - [ ] Step 2: Tighten benchmark metadata (`schema_version`, artifact manifest, effective ANE options) and strict option-application checks
 - [x] Step 3: TDD for decode decoupled contract (`laneSpatial=32`, `decodeMaxSeq in {32,64,128,256}`) and tile-boundary progression
@@ -16,6 +16,55 @@ Goal: deliver maximum defensible ANE decode throughput and best-justified prefil
 - [ ] Step 7: Run prefill high-ROI option/fusion sweep and produce bottleneck-ceiling argument from repeated profiles
 - [ ] Step 8: 12-layer final confirmation runs for best decode + prefill settings, with strict Core ML naive baseline fairness
 - [ ] Step 9: Final verification (`swift test`, targeted/hardware-gated tests, decode probe matrix), update decision log + review section, and ensure clean committed branch
+
+### Campaign Baseline (2026-03-06)
+- [x] Baseline marker created: git tag `ane-baseline-20260306-a14a9ab`
+- [x] Active clean tuning worktree: `/private/tmp/espresso-ane-max-20260306`
+- [x] Active tuning branch: `feat/ane-10x-max-iter-20260306`
+- [x] Deterministic benchmark contract locked: `ESPRESSO_BENCH_SEED=1`, `ANE_COMPILE_CACHE_POLICY=preferCached`, no parallel benchmark runs
+- [x] Wax MCP tracking enabled for baseline + experiment state
+- [x] Session memory store: `~/.wax/sessions/20260306-014954-9237.wax`
+
+### Decode Experiment Queue (2026-03-06)
+- [x] D1: Dispatch reduction cycle 1: fuse current decode-attn-probe + FFN into a single decode layer kernel behind a benchmark flag
+  Review:
+  - Added `DecodeFusedLayerGenerator`, `FusedDecodeKernelSet`, env-gated `ESPRESSO_DECODE_LAYER_MODE=fusedLayer`, and unit tests.
+  - Quick split2 baseline artifact: `/tmp/decode_fused_cycle1_split2_quick_20260306`
+    - mean `0.665 ms/token`, median `0.666 ms/token`, p95 `0.716 ms`, p99 `0.769 ms`, `1504 tok/s`
+    - measured breakdown: ANE kernel `0.586 ms`, surface I/O `0.020 ms`
+  - Fused compile artifacts:
+    - attempted quick run `/tmp/decode_fused_cycle1_fused_quick_20260306` never materialized
+    - attempted passthrough probe `/tmp/decode_fused_cycle1_probe_passthrough_20260306` never materialized
+    - sample: `/tmp/espresso-bench_2026-03-06_014704_vEMy.sample.txt`
+  - Verdict: `ABANDON` for this fused decode graph shape. The process stalls inside `_ANEClient compileModel`, so this is not a safe or shippable dispatch-reduction path on this host/runtime.
+- [x] D2: Revert the D1 prototype before continuing so the next iteration starts from a clean decode baseline
+- [ ] D3: Add decode-side `hwExecutionTime` attribution and explicit compile/eval stage timing in artifacts to separate host dispatch cost from kernel cost
+- [x] D4: If decode remains host-dispatch limited, implement external surface binding (`attnOut -> ffnIn`, `ffnOut_L -> attnIn_L+1`) behind a flag with tests first
+  Review:
+  - Added a one-shot input rebinding path in interop/runtime and hardware tests for:
+    - raw interop input rebinding
+    - `ANEKernel.bindInputSurface(...)`
+    - 2-layer decode parity with rebound `attnOut -> ffnIn` and `ffnOut_L -> attnIn_L+1`
+  - Fast rejection signal:
+    - equal-size replacement surfaces bind successfully at the API level, but real ANE eval fails immediately
+    - first attempt to refresh buffers via `_ANEClient buffersReadyWithModel:inputBuffers:...` using an array throws `-[__NSArrayM procedureIndex]`
+    - second attempt using the rebuilt `_ANERequest` throws `-[_ANERequest executionDelay]`
+    - eval still falls through to `statusType=0x9: Program Inference error`
+  - Targeted hardware tests show only the undersized-surface rejection is valid; actual rebinding is unsafe on this host/runtime.
+  - Verdict: `ABANDON` this request-rebuild surface-rebinding approach and revert it immediately.
+- [ ] D5: Investigate `_ANEChainingRequest` / `prepareChainingWithModel` as the next decode dispatch-reduction candidate instead of request-level surface rebinding
+- [ ] D6: Re-run decode tiling/contract expansion probes only after the best dispatch-reduction path is stable
+
+### Decode Runtime Option Sweep (maxSeq=32, 2026-03-06)
+- [x] Quick 1-layer decode sweep rerun in the clean worktree:
+  - artifact root: `/tmp/decode_sweep_max32_quick_20260306`
+  - baseline `preferCached` remained best: median `0.486 ms`, `2031.6 tok/s`
+  - confirmation medians:
+    - baseline `preferCached`: `0.4888`, `0.4941`, `0.4940` -> median-of-medians `0.4940 ms`
+    - `ANE_EVAL_PATH=clientDirect`: `0.4955`, `0.4954`, `0.4926` -> median-of-medians `0.4954 ms`
+  - `clientDirect` delta vs baseline: `+0.27%` median regression
+  - `ANE_KEEP_MODEL_WIRED=1` materially regressed to median `0.587 ms`
+- [x] Sweep verdict: runtime option tuning is exhausted for `maxSeq=32` on this host; structural dispatch reduction remains the only credible decode path.
 
 ### Execution Review (Decode Tile-Sync Optimization, 2026-03-05)
 - [x] Added TDD coverage for tile-boundary sync policy and runtime option parsing (`DecodeStateTests`).

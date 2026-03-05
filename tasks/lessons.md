@@ -43,3 +43,11 @@
 - Backward IOSurface chain invariants must be asserted explicitly: `dv` is sourced from `sdpaBwd1` output offset `0`, while `dq|dk` are sourced from `sdpaBwd2` output offset `0`.
 - `tiny_train.m` is useful only for exec-restart/checkpoint lifecycle contract checks; it is not numerically comparable to `espresso-train` loss because it is a different model.
 - Host-dependent gates (M4 perf target, local model assets, ANE interop instability) should be documented as explicit blocked conditions in checklist/todo artifacts, not silently treated as pass.
+
+## 2026-03-06 — Experiment Tracking Discipline
+- Use Wax MCP continuously during long ANE tuning loops: record the baseline marker, active clean worktree/branch, each experiment hypothesis, artifact directories, verdicts, and rollback notes as the work progresses.
+- Treat Wax memory as part of the performance workflow, not an optional afterthought; if the user corrects memory/experiment tracking behavior, update both Wax and `tasks/lessons.md` immediately.
+
+## 2026-03-06 — Performance Reporting Discipline
+- Every tuning cycle must document three things explicitly: what was tried, what worked, and what did not work.
+- Always explain why a change is believed to have helped, regressed, or failed to confirm; artifact-backed attribution is part of the deliverable, not optional commentary.

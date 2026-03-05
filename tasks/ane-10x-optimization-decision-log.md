@@ -55,6 +55,9 @@ Main benchmark commands used:
 | A13 | Decode tile-sync optimization (boundary-only window sync + incremental lane cache updates + removed redundant lane-zero copies) | Full-window cache sync every token was dominating decode IO at `maxSeq > 32` | Commit `5c016ec`; `/tmp/decode_syncopt_before_max128_20260305`, `/tmp/decode_syncopt_after_max128_20260305`, `/tmp/decode_syncopt_before_max256_20260305`, `/tmp/decode_syncopt_after_max256_20260305` | Large, repeatable IO reduction and throughput gain for tiled decode contexts (`128/256`) while preserving hardware correctness tests | **SHIP** |
 | A14 | Decode runtime option sweep on top of A13 (`queue depth`, `eval path`, `power`, `wired`, `pool`, `late latch`, `fences`, `fw signal`) | Try to stack additional constant-factor wins after tile-sync optimization | `/tmp/decode_syncopt_opts_max128_20260305`, `/tmp/decode_syncopt_confirm_evalpath_max128_20260305` | One-shot sweep suggested `ANE_EVAL_PATH=clientDirect`, but 3x confirmation showed baseline parity/no stable gain (median baseline `~0.672–0.676`, candidate `~0.677–0.679`) | **ABANDON** (no reproducible gain) |
 | A15 | Prefill option combo re-check (`ANE_QUEUE_DEPTH=32` + `ANE_MEMORY_POOL_ID=1`) under sequential runs | Verify whether previous prefill gains hold under non-contented, reproducible setup | `/tmp/prefill_syncopt_baseline_seq_20260305`, `/tmp/prefill_syncopt_combo_qd32_pool1_seq_20260305` | Combo regressed vs baseline (median `1.927` vs `1.855` ms); no bottleneck improvement | **ABANDON** |
+| A16 | Fused decode layer prototype (`decode_attn_probe + decode_ffn` in one kernel behind `ESPRESSO_DECODE_LAYER_MODE=fusedLayer`) | Remove one eval per layer/token and test the biggest remaining decode dispatch lever | Quick split2 baseline `/tmp/decode_fused_cycle1_split2_quick_20260306`; compile stall sample `/tmp/espresso-bench_2026-03-06_014704_vEMy.sample.txt` | Prototype built and unit tests passed, but every fused decode compile stalled inside `_ANEClient compileModel`, including a stripped-down passthrough probe. No artifact directory was produced for the fused attempts. | **ABANDON** (compile instability / unsafe) |
+| A17 | Decode runtime option re-sweep at `maxSeq=32` in clean worktree (`preferCached`, `clientDirect`, queue depth, power, wired) | Re-check whether the current cool baseline still has any unclaimed runtime-option win before more invasive decode work | `/tmp/decode_sweep_max32_quick_20260306` | `preferCached` baseline remained best. Confirmation medians: baseline `0.4888/0.4941/0.4940`, `clientDirect` `0.4955/0.4954/0.4926`; median-of-medians delta `+0.27%` against `clientDirect`. `keepModelWired` regressed hard to median `0.587`. | **ABANDON** (runtime tuning exhausted for this shape) |
+| A18 | Request-level decode input surface rebinding (`attnOut -> ffnIn`, `ffnOut_L -> attnIn_L+1`) with request rebuild and client refresh attempts | Lowest-risk route to remove explicit copy steps and build groundwork for chaining | Hardware tests only; no benchmark artifact shipped because correctness/runtime gate failed before profiling | Undersized-surface rejection worked, but equal-size input rebinding caused private-runtime selector mismatches (`-[__NSArrayM procedureIndex]`, then `-[_ANERequest executionDelay]`) and still fell through to `statusType=0x9` ANE inference errors. Real rebinding is unsafe on this host/runtime. | **ABANDON** (fast rollback required) |
 
 ---
 
@@ -257,10 +260,42 @@ Prefill profile run:
   - One-shot looked faster, but 3x confirmations showed parity/slight regression vs baseline.
   - Evidence: `/tmp/decode_syncopt_opts_max128_20260305`, `/tmp/decode_syncopt_confirm_evalpath_max128_20260305`
   - Decision: `ABANDON`.
+- Clean-worktree decode option re-sweep at `maxSeq=32` also failed to produce a better runtime configuration:
+  - Evidence: `/tmp/decode_sweep_max32_quick_20260306`
+  - Baseline `preferCached` remained best at median `0.486 ms` in the quick pass.
+  - Confirmation median-of-medians:
+    - baseline `preferCached`: `0.4940 ms`
+    - `ANE_EVAL_PATH=clientDirect`: `0.4954 ms`
+  - `clientDirect` therefore regressed by `0.27%`, and `ANE_KEEP_MODEL_WIRED=1` materially regressed to median `0.587 ms`.
+  - Decision: `ABANDON` further runtime knob chasing for this shape until a structural change lands.
 - Prefill high-ROI combo (`ANE_QUEUE_DEPTH=32 + ANE_MEMORY_POOL_ID=1`) regressed in sequential re-check:
   - Baseline median `1.855 ms`
   - Combo median `1.927 ms`
   - Evidence: `/tmp/prefill_syncopt_baseline_seq_20260305`, `/tmp/prefill_syncopt_combo_qd32_pool1_seq_20260305`
+  - Decision: `ABANDON`.
+- Fused decode layer prototype (`ESPRESSO_DECODE_LAYER_MODE=fusedLayer`) was discarded before fairness runs:
+  - Split2 control run: `/tmp/decode_fused_cycle1_split2_quick_20260306`
+    - mean `0.665 ms/token`, median `0.666 ms/token`, p95 `0.716 ms`, p99 `0.769 ms`, throughput `1504 tok/s`
+    - ANE kernel `0.586 ms`, surface I/O `0.020 ms`
+  - Fused attempts:
+    - `ESPRESSO_DECODE_LAYER_MODE=fusedLayer` quick run stalled after `Compiling 1 decode ANE kernels (mode=fusedLayer)...`
+    - `ESPRESSO_DECODE_LAYER_MODE=fusedLayer ESPRESSO_DECODE_ATTN_PROBE_MODE=passthrough` also stalled in the same phase
+    - sample `/tmp/espresso-bench_2026-03-06_014704_vEMy.sample.txt` shows the process blocked under `ane_interop_compile -> -[_ANEInMemoryModel compileWithQoS:options:error:] -> -[_ANEClient compileModel:options:qos:error:]`
+  - Why this matters:
+    - The prototype never reached eval, so the failure is structural compile instability, not a performance regression that can be tuned around with runtime options.
+    - Current quick baseline shows decode token time is still mostly kernel/eval (`0.586 ms`) rather than I/O (`0.020 ms`), so small boundary-copy wins alone will not approach the 6x target.
+  - Decision: `ABANDON` this fused graph shape and revert the prototype before moving to the next decode experiment.
+- Decode request-level input rebinding (`ESPRESSO_DECODE_BIND_INPUT_CHAIN`) was discarded before benchmarking:
+  - Targeted hardware tests:
+    - undersized-surface rejection passed
+    - valid-size rebinding failed in real ANE eval
+  - Failure signatures:
+    - `_ANEClient buffersReadyWithModel:inputBuffers:...` with raw arrays throws `-[__NSArrayM procedureIndex]`
+    - retrying with rebuilt `_ANERequest` throws `-[_ANERequest executionDelay]`
+    - eval still fails with `statusType=0x9: Program Inference error`
+  - Interpretation:
+    - Rebuilding `_ANERequest` is not sufficient to safely rebind decode input surfaces after model load on this host/runtime.
+    - This path is too unstable to benchmark or ship, so it was reverted immediately rather than iterated in the hot path.
   - Decision: `ABANDON`.
 
 ### Invalid/discarded evidence
@@ -285,11 +320,12 @@ Inference: strict decode/prefill regression assessment must be done against the 
 | H# | Hypothesis | Why it could move needle | Expected impact (decode first) | Validation plan | Ship gate |
 |---|---|---|---|---|---|
 | H1 | **Dispatch reduction**: collapse per-token eval count (attn+ffn fusion/chaining) | Current decode still pays 2 evals/layer/token, so host dispatch overhead remains structural | High (largest remaining decode constant-factor lever) | Implement behind flag, run A/B at `maxSeq=32/128/256`, verify hardware correctness tests + parity checks | `SHIP` only if median gain holds across repeated runs (not one-shot) |
-| H2 | **Boundary CPU-touch minimization**: reduce/avoid token pack/unpack copies where safe | Even after A13, boundary copies exist and can add jitter/tail latency | Medium | Add targeted micro-profiler counters around boundary I/O; compare before/after p95/p99 | `SHIP` only if tails and median both improve |
-| H3 | **Stable thermal/fairness protocol**: isolate ANE/CoreML run-order effects | Current strict speedup is sensitive to thermal drift, masking real regression/improvement signal | Medium (measurement quality + defensibility) | Interleaved repeated runs with cooldown windows + median-of-medians reporting | `SHIP` as reporting protocol once reproducible |
-| H4 | **Decode maxSeq scaling by contract-safe tiling variants** | If ANE contract permits wider auxiliary inputs safely, fewer sync events may be needed | Medium-to-high if contract-safe | Probe-guided shape expansion tests, then benchmark only passing families | `SHIP` only with stable eval + correctness |
-| H5 | **Prefill fusion/dispatch tuning only** (no risky option combos) | Prefill appears host-eval dominated; options alone did not hold | Low-to-medium | Evaluate only high-ROI fusion/chaining variants with strict repeated runs | `ITERATE` unless repeatable gain > noise floor |
-| H6 | **Stateful Core ML decode baseline (reported separately)** | Tightens fairness and prevents overstating speedup claims | Reporting impact, not direct speed gain | Add optional baseline mode and keep strict naive baseline unchanged | `SHIP` if stable and reproducible |
+| H2 | **Decode perf-stats + compile/eval attribution** | We need to prove whether remaining decode headroom is host dispatch or kernel execution before deeper interop work | Medium (measurement quality + experiment targeting) | Add decode-side `lastHWExecutionTimeNS`/compile timing into artifacts; compare split2 baseline vs any future structural change | `SHIP` when artifacts expose actionable attribution without changing decode behavior |
+| H3 | **Decode chaining via `_ANEChainingRequest` / `prepareChainingWithModel`** | Request-level rebinding is unsafe, so the next credible dispatch-reduction route is runtime-native chaining | Medium-to-high | Build a minimal hardware proof-of-life on a tiny multi-procedure or chained request path, then only integrate into decode if the primitive works | `SHIP` only after deterministic correctness and repeated median gain |
+| H4 | **Stable thermal/fairness protocol**: isolate ANE/CoreML run-order effects | Current strict speedup is sensitive to thermal drift, masking real regression/improvement signal | Medium (measurement quality + defensibility) | Interleaved repeated runs with cooldown windows + median-of-medians reporting | `SHIP` as reporting protocol once reproducible |
+| H5 | **Decode maxSeq scaling by contract-safe tiling variants** | If ANE contract permits wider auxiliary inputs safely, fewer sync events may be needed | Medium-to-high if contract-safe | Probe-guided shape expansion tests, then benchmark only passing families | `SHIP` only with stable eval + correctness |
+| H6 | **Prefill fusion/dispatch tuning only** (no risky option combos) | Prefill appears host-eval dominated; options alone did not hold | Low-to-medium | Evaluate only high-ROI fusion/chaining variants with strict repeated runs | `ITERATE` unless repeatable gain > noise floor |
+| H7 | **Stateful Core ML decode baseline (reported separately)** | Tightens fairness and prevents overstating speedup claims | Reporting impact, not direct speed gain | Add optional baseline mode and keep strict naive baseline unchanged | `SHIP` if stable and reproducible |
 
 ### Practical ceiling hypothesis (current evidence)
 - With current kernel contract and 2-eval decode dispatch, decode speedups above current `~2x` strict likely require **architectural dispatch reduction (H1)** rather than additional runtime option sweeps.
