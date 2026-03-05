@@ -147,6 +147,7 @@ IOSurfaceRef ane_interop_create_surface(size_t bytes) {
 
 static void ane_interop_remove_tmpdir(NSString *td) {
     if (!td) return;
+    if (getenv("ANE_KEEP_TMPDIR") != NULL) return;
     [[NSFileManager defaultManager] removeItemAtPath:td error:nil];
 }
 
@@ -608,15 +609,29 @@ ANEHandle *ane_interop_compile(const uint8_t *milText, size_t milLen,
         }
 
         id req = nil;
+        SEL reqSelPerfWB = @selector(requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:perfStats:procedureIndex:);
+        SEL reqSelWB = @selector(requestWithInputs:inputIndices:outputs:outputIndices:weightsBuffer:procedureIndex:);
         if (perfStats) {
-            req = ((id(*)(Class,SEL,id,id,id,id,id,id))objc_msgSend)(
-                g_ANEReq, @selector(requestWithInputs:inputIndices:outputs:outputIndices:perfStats:procedureIndex:),
-                wIns, iIdx, wOuts, oIdx, perfStats, @0);
+            if ([g_ANEReq respondsToSelector:reqSelPerfWB]) {
+                req = ((id(*)(Class,SEL,id,id,id,id,id,id,id))objc_msgSend)(
+                    g_ANEReq, reqSelPerfWB, wIns, iIdx, wOuts, oIdx, nil, perfStats, @0);
+            }
+            if (!req) {
+                req = ((id(*)(Class,SEL,id,id,id,id,id,id))objc_msgSend)(
+                    g_ANEReq, @selector(requestWithInputs:inputIndices:outputs:outputIndices:perfStats:procedureIndex:),
+                    wIns, iIdx, wOuts, oIdx, perfStats, @0);
+            }
         } else {
             // If perfStats factory is unavailable but perfStatsMask is set, the driver may attach perfStatsArray.
-            req = ((id(*)(Class,SEL,id,id,id,id,id))objc_msgSend)(
-                g_ANEReq, @selector(requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:),
-                wIns, iIdx, wOuts, oIdx, @0);
+            if ([g_ANEReq respondsToSelector:reqSelWB]) {
+                req = ((id(*)(Class,SEL,id,id,id,id,id,id))objc_msgSend)(
+                    g_ANEReq, reqSelWB, wIns, iIdx, wOuts, oIdx, nil, @0);
+            }
+            if (!req) {
+                req = ((id(*)(Class,SEL,id,id,id,id,id))objc_msgSend)(
+                    g_ANEReq, @selector(requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:),
+                    wIns, iIdx, wOuts, oIdx, @0);
+            }
         }
         if (!req) {
             fprintf(stderr, "ANE compile failed: _ANERequest returned nil\n");

@@ -16,6 +16,38 @@ Goal: iterate aggressively until ANE direct is 10x faster than Core ML across co
 - [ ] Group 8: Autotune harness to sweep combinations and keep best-known results
 - [ ] Group 9: Publish evidence: updated perf report + “why 10x is/isn’t possible” analysis with `hwExecutionTime` floor
 
+## ANE 10x Decode + KV Cache (2026-03-05)
+Goal: land autoregressive decode with persistent FP16 KV-cache surfaces and prove >=10x tokens/sec vs fastest Core ML naive decode baseline.
+
+- [x] Group 0: Add decode tests first (SurfaceIO slice edge-cases, decode state sequencing, hardware-gated decode correctness)
+- [x] Group 1: Add decode MIL generators (`decode_attn_qkv`, `decode_ffn`) with byte-contract and structure tests
+- [x] Group 2: Add runtime decode path (`DecodeKernelSet`, `DecodeSurfaceHandles`, `ForwardPass.runDecodeTimed`) with KV-cache + mask updates
+- [x] Group 3: Add benchmark decode mode (`--decode`, `--decode-steps`, `--decode-max-seq`) and Core ML naive decode baseline
+- [x] Group 4: Emit decode artifacts (`summary.txt`, `summary.json`, per-token latency CSVs, per-layer decode kernel profile CSV)
+- [x] Group 5: Extend prefill profiling with host-vs-hw overhead splits and summary table
+- [ ] Group 6: Verify and capture reproducible evidence (build/tests + benchmark reruns within ±2%)
+
+### Decode Phase Review (2026-03-05)
+- Decode kernels compile (`decode_attn_qkv` + `decode_ffn`) and runtime wiring/CSV/reporting are integrated.
+- Prefill profiling now reports host vs `hwExecutionTime`, host overhead, and lock/body/unlock IO splits per kernel/layer in `summary.txt`, CSV, and `summary.json`.
+- Blocker: decode attention kernel still fails at first ANE eval on this host with:
+  - `statusType=0x9: Program Inference error`
+  - Repro: `ESPRESSO_BENCH_SEED=1 .build/release/espresso-bench --decode --ane-only --warmup 0 --iterations 1 --decode-steps 1 --decode-max-seq 16 --output /tmp/decode_restored_smoke`
+- Additional hard-proof diagnostics completed:
+  - Decode FFN eval fails for lane spatial `< 32` and succeeds for `>= 32` on this host (same `statusType=0x9` failure mode below threshold).
+  - Decode lane-pack runtime path now supports configurable lane width (`ESPRESSO_DECODE_LANE_SPATIAL`, clamped to default `32`) and zero-copy lane packing/unpacking via `copyFP16SpatialSlice`.
+  - `_ANERequest` constructor path now includes `weightsBuffer` selector fallback in `ane_interop.m` (no change to decode failure signature).
+  - Even with a probe decode-attn MIL that bypasses softmax/matmul attention math, decode-attn still fails at first eval (`statusType=0x9`), indicating the blocker is below high-level attention logic and likely in a lower-level ANE decode-kernel compatibility constraint.
+- Next step: isolate the smallest eval-passing vs eval-failing multi-input MIL shape family (especially mixed input tensors and lane-packed outputs), then re-expand toward full decode attention.
+
+### Decode Artifact Index (to fill during execution)
+- [ ] `OUTPUT_DIR/summary.txt`
+- [ ] `OUTPUT_DIR/summary.json`
+- [ ] `OUTPUT_DIR/ane_decode_token_latencies.csv`
+- [ ] `OUTPUT_DIR/ane_decode_kernel_profile.csv`
+- [ ] `OUTPUT_DIR/coreml_decode_all_token_latencies.csv`
+- [ ] `OUTPUT_DIR/coreml_decode_cpu_and_neural_engine_token_latencies.csv`
+
 ## Benchmark Suite v1 (2026-03-05)
 - [x] Task 1: Add EspressoBench target scaffold to Package.swift
 - [x] Task 2: BenchmarkRunner — measurement harness (stats, signposts, progress)
