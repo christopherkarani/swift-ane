@@ -265,6 +265,10 @@ Prefill profile run:
 
 ### Invalid/discarded evidence
 - Parallel prefill benchmark invocation was discarded as non-defensible due host contention; only sequential reruns are used for conclusions in this document.
+- Cross-worktree compare to `main` (`f2d1da0`) on this host cannot produce decode/prefill parity numbers because:
+  - `main` does not include the `espresso-bench` product (`swift build -c release --product espresso-bench` fails: `no product named 'espresso-bench'`).
+  - The only shared perf test (`test_100_steps_benchmark`) is M4-gated and skips on Apple M3 Max in both worktrees.
+Inference: strict decode/prefill regression assessment must be done against the nearest benchmark-capable base in this branch lineage, not `main`, on this host.
 
 ---
 
