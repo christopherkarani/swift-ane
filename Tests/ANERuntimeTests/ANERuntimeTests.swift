@@ -1154,7 +1154,8 @@ final class ANERuntimeTests: XCTestCase {
         let layerWeights = LayerWeights()
         fillLayerWeights(layerWeights, value: 0.01)
 
-        let maxSeq = DecodeKernelSet.defaultLaneSpatial
+        let lane = DecodeKernelSet.defaultLaneSpatial
+        let maxSeq = lane * 4
         let specs = DecodeKernelSet.compileSpecs(weights: layerWeights, maxSeq: maxSeq)
         XCTAssertEqual(specs.count, 2)
 
@@ -1163,8 +1164,6 @@ final class ANERuntimeTests: XCTestCase {
             XCTFail("Missing decode compile specs")
             return
         }
-        let lane = DecodeKernelSet.defaultLaneSpatial
-
         XCTAssertEqual(
             attn.weights.map(\.path),
             [
@@ -1179,9 +1178,9 @@ final class ANERuntimeTests: XCTestCase {
             attn.inputSizes,
             [
                 ModelConfig.dim * lane * 2,
-                ModelConfig.dim * maxSeq * 2,
-                ModelConfig.dim * maxSeq * 2,
-                ModelConfig.dim * maxSeq * 2,
+                ModelConfig.dim * lane * 2,
+                ModelConfig.dim * lane * 2,
+                ModelConfig.dim * lane * 2,
             ]
         )
         XCTAssertEqual(

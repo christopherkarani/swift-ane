@@ -10,17 +10,22 @@ public struct DecodeSurfaceHandles {
     public let kCache: IOSurfaceRef
     public let vCache: IOSurfaceRef
     public let maskCache: IOSurfaceRef
+    public let kCacheFull: IOSurfaceRef
+    public let vCacheFull: IOSurfaceRef
+    public let maskCacheFull: IOSurfaceRef
     public let attnX2Out: IOSurfaceRef
     public let attnKOut: IOSurfaceRef
     public let attnVOut: IOSurfaceRef
     public let ffnIn: IOSurfaceRef
     public let ffnOut: IOSurfaceRef
     public let zeroLane: IOSurfaceRef
+    public let maskedLane: IOSurfaceRef
     public let tokenScratch: IOSurfaceRef
     public let maxSeq: Int
+    public let kernelMaxSeq: Int
     public let laneSpatial: Int
 
-    public init(kernels: borrowing DecodeKernelSet) throws(ANEError) {
+    public init(kernels: borrowing DecodeKernelSet, logicalMaxSeq: Int? = nil) throws(ANEError) {
         self.attnIn = try kernels.decodeAttnQKV.inputSurface(at: 0)
         self.kCache = try kernels.decodeAttnQKV.inputSurface(at: 1)
         self.vCache = try kernels.decodeAttnQKV.inputSurface(at: 2)
@@ -30,19 +35,42 @@ public struct DecodeSurfaceHandles {
         self.attnVOut = try kernels.decodeAttnQKV.outputSurface(at: 2)
         self.ffnIn = try kernels.decodeFFN.inputSurface(at: 0)
         self.ffnOut = try kernels.decodeFFN.outputSurface(at: 0)
-        self.maxSeq = kernels.maxSeq
+        self.maxSeq = logicalMaxSeq ?? kernels.maxSeq
+        self.kernelMaxSeq = kernels.kernelMaxSeq
         self.laneSpatial = kernels.laneSpatial
 
         guard let zeroLane = ane_interop_create_surface(ModelConfig.dim * kernels.laneSpatial * 2),
+              let maskedLane = ane_interop_create_surface(ModelConfig.dim * kernels.laneSpatial * 2),
               let tokenScratch = ane_interop_create_surface(ModelConfig.dim * 2) else {
             throw .surfaceAllocationFailed
         }
         self.zeroLane = zeroLane
+        self.maskedLane = maskedLane
         self.tokenScratch = tokenScratch
 
+        if self.maxSeq == self.kernelMaxSeq {
+            self.kCacheFull = self.kCache
+            self.vCacheFull = self.vCache
+            self.maskCacheFull = self.maskCache
+        } else {
+            guard let kCacheFull = ane_interop_create_surface(ModelConfig.dim * self.maxSeq * 2),
+                  let vCacheFull = ane_interop_create_surface(ModelConfig.dim * self.maxSeq * 2),
+                  let maskCacheFull = ane_interop_create_surface(ModelConfig.dim * self.maxSeq * 2) else {
+                throw .surfaceAllocationFailed
+            }
+            self.kCacheFull = kCacheFull
+            self.vCacheFull = vCacheFull
+            self.maskCacheFull = maskCacheFull
+        }
+
         let zeroLaneValues = Array(repeating: Float(0), count: ModelConfig.dim * kernels.laneSpatial)
+        let maskFill: Float = ProcessInfo.processInfo.environment["ESPRESSO_DECODE_MASK_INIT_ZERO"] == "1" ? 0 : -1e4
+        let maskedLaneValues = Array(repeating: maskFill, count: ModelConfig.dim * kernels.laneSpatial)
         zeroLaneValues.withUnsafeBufferPointer { src in
             SurfaceIO.writeFP16(to: zeroLane, data: src, channels: ModelConfig.dim, spatial: kernels.laneSpatial)
+        }
+        maskedLaneValues.withUnsafeBufferPointer { src in
+            SurfaceIO.writeFP16(to: maskedLane, data: src, channels: ModelConfig.dim, spatial: kernels.laneSpatial)
         }
     }
 }
@@ -80,6 +108,20 @@ public struct DecodeState: Sendable {
 
     public mutating func reset() {
         step = 0
+    }
+}
+
+enum DecodeTiling {
+    @inline(__always)
+    static func windowBase(for tokenIndex: Int, laneSpatial: Int) -> Int {
+        precondition(tokenIndex >= 0)
+        precondition(laneSpatial > 0)
+        return (tokenIndex / laneSpatial) * laneSpatial
+    }
+
+    @inline(__always)
+    static func localIndex(for tokenIndex: Int, laneSpatial: Int) -> Int {
+        tokenIndex - windowBase(for: tokenIndex, laneSpatial: laneSpatial)
     }
 }
 
@@ -194,6 +236,94 @@ public final class DecodeKernelProfiler: @unchecked Sendable {
 }
 
 public extension ForwardPass {
+    private static func synchronizeDecodeWindowCaches(
+        handles: DecodeSurfaceHandles,
+        windowBase: Int,
+        dim: Int
+    ) throws(ANEError) {
+        let windowSpatial = handles.kernelMaxSeq
+        for windowIndex in 0..<windowSpatial {
+            let globalIndex = windowBase + windowIndex
+            if globalIndex < handles.maxSeq {
+                do {
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.kCache,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.kCacheFull,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: globalIndex,
+                        srcSpatial: handles.maxSeq,
+                        channels: dim
+                    )
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.vCache,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.vCacheFull,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: globalIndex,
+                        srcSpatial: handles.maxSeq,
+                        channels: dim
+                    )
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.maskCache,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.maskCacheFull,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: globalIndex,
+                        srcSpatial: handles.maxSeq,
+                        channels: dim
+                    )
+                } catch {
+                    throw .invalidArguments("decode cache window sync failed at globalIndex=\(globalIndex): \(error)")
+                }
+            } else {
+                do {
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.kCache,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.zeroLane,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: 0,
+                        srcSpatial: handles.laneSpatial,
+                        channels: dim
+                    )
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.vCache,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.zeroLane,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: 0,
+                        srcSpatial: handles.laneSpatial,
+                        channels: dim
+                    )
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.maskCache,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.maskedLane,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: 0,
+                        srcSpatial: handles.laneSpatial,
+                        channels: dim
+                    )
+                } catch {
+                    throw .invalidArguments("decode padded-window fill failed at windowIndex=\(windowIndex): \(error)")
+                }
+            }
+        }
+    }
+
     static func initializeDecodeCachesAndMask(
         surfaceHandles: [DecodeSurfaceHandles],
         dim: Int = ModelConfig.dim
@@ -210,11 +340,18 @@ public extension ForwardPass {
         for handles in surfaceHandles {
             precondition(handles.maxSeq == maxSeq)
             zeroCache.withUnsafeBufferPointer { src in
-                SurfaceIO.writeFP16(to: handles.kCache, data: src, channels: dim, spatial: maxSeq)
-                SurfaceIO.writeFP16(to: handles.vCache, data: src, channels: dim, spatial: maxSeq)
+                SurfaceIO.writeFP16(to: handles.kCacheFull, data: src, channels: dim, spatial: maxSeq)
+                SurfaceIO.writeFP16(to: handles.vCacheFull, data: src, channels: dim, spatial: maxSeq)
             }
             masked.withUnsafeBufferPointer { src in
-                SurfaceIO.writeFP16(to: handles.maskCache, data: src, channels: dim, spatial: maxSeq)
+                SurfaceIO.writeFP16(to: handles.maskCacheFull, data: src, channels: dim, spatial: maxSeq)
+            }
+            if handles.maxSeq != handles.kernelMaxSeq {
+                do {
+                    try synchronizeDecodeWindowCaches(handles: handles, windowBase: 0, dim: dim)
+                } catch {
+                    preconditionFailure("decode window init failed: \(error)")
+                }
             }
             do {
                 try SurfaceIO.copyFP16(
@@ -259,10 +396,13 @@ public extension ForwardPass {
 
         let tokenIndex = try decodeState.beginTokenStep()
         let laneSpatial = surfaceHandles[0].laneSpatial
+        let kernelMaxSeq = surfaceHandles[0].kernelMaxSeq
         precondition(laneSpatial > 0)
         for handles in surfaceHandles {
             precondition(handles.laneSpatial == laneSpatial)
+            precondition(handles.kernelMaxSeq == kernelMaxSeq)
         }
+        let windowBase = DecodeTiling.windowBase(for: tokenIndex, laneSpatial: kernelMaxSeq)
 
         // CPU touch at decode boundary: write token embedding/state to a compact token scratch surface.
         var t0 = RuntimeClock.now()
@@ -297,6 +437,13 @@ public extension ForwardPass {
         for L in 0..<kernels.count {
             let handles = surfaceHandles[L]
             let selfMaskUpdateUS: Double = 0
+
+            if handles.maxSeq != handles.kernelMaxSeq {
+                t0 = RuntimeClock.now()
+                try synchronizeDecodeWindowCaches(handles: handles, windowBase: windowBase, dim: dim)
+                let windowSyncDelta = RuntimeClock.now() - t0
+                timings.tIO += RuntimeClock.ms(windowSyncDelta)
+            }
 
             if ProcessInfo.processInfo.environment["DECODE_EVAL_FFN_ONLY"] == "1" {
                 t0 = RuntimeClock.now()
@@ -346,7 +493,7 @@ public extension ForwardPass {
             t0 = RuntimeClock.now()
             do {
                 try SurfaceIO.copyFP16SpatialSlice(
-                    dst: handles.kCache,
+                    dst: handles.kCacheFull,
                     dstChannelOffset: 0,
                     dstSpatialIndex: tokenIndex,
                     dstSpatial: maxSeq,
@@ -367,7 +514,7 @@ public extension ForwardPass {
             t0 = RuntimeClock.now()
             do {
                 try SurfaceIO.copyFP16SpatialSlice(
-                    dst: handles.vCache,
+                    dst: handles.vCacheFull,
                     dstChannelOffset: 0,
                     dstSpatialIndex: tokenIndex,
                     dstSpatial: maxSeq,
@@ -388,7 +535,7 @@ public extension ForwardPass {
             t0 = RuntimeClock.now()
             do {
                 try SurfaceIO.copyFP16SpatialSlice(
-                    dst: handles.maskCache,
+                    dst: handles.maskCacheFull,
                     dstChannelOffset: 0,
                     dstSpatialIndex: tokenIndex,
                     dstSpatial: maxSeq,

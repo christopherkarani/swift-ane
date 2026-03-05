@@ -25,7 +25,10 @@ public struct DecodeKernelSet: ~Copyable {
     public let decodeAttnQKV: ANEKernel
     public let decodeFFN: ANEKernel
 
+    /// Logical decode context size requested by caller.
     public let maxSeq: Int
+    /// Max sequence width compiled into decode-attention kernel inputs.
+    public let kernelMaxSeq: Int
     public let laneSpatial: Int
 
     @inline(__always)
@@ -35,10 +38,17 @@ public struct DecodeKernelSet: ~Copyable {
         }
     }
 
-    private init(decodeAttnQKV: consuming ANEKernel, decodeFFN: consuming ANEKernel, maxSeq: Int, laneSpatial: Int) {
+    private init(
+        decodeAttnQKV: consuming ANEKernel,
+        decodeFFN: consuming ANEKernel,
+        logicalMaxSeq: Int,
+        kernelMaxSeq: Int,
+        laneSpatial: Int
+    ) {
         self.decodeAttnQKV = decodeAttnQKV
         self.decodeFFN = decodeFFN
-        self.maxSeq = maxSeq
+        self.maxSeq = logicalMaxSeq
+        self.kernelMaxSeq = kernelMaxSeq
         self.laneSpatial = laneSpatial
     }
 
@@ -47,19 +57,30 @@ public struct DecodeKernelSet: ~Copyable {
             throw .invalidArguments("decode maxSeq must be > 0")
         }
         let laneSpatial = Self.resolvedLaneSpatialForCurrentProcess()
-        guard maxSeq == laneSpatial else {
-            throw .invalidArguments("decode maxSeq (\(maxSeq)) must equal laneSpatial (\(laneSpatial)) on current ANE path")
+        guard maxSeq >= laneSpatial else {
+            throw .invalidArguments("decode maxSeq (\(maxSeq)) must be >= laneSpatial (\(laneSpatial))")
         }
-        let compiledAttn = try Self.compileDecodeAttnQKV(weights: weights, maxSeq: maxSeq, laneSpatial: laneSpatial)
+        guard maxSeq % laneSpatial == 0 else {
+            throw .invalidArguments("decode maxSeq (\(maxSeq)) must be a multiple of laneSpatial (\(laneSpatial))")
+        }
+        let kernelMaxSeq = laneSpatial
+        let compiledAttn = try Self.compileDecodeAttnQKV(weights: weights, maxSeq: kernelMaxSeq, laneSpatial: laneSpatial)
         let compiledFFN = try Self.compileDecodeFFN(weights: weights, laneSpatial: laneSpatial)
-        self.init(decodeAttnQKV: compiledAttn, decodeFFN: compiledFFN, maxSeq: maxSeq, laneSpatial: laneSpatial)
+        self.init(
+            decodeAttnQKV: compiledAttn,
+            decodeFFN: compiledFFN,
+            logicalMaxSeq: maxSeq,
+            kernelMaxSeq: kernelMaxSeq,
+            laneSpatial: laneSpatial
+        )
     }
 
     internal static func compileSpecs(weights: borrowing LayerWeights, maxSeq: Int) -> [CompileSpec] {
         let laneSpatial = resolvedLaneSpatialForCurrentProcess()
-        precondition(maxSeq == laneSpatial)
+        precondition(maxSeq > 0)
+        precondition(maxSeq >= laneSpatial)
         return [
-            makeDecodeAttnQKVSpec(weights: weights, maxSeq: maxSeq, laneSpatial: laneSpatial),
+            makeDecodeAttnQKVSpec(weights: weights, maxSeq: laneSpatial, laneSpatial: laneSpatial),
             makeDecodeFFNSpec(weights: weights, laneSpatial: laneSpatial),
         ]
     }

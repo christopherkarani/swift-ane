@@ -37,4 +37,34 @@ final class DecodeStateTests: XCTestCase {
         var mismatch = try DecodeState(maxSeq: 2)
         XCTAssertThrowsError(try mismatch.commitTokenStep(expectedIndex: 1))
     }
+
+    func test_decode_tiling_window_base_and_local_index() {
+        let lane = 32
+        XCTAssertEqual(DecodeTiling.windowBase(for: 0, laneSpatial: lane), 0)
+        XCTAssertEqual(DecodeTiling.windowBase(for: 31, laneSpatial: lane), 0)
+        XCTAssertEqual(DecodeTiling.windowBase(for: 32, laneSpatial: lane), 32)
+        XCTAssertEqual(DecodeTiling.windowBase(for: 63, laneSpatial: lane), 32)
+        XCTAssertEqual(DecodeTiling.windowBase(for: 64, laneSpatial: lane), 64)
+
+        XCTAssertEqual(DecodeTiling.localIndex(for: 0, laneSpatial: lane), 0)
+        XCTAssertEqual(DecodeTiling.localIndex(for: 31, laneSpatial: lane), 31)
+        XCTAssertEqual(DecodeTiling.localIndex(for: 32, laneSpatial: lane), 0)
+        XCTAssertEqual(DecodeTiling.localIndex(for: 63, laneSpatial: lane), 31)
+        XCTAssertEqual(DecodeTiling.localIndex(for: 64, laneSpatial: lane), 0)
+    }
+
+    func test_decode_tiling_covers_full_range_for_logical_max_seq() {
+        let lane = 32
+        let maxSeq = lane * 4
+
+        for tokenIndex in 0..<maxSeq {
+            let base = DecodeTiling.windowBase(for: tokenIndex, laneSpatial: lane)
+            let local = DecodeTiling.localIndex(for: tokenIndex, laneSpatial: lane)
+            XCTAssertGreaterThanOrEqual(base, 0)
+            XCTAssertEqual(base % lane, 0)
+            XCTAssertGreaterThanOrEqual(local, 0)
+            XCTAssertLessThan(local, lane)
+            XCTAssertEqual(base + local, tokenIndex)
+        }
+    }
 }

@@ -262,9 +262,14 @@ enum ANEDirectBench {
             throw ANEError.invalidArguments("decodeMaxSeq must be > 1")
         }
         let decodeLaneSpatial = DecodeKernelSet.resolvedLaneSpatialForCurrentProcess()
-        guard decodeMaxSeq == decodeLaneSpatial else {
+        guard decodeMaxSeq >= decodeLaneSpatial else {
             throw ANEError.invalidArguments(
-                "decodeMaxSeq (\(decodeMaxSeq)) must equal decode lane spatial (\(decodeLaneSpatial)) on the current ANE decode path; set --decode-max-seq \(decodeLaneSpatial)"
+                "decodeMaxSeq (\(decodeMaxSeq)) must be >= decode lane spatial (\(decodeLaneSpatial))"
+            )
+        }
+        guard decodeMaxSeq % decodeLaneSpatial == 0 else {
+            throw ANEError.invalidArguments(
+                "decodeMaxSeq (\(decodeMaxSeq)) must be a multiple of decode lane spatial (\(decodeLaneSpatial))"
             )
         }
         guard decodeSteps <= decodeMaxSeq else {
@@ -302,7 +307,7 @@ enum ANEDirectBench {
         var handles: [DecodeSurfaceHandles] = []
         handles.reserveCapacity(nLayers)
         for i in 0..<nLayers {
-            handles.append(try DecodeSurfaceHandles(kernels: kernels[i]))
+            handles.append(try DecodeSurfaceHandles(kernels: kernels[i], logicalMaxSeq: decodeMaxSeq))
         }
 
         // 4. Pre-generate token embeddings for one sequence

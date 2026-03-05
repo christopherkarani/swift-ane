@@ -132,7 +132,7 @@ struct BenchmarkOptions {
           --inference-only   Run inference benchmark only (skips training benchmark to save compile budget)
           --decode-steps N   Decode tokens per sequence (default: 32)
           --decode-max-seq N Decode KV-cache max sequence length (default: 32)
-                            (current ANE decode path requires decode-max-seq == 32)
+                            (must be >= decode lane width and currently a multiple of that width)
           --profile-kernels  Record per-kernel stage timing (us) and save CSV
           --sustained        Run 60-second sustained thermal test
           --warmup N         Warmup iterations (default: 50)
