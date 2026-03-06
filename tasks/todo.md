@@ -64,3 +64,11 @@
 - Baseline/post benchmark: not recorded because the path never reached a measurable steady-state eval.
 - Savings: +0.000ms/token.
 - Cumulative savings after Avenue 2: 0.000ms/token.
+
+### Avenue 3 review
+- Status: abandoned for now
+- Positive result: zero-copy IOSurface-backed `MTLBuffer` binding works, and standalone Metal SDPA runs correctly.
+- Measured standalone Metal attention: mean `0.395252 ms/eval`, median `0.217437 ms/eval` at `heads=12`, `headDim=64`, `seqLen=32` with `mach_absolute_time()` timing.
+- Baseline ANE attention on the decode path: `201.516 us/layer` average from the 6-layer decode kernel profile.
+- Integration blocker: `DecodeKernelSet.decodeAttnQKV` already performs attention math internally, so a real hybrid path requires a new ANE QKV-only kernel before Metal can be inserted.
+- Net effect for this pass: no landed decode savings.

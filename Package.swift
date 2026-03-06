@@ -57,7 +57,11 @@ let package = Package(
             dependencies: ["ANERuntime", "CPUOps", "ANETypes"],
             path: "Sources/Espresso",
             swiftSettings: [.swiftLanguageMode(.v6)],
-            linkerSettings: [.linkedFramework("Accelerate")]
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+                .linkedFramework("IOSurface"),
+                .linkedFramework("Metal"),
+            ]
         ),
         .executableTarget(
             name: "EspressoTrain",

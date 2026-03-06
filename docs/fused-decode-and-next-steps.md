@@ -308,7 +308,7 @@ budget (which is capped at ~100 per process) and surface memory.
 |--------|--------|----------------|------------|
 | 1. Multi-layer fusion | abandoned (`InvalidMILProgram` on full pack and K/V-only fallback) | +0.000ms | 0.000ms |
 | 2. Metal SharedEvent | abandoned | +0.000ms | 0.000ms |
-| 3. Metal+ANE hybrid | pending | pending | 0.000ms |
+| 3. Metal+ANE hybrid | abandoned | +0.000ms | 0.000ms |
 | 4. CoreML baseline | pending | N/A | N/A |
 | 5. Speculative decode | pending | pending | 0.000ms |
 | 6. GCD pipeline | pending | pending | 0.000ms |
@@ -378,3 +378,50 @@ Timing:
 - Post measurement: not recorded.
 - Delta: +0.000ms/token.
 - Cumulative savings after Avenue 2: 0.000ms/token.
+
+## 9. Avenue 3 Result — Metal + ANE Hybrid Decode (ABANDONED FOR NOW)
+
+Date: 2026-03-06
+
+What I built:
+- Added `MetalAttentionKernel` as a standalone Metal SDPA stage using three compute kernels (`logits`, `softmax`, `output`).
+- Bound IOSurface memory into Metal via `MTLDevice.makeBuffer(bytesNoCopy:...)` so Q/K/V/mask/output all stay zero-copy.
+- Added correctness and benchmark tests around the standalone Metal path.
+
+TDD:
+- Wrote `MetalAttentionKernelTests` first.
+- Initial test run failed at compile time because `MetalAttentionShape` / `MetalAttentionKernel` did not exist.
+- After implementation, correctness matched the CPU reference and the benchmark probe passed.
+
+Baseline before changes:
+- Direct ANE decode benchmark, 6 layers, `steps=32`, `maxSeq=32`, `warmup=3`, `iterations=20`:
+  - Median: `2.860 ms/token`
+  - Mean: `2.840 ms/token`
+  - ANE kernel time: `2.525 ms/token`
+- Per-layer decode profile on the same run:
+  - Average ANE attention eval: `201.516 us/layer`
+  - Average ANE FFN eval: approximately `219-221 us/layer`
+
+Post measurement:
+- Standalone Metal attention benchmark, `heads=12`, `headDim=64`, `seqLen=32`, `warmup=3`, `iterations=20`, timed with `mach_absolute_time()`:
+  - Mean: `0.395252 ms/eval`
+  - Median: `0.217437 ms/eval`
+  - Zero-copy IOSurface bindings: `true`
+
+Delta:
+- Naive stage substitution comparison:
+  - Current ANE attention: `0.201516 ms/layer`
+  - Metal attention: `0.217437 ms/layer`
+  - Savings: `0.201516 - 0.217437 = -0.015921 ms/layer` (`-7.9%`)
+- Extrapolated over a full 6-layer decode with no overlap: `-0.095526 ms/token` regression.
+
+Why this avenue is abandoned for now:
+- The zero-copy gate passed, which is useful.
+- But the current decode path cannot actually swap ANE attention math for Metal attention math in place.
+- `DecodeKernelSet.decodeAttnQKV` already performs attention internally and only exposes post-attention `attnX2Out` plus K/V outputs.
+- A real hybrid decode needs a new ANE QKV-only stage before Metal can own `Q@K^T -> softmax -> @V`.
+- That kernel split is a larger follow-on effort, so this avenue is documented as promising but abandoned in this pass.
+
+Timing impact recorded for this pass:
+- Landed decode savings: `+0.000 ms/token`
+- Cumulative savings after Avenue 3: `0.000 ms/token`
