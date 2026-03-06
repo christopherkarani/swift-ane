@@ -72,3 +72,11 @@
 - Baseline ANE attention on the decode path: `201.516 us/layer` average from the 6-layer decode kernel profile.
 - Integration blocker: `DecodeKernelSet.decodeAttnQKV` already performs attention math internally, so a real hybrid path requires a new ANE QKV-only kernel before Metal can be inserted.
 - Net effect for this pass: no landed decode savings.
+
+### Avenue 4 review
+- Status: measured
+- Exporter fix: `scripts/generate_coreml_model.py` now supports `--layers` and `--output`, and produced `benchmarks/models/transformer_6layer.mlpackage`.
+- Direct ANE decode median: `2.875 ms/token`.
+- CoreML `.cpuAndNeuralEngine` median: `3.007 ms/token`.
+- Speedup vs CoreML `.cpuAndNeuralEngine`: `1.05x`.
+- Strict fastest-CoreML speedup observed in the same run: `1.04x`.

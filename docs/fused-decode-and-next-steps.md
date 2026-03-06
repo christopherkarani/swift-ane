@@ -309,13 +309,13 @@ budget (which is capped at ~100 per process) and surface memory.
 | 1. Multi-layer fusion | abandoned (`InvalidMILProgram` on full pack and K/V-only fallback) | +0.000ms | 0.000ms |
 | 2. Metal SharedEvent | abandoned | +0.000ms | 0.000ms |
 | 3. Metal+ANE hybrid | abandoned | +0.000ms | 0.000ms |
-| 4. CoreML baseline | pending | N/A | N/A |
+| 4. CoreML baseline | measured | N/A | 0.000ms |
 | 5. Speculative decode | pending | pending | 0.000ms |
 | 6. GCD pipeline | pending | pending | 0.000ms |
 
-Direct ANE: 2.574ms/token
-CoreML:     pending
-Speedup:    pending
+Direct ANE: 2.875ms/token
+CoreML:     3.007ms/token
+Speedup:    1.05x
 | 3 | Metal + ANE hybrid decode | Potentially 2-4x (parallel accelerators) | Large | Medium |
 | 4 | Metal SharedEvent on standard eval | True async dispatch | Medium | Medium |
 | 5 | Speculative decoding | 3-5x algorithmic | Large | Low |
@@ -425,3 +425,46 @@ Why this avenue is abandoned for now:
 Timing impact recorded for this pass:
 - Landed decode savings: `+0.000 ms/token`
 - Cumulative savings after Avenue 3: `0.000 ms/token`
+
+## 10. Avenue 4 Result — CoreML Baseline Benchmark (MEASURED)
+
+Date: 2026-03-06
+
+What changed:
+- Extended `scripts/generate_coreml_model.py` to support `--layers` and `--output`.
+- Generated a 6-layer CoreML package at `benchmarks/models/transformer_6layer.mlpackage`.
+- Benchmarked decode on the same 6-layer, `steps=32`, `maxSeq=32` workload used for direct ANE.
+
+TDD / pre-change failure:
+- The original exporter ignored `--layers 6 --output ...` and still wrote the default single-layer model to `benchmarks/models/transformer_layer.mlpackage`.
+- After the exporter change, the same command produced the requested 6-layer package.
+
+Benchmark configuration:
+- Warmup: `5` sequences
+- Timed: `100` sequences (`3200` measured tokens)
+- Decode schedule: `steps=32`, `maxSeq=32`
+- CoreML model: `benchmarks/models/transformer_6layer.mlpackage`
+
+Measured results:
+- Direct ANE decode:
+  - Mean: `3.098 ms/token`
+  - Median: `2.875 ms/token`
+- CoreML Decode (`.all`):
+  - Mean: `3.005 ms/token`
+  - Median: `2.992 ms/token`
+- CoreML Decode (`.cpuAndNeuralEngine`):
+  - Mean: `3.017 ms/token`
+  - Median: `3.007 ms/token`
+
+Speedup vs CoreML `.cpuAndNeuralEngine`:
+- `3.007 - 2.875 = 0.132 ms/token` saved
+- Relative speedup: `3.007 / 2.875 = 1.05x`
+
+Strict fastest-CoreML gate:
+- Fastest CoreML median observed: `.all` at `2.992 ms/token`
+- Direct ANE median: `2.875 ms/token`
+- Speedup vs fastest CoreML: `1.04x`
+
+Interpretation:
+- The direct `_ANEClient` path currently beats CoreML on this workload, but only narrowly.
+- The current project is far from the `4x over CoreML` target; the measured headroom is about `5%` over `.cpuAndNeuralEngine` and `4%` over the fastest CoreML configuration observed here.

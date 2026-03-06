@@ -4,22 +4,24 @@
 Dimensions (from ModelConfig):
   dim=768, hidden=2048, seqLen=256, heads=12, headDim=64
 
-Architecture (single layer):
+Architecture:
+  Repeats the Espresso transformer block N times:
   1. RMSNorm -> QKV Projection -> SDPA -> Output Projection + Residual
   2. RMSNorm -> SwiGLU FFN (W1, W3, SiLU gate, W2) + Residual
 
 Usage:
-  pip install coremltools numpy
-  python3 scripts/generate_coreml_model.py
-  # Output: benchmarks/models/transformer_layer.mlpackage
+  /private/tmp/coremltools-venv312/bin/python3.12 scripts/generate_coreml_model.py --layers 6
+  # Output: benchmarks/models/transformer_6layer.mlpackage
 """
+
+import argparse
+import os
+import pathlib
 
 import coremltools as ct
 from coremltools.converters.mil import Builder as mb
 from coremltools.converters.mil.mil import types
 import numpy as np
-import os
-import pathlib
 
 # Match ModelConfig exactly
 DIM = 768
@@ -27,136 +29,141 @@ HIDDEN = 2048
 SEQ_LEN = 256
 HEADS = 12
 HEAD_DIM = DIM // HEADS
+WEIGHT_SCALE = 0.02
+RNG = np.random.default_rng(1234)
 
 
-def build_transformer_layer():
-    """Build a single transformer layer using coremltools MIL builder."""
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate a Core ML transformer model for Espresso benchmarks.")
+    parser.add_argument("--layers", type=int, default=1, help="Number of transformer layers to stack")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output .mlpackage path (defaults to benchmarks/models/transformer_<layers>layer.mlpackage)",
+    )
+    return parser.parse_args()
 
+
+def random_weight(shape):
+    return (RNG.standard_normal(shape).astype(np.float16) * WEIGHT_SCALE)
+
+
+def rms_norm(x, prefix: str):
+    weight = mb.const(
+        val=np.ones((1, DIM, 1, 1), dtype=np.float16),
+        name=f"{prefix}_weight",
+    )
+    x_sq = mb.mul(x=x, y=x, name=f"{prefix}_sq")
+    x_mean = mb.reduce_mean(x=x_sq, axes=[1], keep_dims=True, name=f"{prefix}_mean")
+    eps = mb.const(val=np.float16(1e-5), name=f"{prefix}_eps")
+    x_mean_eps = mb.add(x=x_mean, y=eps, name=f"{prefix}_mean_eps")
+    x_rsqrt = mb.rsqrt(x=x_mean_eps, name=f"{prefix}_rsqrt")
+    x_norm_pre = mb.mul(x=x, y=x_rsqrt, name=f"{prefix}_norm_pre")
+    return mb.mul(x=x_norm_pre, y=weight, name=f"{prefix}_norm")
+
+
+def transformer_block(x, layer_index: int):
+    prefix = f"l{layer_index}"
+
+    x_norm = rms_norm(x, f"{prefix}_rms_att")
+
+    wq = mb.const(val=random_weight((DIM, DIM, 1, 1)), name=f"{prefix}_wq")
+    wk = mb.const(val=random_weight((DIM, DIM, 1, 1)), name=f"{prefix}_wk")
+    wv = mb.const(val=random_weight((DIM, DIM, 1, 1)), name=f"{prefix}_wv")
+
+    q = mb.conv(x=x_norm, weight=wq, name=f"{prefix}_q_proj")
+    k = mb.conv(x=x_norm, weight=wk, name=f"{prefix}_k_proj")
+    v = mb.conv(x=x_norm, weight=wv, name=f"{prefix}_v_proj")
+
+    q_r = mb.reshape(x=q, shape=[1, HEADS, HEAD_DIM, SEQ_LEN], name=f"{prefix}_q_reshape")
+    k_r = mb.reshape(x=k, shape=[1, HEADS, HEAD_DIM, SEQ_LEN], name=f"{prefix}_k_reshape")
+    v_r = mb.reshape(x=v, shape=[1, HEADS, HEAD_DIM, SEQ_LEN], name=f"{prefix}_v_reshape")
+
+    q_t = mb.transpose(x=q_r, perm=[0, 1, 3, 2], name=f"{prefix}_q_transpose")
+    v_t = mb.transpose(x=v_r, perm=[0, 1, 3, 2], name=f"{prefix}_v_transpose")
+
+    scale = mb.const(val=np.float16(1.0 / np.sqrt(HEAD_DIM)), name=f"{prefix}_scale")
+    scores = mb.matmul(x=q_t, y=k_r, name=f"{prefix}_attn_scores_raw")
+    scores = mb.mul(x=scores, y=scale, name=f"{prefix}_attn_scores")
+
+    mask_np = np.triu(np.full((SEQ_LEN, SEQ_LEN), -1e4, dtype=np.float16), k=1)
+    mask = mb.const(val=mask_np.reshape(1, 1, SEQ_LEN, SEQ_LEN), name=f"{prefix}_causal_mask")
+    scores = mb.add(x=scores, y=mask, name=f"{prefix}_attn_scores_masked")
+
+    attn_weights = mb.softmax(x=scores, axis=-1, name=f"{prefix}_attn_weights")
+    attn_out = mb.matmul(x=attn_weights, y=v_t, name=f"{prefix}_attn_out_heads")
+    attn_out = mb.transpose(x=attn_out, perm=[0, 1, 3, 2], name=f"{prefix}_attn_out_transpose")
+    attn_out = mb.reshape(x=attn_out, shape=[1, DIM, 1, SEQ_LEN], name=f"{prefix}_attn_out_concat")
+
+    wo = mb.const(val=random_weight((DIM, DIM, 1, 1)), name=f"{prefix}_wo")
+    o_out = mb.conv(x=attn_out, weight=wo, name=f"{prefix}_o_proj")
+    x2 = mb.add(x=x, y=o_out, name=f"{prefix}_residual_attn")
+
+    x2_norm = rms_norm(x2, f"{prefix}_rms_ffn")
+
+    w1 = mb.const(val=random_weight((HIDDEN, DIM, 1, 1)), name=f"{prefix}_w1")
+    w3 = mb.const(val=random_weight((HIDDEN, DIM, 1, 1)), name=f"{prefix}_w3")
+    w2 = mb.const(val=random_weight((DIM, HIDDEN, 1, 1)), name=f"{prefix}_w2")
+
+    h1 = mb.conv(x=x2_norm, weight=w1, name=f"{prefix}_ffn_w1")
+    h3 = mb.conv(x=x2_norm, weight=w3, name=f"{prefix}_ffn_w3")
+    silu = mb.sigmoid(x=h1, name=f"{prefix}_sigmoid_h1")
+    silu = mb.mul(x=h1, y=silu, name=f"{prefix}_silu_h1")
+    gate = mb.mul(x=silu, y=h3, name=f"{prefix}_gate_out")
+    ffn_out = mb.conv(x=gate, weight=w2, name=f"{prefix}_ffn_w2")
+
+    return mb.add(x=x2, y=ffn_out, name=f"{prefix}_residual_ffn")
+
+
+def build_transformer_stack(layer_count: int):
     @mb.program(
         input_specs=[
             mb.TensorSpec(shape=(1, DIM, 1, SEQ_LEN), dtype=types.fp16),
         ]
     )
     def transformer(x):
-        # --- Attention Block ---
-        # RMSNorm (simplified: normalize then scale)
-        rms_att_weight = mb.const(
-            val=np.ones((1, DIM, 1, 1), dtype=np.float16),
-            name="rms_att_weight"
-        )
-        x_sq = mb.mul(x=x, y=x, name="x_sq")
-        x_mean = mb.reduce_mean(x=x_sq, axes=[1], keep_dims=True, name="x_mean")
-        eps = mb.const(val=np.float16(1e-5), name="eps")
-        x_mean_eps = mb.add(x=x_mean, y=eps, name="x_mean_eps")
-        x_rsqrt = mb.rsqrt(x=x_mean_eps, name="x_rsqrt")
-        x_norm = mb.mul(x=x, y=x_rsqrt, name="x_norm_pre")
-        x_norm = mb.mul(x=x_norm, y=rms_att_weight, name="x_norm")
-
-        # QKV projections (as conv2d with 1x1 kernels -- ANE-native)
-        wq = mb.const(val=np.random.randn(DIM, DIM, 1, 1).astype(np.float16) * 0.02, name="wq")
-        wk = mb.const(val=np.random.randn(DIM, DIM, 1, 1).astype(np.float16) * 0.02, name="wk")
-        wv = mb.const(val=np.random.randn(DIM, DIM, 1, 1).astype(np.float16) * 0.02, name="wv")
-
-        q = mb.conv(x=x_norm, weight=wq, name="q_proj")
-        k = mb.conv(x=x_norm, weight=wk, name="k_proj")
-        v = mb.conv(x=x_norm, weight=wv, name="v_proj")
-
-        # Reshape for multi-head: [1, DIM, 1, SEQ] -> [1, HEADS, HEAD_DIM, SEQ]
-        q_r = mb.reshape(x=q, shape=[1, HEADS, HEAD_DIM, SEQ_LEN], name="q_reshape")
-        k_r = mb.reshape(x=k, shape=[1, HEADS, HEAD_DIM, SEQ_LEN], name="k_reshape")
-        v_r = mb.reshape(x=v, shape=[1, HEADS, HEAD_DIM, SEQ_LEN], name="v_reshape")
-
-        # Transpose Q,V to standard layout: [1, HEADS, SEQ, HEAD_DIM]
-        q_t = mb.transpose(x=q_r, perm=[0, 1, 3, 2], name="q_transpose")
-        v_t = mb.transpose(x=v_r, perm=[0, 1, 3, 2], name="v_transpose")
-        # K stays as [1, HEADS, HEAD_DIM, SEQ] — acts as K^T in matmul
-
-        # Attention scores: Q_t @ K_r = (SEQ, HEAD_DIM) @ (HEAD_DIM, SEQ) = (SEQ, SEQ)
-        scale = mb.const(val=np.float16(1.0 / np.sqrt(HEAD_DIM)), name="scale")
-        scores = mb.matmul(x=q_t, y=k_r, name="attn_scores_raw")
-        scores = mb.mul(x=scores, y=scale, name="attn_scores")
-
-        # Causal mask: [1, 1, SEQ, SEQ] broadcasts over heads
-        mask_np = np.triu(np.full((SEQ_LEN, SEQ_LEN), -1e4, dtype=np.float16), k=1)
-        mask = mb.const(val=mask_np.reshape(1, 1, SEQ_LEN, SEQ_LEN), name="causal_mask")
-        scores = mb.add(x=scores, y=mask, name="attn_scores_masked")
-
-        # Softmax
-        attn_weights = mb.softmax(x=scores, axis=-1, name="attn_weights")
-
-        # Attention output: weights @ V_t = (SEQ, SEQ) @ (SEQ, HEAD_DIM) = (SEQ, HEAD_DIM)
-        attn_out = mb.matmul(x=attn_weights, y=v_t, name="attn_out_heads")
-
-        # Transpose back: [1, HEADS, SEQ, HEAD_DIM] -> [1, HEADS, HEAD_DIM, SEQ]
-        attn_out = mb.transpose(x=attn_out, perm=[0, 1, 3, 2], name="attn_out_transpose")
-        # Reshape: [1, HEADS, HEAD_DIM, SEQ] -> [1, DIM, 1, SEQ]
-        attn_out = mb.reshape(x=attn_out, shape=[1, DIM, 1, SEQ_LEN], name="attn_out_concat")
-
-        # Output projection
-        wo = mb.const(val=np.random.randn(DIM, DIM, 1, 1).astype(np.float16) * 0.02, name="wo")
-        o_out = mb.conv(x=attn_out, weight=wo, name="o_proj")
-
-        # Residual
-        x2 = mb.add(x=x, y=o_out, name="residual_attn")
-
-        # --- FFN Block ---
-        # RMSNorm
-        rms_ffn_weight = mb.const(
-            val=np.ones((1, DIM, 1, 1), dtype=np.float16),
-            name="rms_ffn_weight"
-        )
-        x2_sq = mb.mul(x=x2, y=x2, name="x2_sq")
-        x2_mean = mb.reduce_mean(x=x2_sq, axes=[1], keep_dims=True, name="x2_mean")
-        x2_mean_eps = mb.add(x=x2_mean, y=eps, name="x2_mean_eps")
-        x2_rsqrt = mb.rsqrt(x=x2_mean_eps, name="x2_rsqrt")
-        x2_norm = mb.mul(x=x2, y=x2_rsqrt, name="x2_norm_pre")
-        x2_norm = mb.mul(x=x2_norm, y=rms_ffn_weight, name="x2_norm")
-
-        # SwiGLU FFN
-        w1 = mb.const(val=np.random.randn(HIDDEN, DIM, 1, 1).astype(np.float16) * 0.02, name="w1")
-        w3 = mb.const(val=np.random.randn(HIDDEN, DIM, 1, 1).astype(np.float16) * 0.02, name="w3")
-        w2 = mb.const(val=np.random.randn(DIM, HIDDEN, 1, 1).astype(np.float16) * 0.02, name="w2")
-
-        h1 = mb.conv(x=x2_norm, weight=w1, name="ffn_w1")
-        h3 = mb.conv(x=x2_norm, weight=w3, name="ffn_w3")
-
-        # SiLU gate
-        silu = mb.sigmoid(x=h1, name="sigmoid_h1")
-        silu = mb.mul(x=h1, y=silu, name="silu_h1")
-        gate = mb.mul(x=silu, y=h3, name="gate_out")
-
-        ffn_out = mb.conv(x=gate, weight=w2, name="ffn_w2")
-
-        # Residual
-        output = mb.add(x=x2, y=ffn_out, name="residual_ffn")
-
-        return output
+        current = x
+        for layer_index in range(layer_count):
+            current = transformer_block(current, layer_index)
+        return current
 
     return transformer
 
 
+def default_output_path(layer_count: int, script_dir: str) -> str:
+    output_dir = os.path.join(script_dir, "..", "benchmarks", "models")
+    os.makedirs(output_dir, exist_ok=True)
+    if layer_count == 1:
+        filename = "transformer_layer.mlpackage"
+    else:
+        filename = f"transformer_{layer_count}layer.mlpackage"
+    return os.path.join(output_dir, filename)
+
+
 def main():
-    print(f"Generating Core ML transformer layer model...")
-    print(f"  dim={DIM}, hidden={HIDDEN}, seq_len={SEQ_LEN}, heads={HEADS}")
+    args = parse_args()
+    if args.layers <= 0:
+        raise SystemExit("--layers must be > 0")
 
-    prog = build_transformer_layer()
+    print(f"Generating Core ML transformer model...")
+    print(f"  layers={args.layers}, dim={DIM}, hidden={HIDDEN}, seq_len={SEQ_LEN}, heads={HEADS}")
 
-    # Convert to Core ML model
+    prog = build_transformer_stack(args.layers)
+
     model = ct.convert(
         prog,
         compute_precision=ct.precision.FLOAT16,
         minimum_deployment_target=ct.target.macOS15,
     )
 
-    # Save
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, "..", "benchmarks", "models")
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "transformer_layer.mlpackage")
-
+    output_path = args.output or default_output_path(args.layers, script_dir)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     model.save(output_path)
+
     total_size = sum(
-        f.stat().st_size for f in pathlib.Path(output_path).rglob('*') if f.is_file()
+        path.stat().st_size for path in pathlib.Path(output_path).rglob("*") if path.is_file()
     )
     print(f"  Saved to: {output_path}")
     print(f"  Model size: {total_size / 1024 / 1024:.1f} MB")
