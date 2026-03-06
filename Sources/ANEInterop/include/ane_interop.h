@@ -305,13 +305,23 @@ void ane_interop_probe_code_signing(ANEInteropCodeSigningProbeResult *result);
 typedef struct {
     bool requestHasCompletionHandler;
     bool completionHandlerSet;
+    bool requestHasSharedEvents;
+    bool metalDeviceCreated;
+    bool builtMetalSharedEvent;
+    bool builtSignalEvent;
+    bool builtSharedEventsContainer;
+    bool sharedEventsAttached;
     bool evalSucceeded;
     bool completionHandlerFired;
+    bool eventValueAdvanced;
+    uint64_t eventValueBefore;
+    uint64_t eventValueAfter;
     double evalTimeMS;
 } ANEInteropStandardCompletionProbeResult;
 
 void ane_interop_probe_standard_completion_handler(
     ANEHandle *handle,
+    bool useMetalSharedEvent,
     ANEInteropStandardCompletionProbeResult *result);
 
 // --- Real-time eval path probe ---

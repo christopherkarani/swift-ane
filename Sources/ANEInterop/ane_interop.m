@@ -106,6 +106,38 @@ static long ane_interop_env_long(const char *key, long defaultValue) {
     return parsed;
 }
 
+typedef id (*MTLCreateSystemDefaultDeviceFn)(void);
+
+static id ane_interop_create_metal_shared_event(bool *deviceCreated, bool *sharedEventCreated) {
+    if (deviceCreated) *deviceCreated = false;
+    if (sharedEventCreated) *sharedEventCreated = false;
+
+    void *metalHandle = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW);
+    if (!metalHandle) return nil;
+
+    MTLCreateSystemDefaultDeviceFn createDevice =
+        (MTLCreateSystemDefaultDeviceFn)dlsym(metalHandle, "MTLCreateSystemDefaultDevice");
+    if (!createDevice) return nil;
+
+    id device = createDevice();
+    if (!device) return nil;
+    if (deviceCreated) *deviceCreated = true;
+
+    SEL newSharedEventSel = NSSelectorFromString(@"newSharedEvent");
+    if (![device respondsToSelector:newSharedEventSel]) return nil;
+
+    id sharedEvent = ((id(*)(id,SEL))objc_msgSend)(device, newSharedEventSel);
+    if (sharedEvent && sharedEventCreated) *sharedEventCreated = true;
+    return sharedEvent;
+}
+
+static uint64_t ane_interop_shared_event_value(id sharedEvent) {
+    if (!sharedEvent) return 0;
+    SEL signaledValueSel = NSSelectorFromString(@"signaledValue");
+    if (![sharedEvent respondsToSelector:signaledValueSel]) return 0;
+    return ((unsigned long long(*)(id,SEL))objc_msgSend)(sharedEvent, signaledValueSel);
+}
+
 typedef enum : int {
     ANE_COMPILE_CACHE_AUTO = 0,
     ANE_COMPILE_CACHE_PREFER_CACHED = 1,
@@ -1818,6 +1850,7 @@ void ane_interop_probe_code_signing(ANEInteropCodeSigningProbeResult *result) {
 
 void ane_interop_probe_standard_completion_handler(
     ANEHandle *handle,
+    bool useMetalSharedEvent,
     ANEInteropStandardCompletionProbeResult *result)
 {
     @autoreleasepool {
@@ -1830,11 +1863,53 @@ void ane_interop_probe_standard_completion_handler(
         if (!req) return;
 
         SEL setCompletionHandlerSel = @selector(setCompletionHandler:);
+        SEL setSharedEventsSel = @selector(setSharedEvents:);
         result->requestHasCompletionHandler = [req respondsToSelector:setCompletionHandlerSel];
+        result->requestHasSharedEvents = [req respondsToSelector:setSharedEventsSel];
 
         if (!result->requestHasCompletionHandler) {
             if (trace) fprintf(stderr, "ANE std-completion: no setCompletionHandler:\n");
             return;
+        }
+
+        id metalSharedEvent = nil;
+        if (useMetalSharedEvent) {
+            Class sharedEventsCls = NSClassFromString(@"_ANESharedEvents");
+            Class sharedSignalEventCls = NSClassFromString(@"_ANESharedSignalEvent");
+            SEL sharedEventsFactorySel = NSSelectorFromString(@"sharedEventsWithSignalEvents:waitEvents:");
+            SEL signalEventFactorySel = NSSelectorFromString(@"signalEventWithValue:symbolIndex:eventType:sharedEvent:");
+
+            metalSharedEvent = ane_interop_create_metal_shared_event(
+                &result->metalDeviceCreated,
+                &result->builtMetalSharedEvent
+            );
+            result->eventValueBefore = ane_interop_shared_event_value(metalSharedEvent);
+
+            if (result->requestHasSharedEvents &&
+                metalSharedEvent &&
+                sharedEventsCls &&
+                sharedSignalEventCls &&
+                [sharedEventsCls respondsToSelector:sharedEventsFactorySel] &&
+                [sharedSignalEventCls respondsToSelector:signalEventFactorySel]) {
+                id signalEvent = ((id(*)(Class,SEL,unsigned long long,unsigned int,long long,id))objc_msgSend)(
+                    sharedSignalEventCls, signalEventFactorySel, 1ULL, 0U, 0LL, metalSharedEvent);
+                result->builtSignalEvent = (signalEvent != nil);
+                if (signalEvent) {
+                    id sharedEventsContainer = ((id(*)(Class,SEL,id,id))objc_msgSend)(
+                        sharedEventsCls, sharedEventsFactorySel, @[signalEvent], @[]);
+                    result->builtSharedEventsContainer = (sharedEventsContainer != nil);
+                    if (sharedEventsContainer) {
+                        @try {
+                            ((void(*)(id,SEL,id))objc_msgSend)(req, setSharedEventsSel, sharedEventsContainer);
+                            result->sharedEventsAttached = true;
+                            if (trace) fprintf(stderr, "ANE std-completion: shared events attached\n");
+                        } @catch (NSException *ex) {
+                            if (trace) fprintf(stderr, "ANE std-completion: setSharedEvents threw: %s\n",
+                                               [[ex description] UTF8String]);
+                        }
+                    }
+                }
+            }
         }
 
         dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -1884,6 +1959,8 @@ void ane_interop_probe_standard_completion_handler(
         long waited = dispatch_semaphore_wait(sem,
             dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC));
         result->completionHandlerFired = (waited == 0 && handlerFired) ? true : false;
+        result->eventValueAfter = ane_interop_shared_event_value(metalSharedEvent);
+        result->eventValueAdvanced = result->eventValueAfter > result->eventValueBefore;
 
         mach_timebase_info_data_t tbi;
         mach_timebase_info(&tbi);
@@ -1891,8 +1968,9 @@ void ane_interop_probe_standard_completion_handler(
         result->evalTimeMS = ns / 1e6;
 
         if (trace) {
-            fprintf(stderr, "ANE std-completion: fired=%s eval=%.3fms\n",
+            fprintf(stderr, "ANE std-completion: fired=%s sharedEventAdvanced=%s eval=%.3fms\n",
                     result->completionHandlerFired ? "YES" : "NO",
+                    result->eventValueAdvanced ? "YES" : "NO",
                     result->evalTimeMS);
         }
 
@@ -1900,6 +1978,13 @@ void ane_interop_probe_standard_completion_handler(
             ((void(*)(id,SEL,id))objc_msgSend)(req, setCompletionHandlerSel, (id)nil);
         } @catch (NSException *ex) {
             // ignore cleanup failure
+        }
+        if (result->sharedEventsAttached) {
+            @try {
+                ((void(*)(id,SEL,id))objc_msgSend)(req, setSharedEventsSel, (id)nil);
+            } @catch (NSException *ex) {
+                // ignore cleanup failure
+            }
         }
     }
 }

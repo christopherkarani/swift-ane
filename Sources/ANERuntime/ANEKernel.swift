@@ -427,19 +427,37 @@ public struct ANEKernel: ~Copyable {
     public struct StandardCompletionProbe: Sendable {
         public let requestHasCompletionHandler: Bool
         public let completionHandlerSet: Bool
+        public let requestHasSharedEvents: Bool
+        public let metalDeviceCreated: Bool
+        public let builtMetalSharedEvent: Bool
+        public let builtSignalEvent: Bool
+        public let builtSharedEventsContainer: Bool
+        public let sharedEventsAttached: Bool
         public let evalSucceeded: Bool
         public let completionHandlerFired: Bool
+        public let eventValueAdvanced: Bool
+        public let eventValueBefore: UInt64
+        public let eventValueAfter: UInt64
         public let evalTimeMS: Double
     }
 
-    public func standardCompletionProbe() -> StandardCompletionProbe {
+    public func standardCompletionProbe(useMetalSharedEvent: Bool = false) -> StandardCompletionProbe {
         var raw = ANEInteropStandardCompletionProbeResult()
-        ane_interop_probe_standard_completion_handler(handle, &raw)
+        ane_interop_probe_standard_completion_handler(handle, useMetalSharedEvent, &raw)
         return StandardCompletionProbe(
             requestHasCompletionHandler: raw.requestHasCompletionHandler,
             completionHandlerSet: raw.completionHandlerSet,
+            requestHasSharedEvents: raw.requestHasSharedEvents,
+            metalDeviceCreated: raw.metalDeviceCreated,
+            builtMetalSharedEvent: raw.builtMetalSharedEvent,
+            builtSignalEvent: raw.builtSignalEvent,
+            builtSharedEventsContainer: raw.builtSharedEventsContainer,
+            sharedEventsAttached: raw.sharedEventsAttached,
             evalSucceeded: raw.evalSucceeded,
             completionHandlerFired: raw.completionHandlerFired,
+            eventValueAdvanced: raw.eventValueAdvanced,
+            eventValueBefore: raw.eventValueBefore,
+            eventValueAfter: raw.eventValueAfter,
             evalTimeMS: raw.evalTimeMS
         )
     }

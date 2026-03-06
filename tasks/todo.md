@@ -57,3 +57,10 @@
   - Fallback hit the same `InvalidMILProgram` at compile time.
   - Result: abandoned without a post-change latency measurement; cumulative savings unchanged at `0.000ms/token`.
 - Pending. Fill in the remaining avenues with baseline, post-change numbers, dead-end evidence, and commit SHAs.
+
+### Avenue 2 review
+- Status: abandoned
+- Failure mode: attaching a Metal-backed shared event through `setSharedEvents:` causes the standard eval path to hang on hardware before completion or event value advancement.
+- Baseline/post benchmark: not recorded because the path never reached a measurable steady-state eval.
+- Savings: +0.000ms/token.
+- Cumulative savings after Avenue 2: 0.000ms/token.

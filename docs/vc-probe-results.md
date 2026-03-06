@@ -462,3 +462,14 @@ vs chaining's complex output-set / input-buffers-ready protocol.
 | `_ANESharedWaitEvent` | `waitEventWithValue:sharedEvent:eventType:` | `@40@0:8Q16@24Q32` |
 | `_ANERequest` | `setCompletionHandler:` | `v24@0:8@?16` |
 | `_ANERequest` | `setSharedEvents:` | `v24@0:8@16` |
+
+## 10. Metal-backed SharedEvent on Standard Eval Path (2026-03-06)
+
+Probe outcome:
+- `_ANERequest` exposes `setSharedEvents:` on the standard eval path.
+- `IOSurfaceSharedEvent +new` remains unusable, but a Metal-backed `MTLSharedEvent` can be created successfully.
+- Wrapping that Metal event in `_ANESharedSignalEvent` and attaching it through `_ANESharedEvents` causes the standard eval path to stop making forward progress on hardware.
+- No completion callback is observed and no event increment is observed before the eval path stalls.
+
+Conclusion:
+- Metal-backed shared events are not a viable async completion mechanism for the standard `_ANERequest` eval path in this environment.

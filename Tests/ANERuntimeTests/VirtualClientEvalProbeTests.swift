@@ -433,4 +433,10 @@ final class VirtualClientEvalProbeTests: XCTestCase {
             print("  NOTE: eval failed (known host instability) but handler fired=\(probe.completionHandlerFired)")
         }
     }
+
+    func test_vc_probe_standard_completion_handler_with_metal_shared_event() throws {
+        throw XCTSkip(
+            "Avenue 2 abandoned: attaching Metal-backed shared events via setSharedEvents: hangs the standard eval path on hardware before completion or event advancement."
+        )
+    }
 }

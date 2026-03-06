@@ -307,7 +307,7 @@ budget (which is capped at ~100 per process) and surface memory.
 | Avenue | Status | Per-Token Gain | Cumulative |
 |--------|--------|----------------|------------|
 | 1. Multi-layer fusion | abandoned (`InvalidMILProgram` on full pack and K/V-only fallback) | +0.000ms | 0.000ms |
-| 2. Metal SharedEvent | pending | pending | 0.000ms |
+| 2. Metal SharedEvent | abandoned | +0.000ms | 0.000ms |
 | 3. Metal+ANE hybrid | pending | pending | 0.000ms |
 | 4. CoreML baseline | pending | N/A | N/A |
 | 5. Speculative decode | pending | pending | 0.000ms |
@@ -347,3 +347,34 @@ for some workloads (mature scheduling, internal graph fusion). Our advantage is
 fine-grained control over kernel boundaries, zero-copy IOSurface management for KV
 caches, and the ability to do things CoreML cannot (training, custom fusion, hybrid
 dispatch).
+
+## 8. Avenue 2 Result — Metal SharedEvent on Standard Eval Path (ABANDONED)
+
+Date: 2026-03-06
+
+What I built:
+- Extended `ane_interop_probe_standard_completion_handler(...)` to optionally create a Metal-backed `MTLSharedEvent` via `MTLCreateSystemDefaultDevice()` and `newSharedEvent`.
+- Wrapped that event in `_ANESharedSignalEvent` and `_ANESharedEvents`.
+- Attached the container to `_ANERequest` via `setSharedEvents:` on the standard eval path.
+- Extended the Swift probe surface to report attachment state and event value before/after eval.
+
+Expected improvement:
+- If ANE signaled the Metal shared event on completion, decode could pipeline host and accelerator work and potentially overlap adjacent dispatches.
+
+Baseline before changes:
+- Existing standard completion handler works, but fires synchronously on the calling thread and provides no true async overlap.
+- No measurable per-token gain from the baseline path.
+
+Observed result:
+- `MTLCreateSystemDefaultDevice()` succeeded.
+- `newSharedEvent` succeeded.
+- `_ANERequest` reports `setSharedEvents:` exists.
+- With the Metal-backed shared event attached, the hardware test enters the standard eval path and then hangs with no completion callback and no observable event advancement.
+
+Abandon reason:
+- This path is a dead end under the project protocol. It does not produce a usable signal or measurable pipeline parallelism, and it blocks progress inside eval instead.
+
+Timing:
+- Post measurement: not recorded.
+- Delta: +0.000ms/token.
+- Cumulative savings after Avenue 2: 0.000ms/token.
