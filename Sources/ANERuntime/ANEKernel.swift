@@ -29,6 +29,34 @@ public struct ANEChainingProbe: Sendable {
     public let stage: Int
 }
 
+public struct ANEVirtualClientProbe: Sendable {
+    public let hasVirtualClientClass: Bool
+    public let hasVirtualClientProperty: Bool
+    public let hasSharedEventsClass: Bool
+    public let hasSharedWaitEventClass: Bool
+    public let hasSharedSignalEventClass: Bool
+    public let hasIOSurfaceSharedEventClass: Bool
+    public let hasDoEvaluateCompletionEvent: Bool
+    public let hasStandardEvaluate: Bool
+    public let hasMapIOSurfaces: Bool
+    public let hasLoadModel: Bool
+    public let hasRequestSharedEventsFactory: Bool
+    public let hasSetSharedEvents: Bool
+    public let hasSetCompletionHandler: Bool
+    public let obtainedVirtualClient: Bool
+    public let builtIOSurfaceSharedEvent: Bool
+    public let builtWaitEvent: Bool
+    public let builtSignalEvent: Bool
+    public let builtSharedEventsContainer: Bool
+    public let builtRequest: Bool
+    public let mappedSurfaces: Bool
+    public let loadedOnVirtualClient: Bool
+    public let standardEvalSucceeded: Bool
+    public let completionEventEvalSucceeded: Bool
+    public let completionHandlerFired: Bool
+    public let stage: Int
+}
+
 public struct ANEKernel: ~Copyable {
     private enum CompileGate {
         static let lock = NSLock()
@@ -279,6 +307,63 @@ public struct ANEKernel: ~Copyable {
             calledBuffersReady: raw.calledBuffersReady,
             buffersReadySucceeded: raw.buffersReadySucceeded,
             prepared: raw.prepared,
+            stage: Int(raw.stage)
+        )
+    }
+
+    public func virtualClientProbe(
+        useCompletionEvent: Bool = false,
+        useCompletionHandler: Bool = false,
+        useSharedEvents: Bool = false,
+        useWaitEvent: Bool = false,
+        skipEval: Bool = false,
+        mapSurfaces: Bool = false,
+        loadOnVirtualClient: Bool = false,
+        waitEventValue: UInt64 = 1,
+        waitEventType: UInt64 = 0,
+        signalSymbolIndex: UInt32 = 0,
+        waitSymbolIndex: UInt32 = 0
+    ) -> ANEVirtualClientProbe {
+        var options = ANEInteropVCProbeOptions(
+            useCompletionEvent: useCompletionEvent,
+            useCompletionHandler: useCompletionHandler,
+            useSharedEvents: useSharedEvents,
+            useWaitEvent: useWaitEvent,
+            skipEval: skipEval,
+            mapSurfaces: mapSurfaces,
+            loadOnVirtualClient: loadOnVirtualClient,
+            waitEventValue: waitEventValue,
+            waitEventType: waitEventType,
+            signalSymbolIndex: signalSymbolIndex,
+            waitSymbolIndex: waitSymbolIndex
+        )
+        var raw = ANEInteropVCProbeResult()
+        ane_interop_probe_virtual_client_eval(handle, &options, &raw)
+        return ANEVirtualClientProbe(
+            hasVirtualClientClass: raw.hasVirtualClientClass,
+            hasVirtualClientProperty: raw.hasVirtualClientProperty,
+            hasSharedEventsClass: raw.hasSharedEventsClass,
+            hasSharedWaitEventClass: raw.hasSharedWaitEventClass,
+            hasSharedSignalEventClass: raw.hasSharedSignalEventClass,
+            hasIOSurfaceSharedEventClass: raw.hasIOSurfaceSharedEventClass,
+            hasDoEvaluateCompletionEvent: raw.hasDoEvaluateCompletionEvent,
+            hasStandardEvaluate: raw.hasStandardEvaluate,
+            hasMapIOSurfaces: raw.hasMapIOSurfaces,
+            hasLoadModel: raw.hasLoadModel,
+            hasRequestSharedEventsFactory: raw.hasRequestSharedEventsFactory,
+            hasSetSharedEvents: raw.hasSetSharedEvents,
+            hasSetCompletionHandler: raw.hasSetCompletionHandler,
+            obtainedVirtualClient: raw.obtainedVirtualClient,
+            builtIOSurfaceSharedEvent: raw.builtIOSurfaceSharedEvent,
+            builtWaitEvent: raw.builtWaitEvent,
+            builtSignalEvent: raw.builtSignalEvent,
+            builtSharedEventsContainer: raw.builtSharedEventsContainer,
+            builtRequest: raw.builtRequest,
+            mappedSurfaces: raw.mappedSurfaces,
+            loadedOnVirtualClient: raw.loadedOnVirtualClient,
+            standardEvalSucceeded: raw.standardEvalSucceeded,
+            completionEventEvalSucceeded: raw.completionEventEvalSucceeded,
+            completionHandlerFired: raw.completionHandlerFired,
             stage: Int(raw.stage)
         )
     }
