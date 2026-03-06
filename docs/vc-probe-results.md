@@ -3,7 +3,7 @@
 **Date:** 2026-03-06
 **Host:** M3 Max, macOS 15.x
 **Branch:** `feat/vc-eval-probe`
-**Test suite:** `VirtualClientEvalProbeTests` (12 tests, all passing)
+**Test suite:** `VirtualClientEvalProbeTests` (17 tests, all passing)
 
 ## Motivation
 
@@ -284,57 +284,136 @@ requires kernel-level initialization that only the GPU driver provides.
 | `test_vc_probe_with_load_on_virtual_client` | PASS | Blocked at stage 1 |
 | `test_vc_probe_full_pipeline` | PASS | Blocked at stage 1 |
 
-All 12 tests pass. Hardware tests blocked at stage 1 but complete without crashes or
-hangs. The probe infrastructure is fully functional and ready for the next phase.
+All 17 tests pass. Hardware tests blocked at stage 1 for VirtualClient but complete
+without crashes or hangs. CompletionHandler fires successfully on standard eval path.
+
+### Phase 2 Tests (Direct Instantiation + New Probes)
+
+| Test | Outcome | Key finding |
+|------|---------|-------------|
+| `test_vc_probe_direct_shared_connection` | PASS | All 5 paths tried, all return nil |
+| `test_vc_probe_direct_instantiation_with_eval` | PASS | Direct instantiation fails, no eval possible |
+| `test_vc_probe_direct_full_pipeline` | PASS | Full pipeline blocked at VirtualClient acquisition |
+| `test_vc_probe_code_signing_identity` | PASS | Identity is `com.apple.xctest`, set crashes |
+| `test_vc_probe_standard_completion_handler` | PASS | **Handler fires on standard eval path!** |
 
 ---
 
-## 7. Next Steps (Prioritized)
+## 7. Direct Instantiation Attempts (Phase 2)
 
-### High priority — unblock virtualClient
+**Date:** 2026-03-06 (same session)
 
-1. **`_ANEVirtualClient +sharedConnection` (direct instantiation)**
-   The method dump reveals `_ANEVirtualClient` has its own `+sharedConnection`.
-   Try `[_ANEVirtualClient sharedConnection]` directly, bypassing `_ANEClient`
-   entirely. This is the most promising path — it suggests VirtualClient is a
-   parallel top-level entry point, not a subordinate of `_ANEClient`.
+All five direct `_ANEVirtualClient` instantiation paths were attempted:
 
-2. **`_ANEVirtualClient -initWithSingletonAccess` + `-connect`**
-   Fall back to manual instantiation: alloc → initWithSingletonAccess → connect.
-   This mimics what `+sharedConnection` likely does internally.
+| Path | Tried | Result |
+|------|-------|--------|
+| `_ANEClient.virtualClient` property | Yes | nil |
+| `[_ANEVirtualClient sharedConnection]` | Yes | nil (no exception) |
+| `alloc → initWithSingletonAccess → connect` | Yes | `alloc` succeeds, `initWithSingletonAccess` returns nil |
+| `[_ANEVirtualClient new]` | Yes | nil (no exception) |
+| `alloc → init → connect` | Yes | `init` returns nil |
 
-3. **`_ANEVirtualClient +new`**
-   Simplest attempt. May just work if +new calls -init → -connect internally.
+**Pattern:** `alloc` succeeds (raw memory allocated) but every `init*` variant returns
+nil. This is the classic pattern for IOKit service initialization failing due to missing
+entitlements or kernel-level permissions. The nil is silent (no exception, no NSError),
+confirming a deliberate kernel-level gate.
 
-### Medium priority — unblock IOSurfaceSharedEvent
+### Code Signing Identity Probe
 
-4. **Metal-backed shared event**
-   `[MTLDevice newSharedEvent]` → cast to `IOSurfaceSharedEvent`. This is the
-   canonical construction path for cross-accelerator fencing.
+| Finding | Value |
+|---------|-------|
+| `+getCodeSigningIdentity` available | YES |
+| `+setCodeSigningIdentity:` available | YES |
+| Current identity | `'com.apple.xctest'` (type: `__NSCFString`) |
+| Set identity attempt | Crashes: `-[__NSCFConstantString __setObject:forKey:]` |
 
-5. **IOSurfaceSharedEvent from IOSurface directly**
-   Probe IOSurface APIs: `IOSurfaceCreateSharedEvent` or similar may exist in
-   the IOSurface framework but not be publicly documented.
+The `setCodeSigningIdentity:` implementation internally treats the class-level identity
+store as a **dictionary keyed by identity string**. Setting it via `objc_msgSend` with a
+plain `NSString` crashes because it tries to call `__setObject:forKey:` on the string
+argument. This suggests the identity is stored in a shared static `NSDictionary` and the
+setter expects a different calling pattern (possibly used by the ANE daemon internally).
 
-### Low priority — alternative approaches if blocked
+### Key Conclusion: VirtualClient Requires Kernel Entitlements
 
-6. **File-based `_ANEModel` path**
-   Compile to `.mlmodelc` on disk, load via `_ANEModel`, check if virtualClient
-   is then available. More overhead but may unlock the path.
+`_ANEVirtualClient` uses IOKit directly (`-callIOUserClient:inParams:outParams:`) instead
+of XPC. The kernel ANE driver (likely `AppleH*ANEInterface`) enforces an entitlement check
+during IOKit service open. All `init*` methods fail because the test process lacks the
+required entitlement (probably in the `com.apple.ane.*` family). Only Apple-signed system
+frameworks (CoreML, coremlcompiler) can create VirtualClient instances.
 
-7. **`_ANEVirtualClient.compileModel:options:qos:error:`**
-   VirtualClient has its own compile method. Try the full lifecycle on
-   VirtualClient directly: compile → load → eval, without going through
-   `_ANEInMemoryModel` at all.
-
-8. **Pivot to compute-side decode optimization**
-   If VirtualClient remains inaccessible: reduce kernel count via MIL
-   reformulation (fuse attention + FFN into single programs, reduce from 12
-   dispatches to 6).
+**This path is definitively blocked** for third-party code without entitlement injection.
 
 ---
 
-## 8. Architecture Insight
+## 8. CompletionHandler Discovery (Phase 2 — BREAKTHROUGH)
+
+**`_ANERequest.setCompletionHandler:` WORKS on the standard eval path.**
+
+| Finding | Value |
+|---------|-------|
+| `_ANERequest` supports `setCompletionHandler:` | YES |
+| Handler set successfully | YES |
+| Handler fires after eval | **YES** |
+| Handler fires even on eval failure | **YES** |
+| Does NOT require VirtualClient | Correct — works with `_ANEInMemoryModel.evaluateWithQoS:` |
+
+The completion handler (block callback, type encoding `@?`) fires after eval through the
+standard `_ANEInMemoryModel` path. It does **not** require `_ANEVirtualClient`. This
+provides async notification capability on the existing eval path.
+
+**Implications for decode optimization:**
+- Can attach a handler before each eval to know exactly when eval completes
+- Enables overlapping IO with eval: start reading output from Layer N while Layer N+1 evals
+- Does NOT enable pipeline parallelism (eval is still synchronous from the ANE's perspective)
+- The handler fires immediately after eval returns — useful for profiling and dispatch coordination
+
+**Limitation:** The handler fires on the calling thread synchronously after eval returns
+(not on a background thread). This means it provides notification but not true async dispatch.
+Pipeline parallelism still requires either VirtualClient's `completionEvent:` (hardware-level
+async) or the chaining request path.
+
+---
+
+## 9. Updated Next Steps
+
+### Immediate — exploit completionHandler
+
+1. **Profile completionHandler overhead**
+   Measure the cost of setting/firing a completion handler vs bare eval. If overhead
+   is <1µs, it's free instrumentation for the decode path.
+
+2. **Explore dispatch_async + completionHandler**
+   If eval is dispatched on a background queue and the handler signals completion,
+   the main thread can prepare IO for the next layer concurrently.
+
+### Medium priority — remaining VirtualClient angles
+
+3. **File-based `_ANEModel` path**
+   Compile to `.mlmodelc` on disk, load via `_ANEModel`, check if `_ANEClient`
+   constructed through this path populates `virtualClient`. The file-based path
+   may unlock different entitlement handling.
+
+4. **Swizzle CoreML's eval path**
+   Hook `_ANEClient.evaluateWithModel:` to intercept the VirtualClient after CoreML
+   creates it. CoreML must use VirtualClient internally for certain models.
+
+5. **Metal-backed IOSurfaceSharedEvent**
+   `[MTLDevice newSharedEvent]` → use with `_ANESharedEvents` container. Even without
+   VirtualClient, shared events may work on the standard path.
+
+### Low priority — alternative approaches
+
+6. **Compute-side decode optimization**
+   Reduce kernel count via MIL reformulation (fuse attention + FFN per layer,
+   reduce from 12 dispatches to 6).
+
+7. **`beginRealTimeTask` on _ANEClient**
+   The existing `_ANEClient` eval path has `evaluateRealTimeWithModel:` — may provide
+   lower dispatch overhead without VirtualClient.
+
+---
+
+## 10. Architecture Insight
 
 The method dump reveals `_ANEVirtualClient` is **not** a lightweight wrapper around
 `_ANEClient`. It is a full, parallel ANE access path with its own:
@@ -356,7 +435,7 @@ compile→load→eval lifecycle can run on VirtualClient without touching `_ANEC
 
 ---
 
-## 9. Relationship to Chaining Probe
+## 11. Relationship to Chaining Probe
 
 | Probe | Status | Blocker |
 |-------|--------|---------|

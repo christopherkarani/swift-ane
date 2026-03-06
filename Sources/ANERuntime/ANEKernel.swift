@@ -44,6 +44,11 @@ public struct ANEVirtualClientProbe: Sendable {
     public let hasSetSharedEvents: Bool
     public let hasSetCompletionHandler: Bool
     public let obtainedVirtualClient: Bool
+    public let triedPropertyOnClient: Bool
+    public let triedDirectSharedConnection: Bool
+    public let triedInitWithSingletonAccess: Bool
+    public let triedNew: Bool
+    public let directConnectSucceeded: Bool
     public let builtIOSurfaceSharedEvent: Bool
     public let builtWaitEvent: Bool
     public let builtSignalEvent: Bool
@@ -319,6 +324,7 @@ public struct ANEKernel: ~Copyable {
         skipEval: Bool = false,
         mapSurfaces: Bool = false,
         loadOnVirtualClient: Bool = false,
+        useDirectInstantiation: Bool = false,
         waitEventValue: UInt64 = 1,
         waitEventType: UInt64 = 0,
         signalSymbolIndex: UInt32 = 0,
@@ -332,6 +338,7 @@ public struct ANEKernel: ~Copyable {
             skipEval: skipEval,
             mapSurfaces: mapSurfaces,
             loadOnVirtualClient: loadOnVirtualClient,
+            useDirectInstantiation: useDirectInstantiation,
             waitEventValue: waitEventValue,
             waitEventType: waitEventType,
             signalSymbolIndex: signalSymbolIndex,
@@ -354,6 +361,11 @@ public struct ANEKernel: ~Copyable {
             hasSetSharedEvents: raw.hasSetSharedEvents,
             hasSetCompletionHandler: raw.hasSetCompletionHandler,
             obtainedVirtualClient: raw.obtainedVirtualClient,
+            triedPropertyOnClient: raw.triedPropertyOnClient,
+            triedDirectSharedConnection: raw.triedDirectSharedConnection,
+            triedInitWithSingletonAccess: raw.triedInitWithSingletonAccess,
+            triedNew: raw.triedNew,
+            directConnectSucceeded: raw.directConnectSucceeded,
             builtIOSurfaceSharedEvent: raw.builtIOSurfaceSharedEvent,
             builtWaitEvent: raw.builtWaitEvent,
             builtSignalEvent: raw.builtSignalEvent,
@@ -384,6 +396,52 @@ public struct ANEKernel: ~Copyable {
             throw .outputSurfaceUnavailable(index)
         }
         return surface
+    }
+
+    public struct CodeSigningProbe: Sendable {
+        public let hasGetCodeSigningIdentity: Bool
+        public let hasSetCodeSigningIdentity: Bool
+        public let gotIdentityString: Bool
+        public let setIdentityBeforeInstantiation: Bool
+        public let instantiationSucceededAfterSet: Bool
+        public let identityString: String
+    }
+
+    public static func codeSigningProbe() -> CodeSigningProbe {
+        var raw = ANEInteropCodeSigningProbeResult()
+        ane_interop_probe_code_signing(&raw)
+        let identityStr = withUnsafeBytes(of: raw.identityString) { buf in
+            let ptr = buf.baseAddress!.assumingMemoryBound(to: CChar.self)
+            return String(cString: ptr)
+        }
+        return CodeSigningProbe(
+            hasGetCodeSigningIdentity: raw.hasGetCodeSigningIdentity,
+            hasSetCodeSigningIdentity: raw.hasSetCodeSigningIdentity,
+            gotIdentityString: raw.gotIdentityString,
+            setIdentityBeforeInstantiation: raw.setIdentityBeforeInstantiation,
+            instantiationSucceededAfterSet: raw.instantiationSucceededAfterSet,
+            identityString: identityStr
+        )
+    }
+
+    public struct StandardCompletionProbe: Sendable {
+        public let requestHasCompletionHandler: Bool
+        public let completionHandlerSet: Bool
+        public let evalSucceeded: Bool
+        public let completionHandlerFired: Bool
+        public let evalTimeMS: Double
+    }
+
+    public func standardCompletionProbe() -> StandardCompletionProbe {
+        var raw = ANEInteropStandardCompletionProbeResult()
+        ane_interop_probe_standard_completion_handler(handle, &raw)
+        return StandardCompletionProbe(
+            requestHasCompletionHandler: raw.requestHasCompletionHandler,
+            completionHandlerSet: raw.completionHandlerSet,
+            evalSucceeded: raw.evalSucceeded,
+            completionHandlerFired: raw.completionHandlerFired,
+            evalTimeMS: raw.evalTimeMS
+        )
     }
 
     deinit {

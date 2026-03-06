@@ -277,4 +277,160 @@ final class VirtualClientEvalProbeTests: XCTestCase {
         print("  completionHandlerFired: \(probe.completionHandlerFired)")
         print("  stage: \(probe.stage)")
     }
+
+    // MARK: - Direct VirtualClient instantiation tests
+
+    func test_vc_probe_direct_shared_connection() throws {
+        try requireANEHardwareTests()
+        let kernel = try vcIdentityKernel()
+        let probe = kernel.virtualClientProbe(
+            skipEval: true,
+            useDirectInstantiation: true
+        )
+
+        print("VCProbe direct instantiation (skipEval):")
+        print("  triedPropertyOnClient: \(probe.triedPropertyOnClient)")
+        print("  triedDirectSharedConnection: \(probe.triedDirectSharedConnection)")
+        print("  triedInitWithSingletonAccess: \(probe.triedInitWithSingletonAccess)")
+        print("  triedNew: \(probe.triedNew)")
+        print("  directConnectSucceeded: \(probe.directConnectSucceeded)")
+        print("  obtainedVirtualClient: \(probe.obtainedVirtualClient)")
+        print("  stage: \(probe.stage)")
+
+        // At minimum we should try the property path and then fallbacks
+        XCTAssertTrue(probe.triedPropertyOnClient || probe.triedDirectSharedConnection,
+                      "Should try at least one acquisition path")
+    }
+
+    func test_vc_probe_direct_instantiation_with_eval() throws {
+        try requireANEHardwareTests()
+        let kernel = try vcIdentityKernel()
+
+        // Write known input
+        let input: [Float] = [1, 2, 3, 4, 5, 6, 7, 8,
+                              9, 10, 11, 12, 13, 14, 15, 16,
+                              17, 18, 19, 20, 21, 22, 23, 24,
+                              25, 26, 27, 28, 29, 30, 31, 32]
+        let inputSurface = try kernel.inputSurface(at: 0)
+        XCTAssertTrue(
+            ane_interop_io_write_fp16(inputSurface, input, Int32(vcProbeChannels), Int32(vcProbeSpatial))
+        )
+
+        let probe = kernel.virtualClientProbe(
+            useDirectInstantiation: true
+        )
+
+        print("VCProbe direct instantiation (with eval):")
+        print("  triedPropertyOnClient: \(probe.triedPropertyOnClient)")
+        print("  triedDirectSharedConnection: \(probe.triedDirectSharedConnection)")
+        print("  triedInitWithSingletonAccess: \(probe.triedInitWithSingletonAccess)")
+        print("  triedNew: \(probe.triedNew)")
+        print("  directConnectSucceeded: \(probe.directConnectSucceeded)")
+        print("  obtainedVirtualClient: \(probe.obtainedVirtualClient)")
+        print("  standardEvalSucceeded: \(probe.standardEvalSucceeded)")
+        print("  stage: \(probe.stage)")
+
+        if probe.obtainedVirtualClient && probe.standardEvalSucceeded {
+            var output = [Float](repeating: 0, count: vcProbeChannels * vcProbeSpatial)
+            let outputSurface = try kernel.outputSurface(at: 0)
+            XCTAssertTrue(
+                ane_interop_io_read_fp16(outputSurface, 0, &output, Int32(vcProbeChannels), Int32(vcProbeSpatial))
+            )
+            for i in 0..<input.count {
+                XCTAssertEqual(
+                    output[i], input[i],
+                    accuracy: 0.1,
+                    "Identity kernel output[\(i)] should match input"
+                )
+            }
+            print("  OUTPUT VERIFIED: identity kernel correct via direct VirtualClient")
+        }
+    }
+
+    func test_vc_probe_direct_full_pipeline() throws {
+        try requireANEHardwareTests()
+        let kernel = try vcIdentityKernel()
+
+        let input: [Float] = (0..<(vcProbeChannels * vcProbeSpatial)).map { Float($0) + 1 }
+        let inputSurface = try kernel.inputSurface(at: 0)
+        XCTAssertTrue(
+            ane_interop_io_write_fp16(inputSurface, input, Int32(vcProbeChannels), Int32(vcProbeSpatial))
+        )
+
+        let probe = kernel.virtualClientProbe(
+            useCompletionEvent: true,
+            useCompletionHandler: true,
+            useSharedEvents: true,
+            useWaitEvent: true,
+            mapSurfaces: true,
+            loadOnVirtualClient: true,
+            useDirectInstantiation: true
+        )
+
+        print("VCProbe direct full pipeline:")
+        print("  triedPropertyOnClient: \(probe.triedPropertyOnClient)")
+        print("  triedDirectSharedConnection: \(probe.triedDirectSharedConnection)")
+        print("  triedInitWithSingletonAccess: \(probe.triedInitWithSingletonAccess)")
+        print("  triedNew: \(probe.triedNew)")
+        print("  directConnectSucceeded: \(probe.directConnectSucceeded)")
+        print("  obtainedVirtualClient: \(probe.obtainedVirtualClient)")
+        print("  builtIOSurfaceSharedEvent: \(probe.builtIOSurfaceSharedEvent)")
+        print("  builtSharedEventsContainer: \(probe.builtSharedEventsContainer)")
+        print("  mappedSurfaces: \(probe.mappedSurfaces)")
+        print("  loadedOnVirtualClient: \(probe.loadedOnVirtualClient)")
+        print("  standardEvalSucceeded: \(probe.standardEvalSucceeded)")
+        print("  completionEventEvalSucceeded: \(probe.completionEventEvalSucceeded)")
+        print("  completionHandlerFired: \(probe.completionHandlerFired)")
+        print("  stage: \(probe.stage)")
+    }
+
+    // MARK: - Code Signing Identity Probe
+
+    func test_vc_probe_code_signing_identity() throws {
+        try requireANEHardwareTests()
+        let probe = ANEKernel.codeSigningProbe()
+
+        print("VCProbe code signing:")
+        print("  hasGetCodeSigningIdentity: \(probe.hasGetCodeSigningIdentity)")
+        print("  hasSetCodeSigningIdentity: \(probe.hasSetCodeSigningIdentity)")
+        print("  gotIdentityString: \(probe.gotIdentityString)")
+        print("  identityString: '\(probe.identityString)'")
+        print("  setIdentityBeforeInstantiation: \(probe.setIdentityBeforeInstantiation)")
+        print("  instantiationSucceededAfterSet: \(probe.instantiationSucceededAfterSet)")
+
+        XCTAssertTrue(probe.hasGetCodeSigningIdentity,
+                      "_ANEVirtualClient should have +getCodeSigningIdentity")
+    }
+
+    // MARK: - Standard Eval CompletionHandler Probe
+
+    func test_vc_probe_standard_completion_handler() throws {
+        try requireANEHardwareTests()
+        let kernel = try vcIdentityKernel()
+
+        let input: [Float] = [1, 2, 3, 4, 5, 6, 7, 8,
+                              9, 10, 11, 12, 13, 14, 15, 16,
+                              17, 18, 19, 20, 21, 22, 23, 24,
+                              25, 26, 27, 28, 29, 30, 31, 32]
+        let inputSurface = try kernel.inputSurface(at: 0)
+        XCTAssertTrue(
+            ane_interop_io_write_fp16(inputSurface, input, Int32(vcProbeChannels), Int32(vcProbeSpatial))
+        )
+
+        let probe = kernel.standardCompletionProbe()
+
+        print("Standard completion handler probe:")
+        print("  requestHasCompletionHandler: \(probe.requestHasCompletionHandler)")
+        print("  completionHandlerSet: \(probe.completionHandlerSet)")
+        print("  evalSucceeded: \(probe.evalSucceeded)")
+        print("  completionHandlerFired: \(probe.completionHandlerFired)")
+        print("  evalTimeMS: \(probe.evalTimeMS)")
+
+        XCTAssertTrue(probe.requestHasCompletionHandler,
+                      "_ANERequest should support setCompletionHandler:")
+        // Eval may fail on some hosts (known instability), but the handler should still fire
+        if !probe.evalSucceeded {
+            print("  NOTE: eval failed (known host instability) but handler fired=\(probe.completionHandlerFired)")
+        }
+    }
 }

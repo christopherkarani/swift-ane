@@ -240,6 +240,7 @@ typedef struct {
     bool skipEval;
     bool mapSurfaces;
     bool loadOnVirtualClient;
+    bool useDirectInstantiation;
     uint64_t waitEventValue;
     uint64_t waitEventType;
     uint32_t signalSymbolIndex;
@@ -261,6 +262,11 @@ typedef struct {
     bool hasSetSharedEvents;
     bool hasSetCompletionHandler;
     bool obtainedVirtualClient;
+    bool triedPropertyOnClient;
+    bool triedDirectSharedConnection;
+    bool triedInitWithSingletonAccess;
+    bool triedNew;
+    bool directConnectSucceeded;
     bool builtIOSurfaceSharedEvent;
     bool builtWaitEvent;
     bool builtSignalEvent;
@@ -279,6 +285,34 @@ bool ane_interop_runtime_has_shared_events_request(void);
 void ane_interop_probe_virtual_client_eval(ANEHandle *handle,
                                             const ANEInteropVCProbeOptions *options,
                                             ANEInteropVCProbeResult *result);
+
+/// Probe code signing identity on _ANEVirtualClient.
+/// Calls +getCodeSigningIdentity, optionally +setCodeSigningIdentity:,
+/// then retries instantiation. Returns identity string or NULL.
+typedef struct {
+    bool hasGetCodeSigningIdentity;
+    bool hasSetCodeSigningIdentity;
+    bool gotIdentityString;
+    bool setIdentityBeforeInstantiation;
+    bool instantiationSucceededAfterSet;
+    char identityString[256];
+} ANEInteropCodeSigningProbeResult;
+
+void ane_interop_probe_code_signing(ANEInteropCodeSigningProbeResult *result);
+
+/// Probe completionHandler on the STANDARD eval path (_ANEClient, not VirtualClient).
+/// This tests whether setCompletionHandler: fires through the existing evaluateWithQoS: path.
+typedef struct {
+    bool requestHasCompletionHandler;
+    bool completionHandlerSet;
+    bool evalSucceeded;
+    bool completionHandlerFired;
+    double evalTimeMS;
+} ANEInteropStandardCompletionProbeResult;
+
+void ane_interop_probe_standard_completion_handler(
+    ANEHandle *handle,
+    ANEInteropStandardCompletionProbeResult *result);
 
 #ifdef __cplusplus
 } // extern "C"

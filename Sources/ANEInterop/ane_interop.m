@@ -1389,24 +1389,141 @@ void ane_interop_probe_virtual_client_eval(ANEHandle *handle,
         if (!handle || !handle->client || !handle->clientModel) return;
 
         // --- Acquire VirtualClient ---
-        if (!result->hasVirtualClientProperty) {
-            result->stage = ANE_INTEROP_VC_STAGE_NO_VIRTUAL_CLIENT;
-            return;
-        }
-
         id client = (__bridge id)handle->client;
         id modelObj = (__bridge id)handle->clientModel;
         id evalOptions = handle->evalOptions ? (__bridge id)handle->evalOptions : @{};
 
         @try {
-            id virtualClient = ((id(*)(id,SEL))objc_msgSend)(client, vcPropertySel);
+            id virtualClient = nil;
+
+            // Path 1: _ANEClient.virtualClient property (original path)
+            if (result->hasVirtualClientProperty) {
+                result->triedPropertyOnClient = true;
+                virtualClient = ((id(*)(id,SEL))objc_msgSend)(client, vcPropertySel);
+                if (virtualClient && ane_interop_trace_enabled()) {
+                    fprintf(stderr, "ANE VC probe: obtained virtualClient via property: %s\n",
+                            [NSStringFromClass([virtualClient class]) UTF8String]);
+                }
+            }
+
+            // Path 2-5: Direct instantiation fallbacks (when property returns nil)
+            if (!virtualClient && opts.useDirectInstantiation && virtualClientCls != Nil) {
+                bool trace = ane_interop_trace_enabled();
+
+                // Path 2: [_ANEVirtualClient sharedConnection]
+                SEL sharedConnSel = @selector(sharedConnection);
+                if ([virtualClientCls respondsToSelector:sharedConnSel]) {
+                    result->triedDirectSharedConnection = true;
+                    @try {
+                        virtualClient = ((id(*)(Class,SEL))objc_msgSend)(
+                            virtualClientCls, sharedConnSel);
+                    } @catch (NSException *ex) {
+                        if (trace) fprintf(stderr, "ANE VC probe: +sharedConnection threw: %s\n",
+                                           [[ex description] UTF8String]);
+                    }
+                    if (trace) {
+                        fprintf(stderr, "ANE VC probe: +sharedConnection → %s (class: %s)\n",
+                                virtualClient ? "non-nil" : "nil",
+                                virtualClient ? [NSStringFromClass([virtualClient class]) UTF8String] : "N/A");
+                    }
+                } else if (trace) {
+                    fprintf(stderr, "ANE VC probe: +sharedConnection NOT available on _ANEVirtualClient\n");
+                }
+
+                // Path 3: alloc → initWithSingletonAccess → connect
+                if (!virtualClient) {
+                    SEL initSingletonSel = NSSelectorFromString(@"initWithSingletonAccess");
+                    SEL connectSel = @selector(connect);
+                    if ([virtualClientCls instancesRespondToSelector:initSingletonSel]) {
+                        result->triedInitWithSingletonAccess = true;
+                        id vc = ((id(*)(Class,SEL))objc_msgSend)(virtualClientCls, @selector(alloc));
+                        if (trace) fprintf(stderr, "ANE VC probe: alloc → %s\n", vc ? "non-nil" : "nil");
+                        if (vc) {
+                            @try {
+                                vc = ((id(*)(id,SEL))objc_msgSend)(vc, initSingletonSel);
+                            } @catch (NSException *ex) {
+                                if (trace) fprintf(stderr, "ANE VC probe: initWithSingletonAccess threw: %s\n",
+                                                   [[ex description] UTF8String]);
+                                vc = nil;
+                            }
+                            if (trace) fprintf(stderr, "ANE VC probe: initWithSingletonAccess → %s\n",
+                                               vc ? "non-nil" : "nil");
+                            if (vc) {
+                                if ([vc respondsToSelector:connectSel]) {
+                                    @try {
+                                        ((void(*)(id,SEL))objc_msgSend)(vc, connectSel);
+                                        result->directConnectSucceeded = true;
+                                        if (trace) fprintf(stderr, "ANE VC probe: connect succeeded\n");
+                                    } @catch (NSException *ex) {
+                                        if (trace) fprintf(stderr, "ANE VC probe: connect threw: %s\n",
+                                                           [[ex description] UTF8String]);
+                                    }
+                                }
+                                // Check if VirtualClient reports ANE availability
+                                SEL hasANESel = @selector(hasANE);
+                                if ([vc respondsToSelector:hasANESel]) {
+                                    BOOL has = ((BOOL(*)(id,SEL))objc_msgSend)(vc, hasANESel);
+                                    if (trace) fprintf(stderr, "ANE VC probe: hasANE → %s\n", has ? "YES" : "NO");
+                                }
+                                virtualClient = vc;
+                            }
+                        }
+                    } else if (trace) {
+                        fprintf(stderr, "ANE VC probe: initWithSingletonAccess NOT available\n");
+                    }
+                }
+
+                // Path 4: [_ANEVirtualClient new]
+                if (!virtualClient) {
+                    result->triedNew = true;
+                    @try {
+                        virtualClient = ((id(*)(Class,SEL))objc_msgSend)(
+                            virtualClientCls, @selector(new));
+                    } @catch (NSException *ex) {
+                        if (trace) fprintf(stderr, "ANE VC probe: +new threw: %s\n",
+                                           [[ex description] UTF8String]);
+                    }
+                    if (trace) {
+                        fprintf(stderr, "ANE VC probe: +new → %s (class: %s)\n",
+                                virtualClient ? "non-nil" : "nil",
+                                virtualClient ? [NSStringFromClass([virtualClient class]) UTF8String] : "N/A");
+                    }
+                }
+
+                // Path 5: alloc → init (plain)
+                if (!virtualClient) {
+                    @try {
+                        id vc = ((id(*)(Class,SEL))objc_msgSend)(virtualClientCls, @selector(alloc));
+                        if (vc) {
+                            vc = ((id(*)(id,SEL))objc_msgSend)(vc, @selector(init));
+                            if (trace) fprintf(stderr, "ANE VC probe: alloc/init → %s\n",
+                                               vc ? "non-nil" : "nil");
+                            if (vc) {
+                                // Try connecting
+                                SEL connectSel2 = @selector(connect);
+                                if ([vc respondsToSelector:connectSel2]) {
+                                    ((void(*)(id,SEL))objc_msgSend)(vc, connectSel2);
+                                    if (trace) fprintf(stderr, "ANE VC probe: alloc/init + connect done\n");
+                                }
+                                virtualClient = vc;
+                            }
+                        }
+                    } @catch (NSException *ex) {
+                        if (trace) fprintf(stderr, "ANE VC probe: alloc/init threw: %s\n",
+                                           [[ex description] UTF8String]);
+                    }
+                }
+            }
+
             if (!virtualClient) {
                 result->stage = ANE_INTEROP_VC_STAGE_NO_VIRTUAL_CLIENT;
+                if (!opts.skipEval) return;
+                // For skipEval probes, continue to report class discovery even without VC
                 return;
             }
             result->obtainedVirtualClient = true;
             if (ane_interop_trace_enabled()) {
-                fprintf(stderr, "ANE VC probe: obtained virtualClient: %s\n",
+                fprintf(stderr, "ANE VC probe: virtualClient acquired (%s)\n",
                         [NSStringFromClass([virtualClient class]) UTF8String]);
             }
 
@@ -1598,6 +1715,191 @@ void ane_interop_probe_virtual_client_eval(ANEHandle *handle,
                         [[exception description] UTF8String]);
             }
             result->stage = ANE_INTEROP_VC_STAGE_EXCEPTION;
+        }
+    }
+}
+
+// --- Code Signing Identity Probe ---
+
+void ane_interop_probe_code_signing(ANEInteropCodeSigningProbeResult *result) {
+    @autoreleasepool {
+        if (!result) return;
+        memset(result, 0, sizeof(*result));
+
+        ane_interop_init();
+        Class vcCls = NSClassFromString(@"_ANEVirtualClient");
+        if (!vcCls) return;
+
+        bool trace = ane_interop_trace_enabled();
+
+        SEL getSel = NSSelectorFromString(@"getCodeSigningIdentity");
+        SEL setSel = NSSelectorFromString(@"setCodeSigningIdentity:");
+        result->hasGetCodeSigningIdentity = [vcCls respondsToSelector:getSel];
+        result->hasSetCodeSigningIdentity = [vcCls respondsToSelector:setSel];
+
+        if (trace) {
+            fprintf(stderr, "ANE CS probe: hasGet=%d hasSet=%d\n",
+                    result->hasGetCodeSigningIdentity, result->hasSetCodeSigningIdentity);
+        }
+
+        if (result->hasGetCodeSigningIdentity) {
+            @try {
+                id identity = ((id(*)(Class,SEL))objc_msgSend)(vcCls, getSel);
+                if (identity) {
+                    result->gotIdentityString = true;
+                    const char *str = NULL;
+                    if ([identity isKindOfClass:[NSString class]]) {
+                        str = [(NSString *)identity UTF8String];
+                    } else {
+                        str = [[NSString stringWithFormat:@"%@", identity] UTF8String];
+                    }
+                    if (str) {
+                        strncpy(result->identityString, str, sizeof(result->identityString) - 1);
+                    }
+                    if (trace) {
+                        fprintf(stderr, "ANE CS probe: identity = '%s' (class: %s)\n",
+                                result->identityString,
+                                [NSStringFromClass([identity class]) UTF8String]);
+                    }
+                } else {
+                    if (trace) fprintf(stderr, "ANE CS probe: getCodeSigningIdentity → nil\n");
+                }
+            } @catch (NSException *ex) {
+                if (trace) fprintf(stderr, "ANE CS probe: get threw: %s\n",
+                                   [[ex description] UTF8String]);
+            }
+        }
+
+        if (result->hasSetCodeSigningIdentity) {
+            // setCodeSigningIdentity: crashes with __setObject:forKey: if passed a plain
+            // string — the internal implementation treats the class-level identity store
+            // as a dictionary keyed by identity. Try NSData (SecCodeCopyGuestWithAttributes
+            // returns kSecCodeInfoIdentifier as a string, but the setter may need a different
+            // type). Wrap in @try to catch any crash.
+            NSArray *identities = @[
+                @"com.apple.coreml",
+                @"com.apple.appleNeuralEngine",
+                @"*",
+            ];
+            for (NSString *identity in identities) {
+                @try {
+                    if (trace) {
+                        fprintf(stderr, "ANE CS probe: trying setCodeSigningIdentity: '%s'\n",
+                                [identity UTF8String]);
+                    }
+                    ((void(*)(Class,SEL,id))objc_msgSend)(vcCls, setSel, identity);
+                    result->setIdentityBeforeInstantiation = true;
+
+                    SEL sharedConnSel = @selector(sharedConnection);
+                    if ([vcCls respondsToSelector:sharedConnSel]) {
+                        id vc = ((id(*)(Class,SEL))objc_msgSend)(vcCls, sharedConnSel);
+                        if (vc) {
+                            result->instantiationSucceededAfterSet = true;
+                            if (trace) {
+                                fprintf(stderr, "ANE CS probe: +sharedConnection after set '%s' → non-nil!\n",
+                                        [identity UTF8String]);
+                            }
+                            break;
+                        } else if (trace) {
+                            fprintf(stderr, "ANE CS probe: +sharedConnection after set '%s' → nil\n",
+                                    [identity UTF8String]);
+                        }
+                    }
+                } @catch (NSException *ex) {
+                    if (trace) fprintf(stderr, "ANE CS probe: set '%s' threw: %s\n",
+                                       [identity UTF8String], [[ex description] UTF8String]);
+                }
+            }
+        }
+    }
+}
+
+// --- Standard Eval CompletionHandler Probe ---
+
+void ane_interop_probe_standard_completion_handler(
+    ANEHandle *handle,
+    ANEInteropStandardCompletionProbeResult *result)
+{
+    @autoreleasepool {
+        if (!result) return;
+        memset(result, 0, sizeof(*result));
+        if (!handle) return;
+
+        bool trace = ane_interop_trace_enabled();
+        id req = (__bridge id)handle->request;
+        if (!req) return;
+
+        SEL setCompletionHandlerSel = @selector(setCompletionHandler:);
+        result->requestHasCompletionHandler = [req respondsToSelector:setCompletionHandlerSel];
+
+        if (!result->requestHasCompletionHandler) {
+            if (trace) fprintf(stderr, "ANE std-completion: no setCompletionHandler:\n");
+            return;
+        }
+
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        __block BOOL handlerFired = NO;
+        @try {
+            ((void(*)(id,SEL,id))objc_msgSend)(req, setCompletionHandlerSel,
+                ^{
+                    handlerFired = YES;
+                    dispatch_semaphore_signal(sem);
+                });
+            result->completionHandlerSet = true;
+            if (trace) fprintf(stderr, "ANE std-completion: handler set\n");
+        } @catch (NSException *ex) {
+            if (trace) fprintf(stderr, "ANE std-completion: setCompletionHandler threw: %s\n",
+                               [[ex description] UTF8String]);
+            return;
+        }
+
+        id mdl = (__bridge id)handle->model;
+        NSDictionary *options = handle->evalOptions
+            ? (__bridge NSDictionary *)handle->evalOptions : @{};
+        NSError *e = nil;
+
+        uint64_t start = mach_absolute_time();
+        BOOL ok = ((BOOL(*)(id,SEL,unsigned int,id,id,NSError**))objc_msgSend)(
+            mdl, @selector(evaluateWithQoS:options:request:error:), 21, options, req, &e);
+        uint64_t end = mach_absolute_time();
+
+        result->evalSucceeded = ok ? true : false;
+        if (trace) {
+            fprintf(stderr, "ANE std-completion: eval %s\n", ok ? "succeeded" : "failed");
+        }
+
+        // Also try _ANEClient eval path
+        if (!handlerFired && handle->client && handle->clientModel) {
+            id client = (__bridge id)handle->client;
+            id modelObj = (__bridge id)handle->clientModel;
+            SEL evalSel = @selector(evaluateWithModel:options:request:qos:error:);
+            if ([client respondsToSelector:evalSel]) {
+                NSError *e2 = nil;
+                ((BOOL(*)(id,SEL,id,id,id,unsigned int,NSError**))objc_msgSend)(
+                    client, evalSel, modelObj, options, req, 21, &e2);
+                if (trace) fprintf(stderr, "ANE std-completion: tried _ANEClient eval too\n");
+            }
+        }
+
+        long waited = dispatch_semaphore_wait(sem,
+            dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC));
+        result->completionHandlerFired = (waited == 0 && handlerFired) ? true : false;
+
+        mach_timebase_info_data_t tbi;
+        mach_timebase_info(&tbi);
+        double ns = (double)(end - start) * (double)tbi.numer / (double)tbi.denom;
+        result->evalTimeMS = ns / 1e6;
+
+        if (trace) {
+            fprintf(stderr, "ANE std-completion: fired=%s eval=%.3fms\n",
+                    result->completionHandlerFired ? "YES" : "NO",
+                    result->evalTimeMS);
+        }
+
+        @try {
+            ((void(*)(id,SEL,id))objc_msgSend)(req, setCompletionHandlerSel, (id)nil);
+        } @catch (NSException *ex) {
+            // ignore cleanup failure
         }
     }
 }
