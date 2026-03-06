@@ -144,6 +144,14 @@ enum DecodeRuntimeOptions {
     }
 }
 
+enum FusedTwoLayerCacheLayout {
+    static let packedKVChannels = 4 * ModelConfig.dim
+    static let layer0K = 0
+    static let layer0V = ModelConfig.dim
+    static let layer1K = 2 * ModelConfig.dim
+    static let layer1V = 3 * ModelConfig.dim
+}
+
 public struct DecodeKernelProfile: Sendable {
     public struct LayerSamples: Sendable {
         public var attnEvalUS: [Double] = []
@@ -322,6 +330,83 @@ public struct FusedDecodeSurfaceHandles {
             SurfaceIO.writeFP16(to: zeroLane, data: src, channels: ModelConfig.dim, spatial: kernels.laneSpatial)
         }
         maskedLaneValues.withUnsafeBufferPointer { src in
+            SurfaceIO.writeFP16(to: maskedLane, data: src, channels: ModelConfig.dim, spatial: kernels.laneSpatial)
+        }
+    }
+}
+
+/// Decode surfaces for one fused two-layer kernel.
+///
+/// The fused kernel has 2 inputs and 3 outputs:
+/// - Inputs:  x (0), packedCache (1)
+/// - Outputs: xNext (0), packedK (1), packedV (2)
+public struct FusedTwoLayerDecodeSurfaceHandles {
+    public let fusedIn: IOSurfaceRef
+    public let packedKVCache: IOSurfaceRef
+    public let packedKVCacheFull: IOSurfaceRef
+    public let maskCache0: IOSurfaceRef
+    public let maskCache0Full: IOSurfaceRef
+    public let maskCache1: IOSurfaceRef
+    public let maskCache1Full: IOSurfaceRef
+    public let xNextOut: IOSurfaceRef
+    public let kPackedOut: IOSurfaceRef
+    public let vPackedOut: IOSurfaceRef
+    public let zeroLane: IOSurfaceRef
+    public let zeroPackedKVLane: IOSurfaceRef
+    public let maskedLane: IOSurfaceRef
+    public let maxSeq: Int
+    public let kernelMaxSeq: Int
+    public let laneSpatial: Int
+
+    public init(kernels: borrowing FusedTwoLayerDecodeKernelSet, logicalMaxSeq: Int? = nil) throws(ANEError) {
+        self.fusedIn = try kernels.fusedPair.inputSurface(at: 0)
+        self.packedKVCache = try kernels.fusedPair.inputSurface(at: 1)
+        self.maskCache0 = try kernels.fusedPair.inputSurface(at: 2)
+        self.maskCache1 = try kernels.fusedPair.inputSurface(at: 3)
+        self.xNextOut = try kernels.fusedPair.outputSurface(at: 0)
+        self.kPackedOut = try kernels.fusedPair.outputSurface(at: 1)
+        self.vPackedOut = try kernels.fusedPair.outputSurface(at: 2)
+        self.maxSeq = logicalMaxSeq ?? kernels.maxSeq
+        self.kernelMaxSeq = kernels.kernelMaxSeq
+        self.laneSpatial = kernels.laneSpatial
+
+        let packedKVChannels = FusedTwoLayerCacheLayout.packedKVChannels
+        guard let zeroLane = ane_interop_create_surface(ModelConfig.dim * kernels.laneSpatial * 2),
+              let zeroPackedKVLane = ane_interop_create_surface(packedKVChannels * kernels.laneSpatial * 2),
+              let maskedLane = ane_interop_create_surface(ModelConfig.dim * kernels.laneSpatial * 2) else {
+            throw .surfaceAllocationFailed
+        }
+        self.zeroLane = zeroLane
+        self.zeroPackedKVLane = zeroPackedKVLane
+        self.maskedLane = maskedLane
+
+        if self.maxSeq == self.kernelMaxSeq {
+            self.packedKVCacheFull = self.packedKVCache
+            self.maskCache0Full = self.maskCache0
+            self.maskCache1Full = self.maskCache1
+        } else {
+            guard let packedKVCacheFull = ane_interop_create_surface(packedKVChannels * self.maxSeq * 2),
+                  let maskCache0Full = ane_interop_create_surface(ModelConfig.dim * self.maxSeq * 2),
+                  let maskCache1Full = ane_interop_create_surface(ModelConfig.dim * self.maxSeq * 2) else {
+                throw .surfaceAllocationFailed
+            }
+            self.packedKVCacheFull = packedKVCacheFull
+            self.maskCache0Full = maskCache0Full
+            self.maskCache1Full = maskCache1Full
+        }
+
+        let zeroLaneValues = Array(repeating: Float(0), count: ModelConfig.dim * kernels.laneSpatial)
+        let maskFill: Float = ProcessInfo.processInfo.environment["ESPRESSO_DECODE_MASK_INIT_ZERO"] == "1" ? 0 : -1e4
+        let zeroPackedKVValues = Array(repeating: Float(0), count: packedKVChannels * kernels.laneSpatial)
+        let maskedValues = Array(repeating: maskFill, count: ModelConfig.dim * kernels.laneSpatial)
+
+        zeroLaneValues.withUnsafeBufferPointer { src in
+            SurfaceIO.writeFP16(to: zeroLane, data: src, channels: ModelConfig.dim, spatial: kernels.laneSpatial)
+        }
+        zeroPackedKVValues.withUnsafeBufferPointer { src in
+            SurfaceIO.writeFP16(to: zeroPackedKVLane, data: src, channels: packedKVChannels, spatial: kernels.laneSpatial)
+        }
+        maskedValues.withUnsafeBufferPointer { src in
             SurfaceIO.writeFP16(to: maskedLane, data: src, channels: ModelConfig.dim, spatial: kernels.laneSpatial)
         }
     }
@@ -1090,6 +1175,366 @@ public extension ForwardPass {
             }
         } catch {
             throw .invalidArguments("fused final decode lane unpack failed: \(error)")
+        }
+        timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
+
+        try decodeState.commitTokenStep(expectedIndex: tokenIndex)
+    }
+}
+
+public extension ForwardPass {
+    private static func synchronizeFusedTwoLayerDecodeWindowCaches(
+        handles: FusedTwoLayerDecodeSurfaceHandles,
+        windowBase: Int,
+        dim: Int
+    ) throws(ANEError) {
+        let packedKVChannels = FusedTwoLayerCacheLayout.packedKVChannels
+        let windowSpatial = handles.kernelMaxSeq
+        for windowIndex in 0..<windowSpatial {
+            let globalIndex = windowBase + windowIndex
+            if globalIndex < handles.maxSeq {
+                do {
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.packedKVCache,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.packedKVCacheFull,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: globalIndex,
+                        srcSpatial: handles.maxSeq,
+                        channels: packedKVChannels
+                    )
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.maskCache0,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.maskCache0Full,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: globalIndex,
+                        srcSpatial: handles.maxSeq,
+                        channels: dim
+                    )
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.maskCache1,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.maskCache1Full,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: globalIndex,
+                        srcSpatial: handles.maxSeq,
+                        channels: dim
+                    )
+                } catch {
+                    throw .invalidArguments("fused two-layer cache window sync failed at globalIndex=\(globalIndex): \(error)")
+                }
+            } else {
+                do {
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.packedKVCache,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.zeroPackedKVLane,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: 0,
+                        srcSpatial: handles.laneSpatial,
+                        channels: packedKVChannels
+                    )
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.maskCache0,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.maskedLane,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: 0,
+                        srcSpatial: handles.laneSpatial,
+                        channels: dim
+                    )
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.maskCache1,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: windowIndex,
+                        dstSpatial: windowSpatial,
+                        src: handles.maskedLane,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: 0,
+                        srcSpatial: handles.laneSpatial,
+                        channels: dim
+                    )
+                } catch {
+                    throw .invalidArguments("fused two-layer padded-window fill failed at windowIndex=\(windowIndex): \(error)")
+                }
+            }
+        }
+    }
+
+    static func initializeFusedTwoLayerDecodeCachesAndMask(
+        surfaceHandles: [FusedTwoLayerDecodeSurfaceHandles],
+        dim: Int = ModelConfig.dim
+    ) {
+        precondition(dim > 0)
+        guard let first = surfaceHandles.first else { return }
+        let maxSeq = first.maxSeq
+        let maskFill: Float = ProcessInfo.processInfo.environment["ESPRESSO_DECODE_MASK_INIT_ZERO"] == "1" ? 0 : -1e4
+        let packedKVChannels = FusedTwoLayerCacheLayout.packedKVChannels
+        let packedKVCache = Array(repeating: Float(0), count: packedKVChannels * maxSeq)
+        let masked = Array(repeating: maskFill, count: dim * maxSeq)
+
+        for handles in surfaceHandles {
+            precondition(handles.maxSeq == maxSeq)
+            packedKVCache.withUnsafeBufferPointer { src in
+                SurfaceIO.writeFP16(
+                    to: handles.packedKVCacheFull,
+                    data: src,
+                    channels: packedKVChannels,
+                    spatial: maxSeq
+                )
+            }
+            masked.withUnsafeBufferPointer { src in
+                SurfaceIO.writeFP16(to: handles.maskCache0Full, data: src, channels: dim, spatial: maxSeq)
+                SurfaceIO.writeFP16(to: handles.maskCache1Full, data: src, channels: dim, spatial: maxSeq)
+            }
+            if handles.maxSeq != handles.kernelMaxSeq {
+                do {
+                    try synchronizeFusedTwoLayerDecodeWindowCaches(
+                        handles: handles,
+                        windowBase: 0,
+                        dim: dim
+                    )
+                } catch {
+                    preconditionFailure("fused two-layer window init failed: \(error)")
+                }
+            }
+            do {
+                try SurfaceIO.copyFP16(
+                    dst: handles.fusedIn,
+                    dstChannelOffset: 0,
+                    src: handles.zeroLane,
+                    srcChannelOffset: 0,
+                    channels: dim,
+                    spatial: handles.laneSpatial
+                )
+            } catch {
+                preconditionFailure("fused two-layer lane zero-init failed: \(error)")
+            }
+        }
+    }
+
+    static func runFusedTwoLayerDecodeTimed(
+        xCur: borrowing TensorBuffer,
+        kernels: borrowing LayerStorage<FusedTwoLayerDecodeKernelSet>,
+        surfaceHandles: [FusedTwoLayerDecodeSurfaceHandles],
+        decodeState: inout DecodeState,
+        dim: Int = ModelConfig.dim,
+        timings: inout StepTimingBreakdown,
+        profiler: DecodeKernelProfiler? = nil
+    ) throws(ANEError) {
+        precondition(kernels.count > 0)
+        precondition(surfaceHandles.count == kernels.count)
+        precondition(dim > 0)
+        precondition(xCur.count == dim)
+        let maxSeq = decodeState.maxSeq
+        for handles in surfaceHandles {
+            precondition(handles.maxSeq == maxSeq)
+        }
+
+        let tokenIndex = try decodeState.beginTokenStep()
+        let laneSpatial = surfaceHandles[0].laneSpatial
+        let kernelMaxSeq = surfaceHandles[0].kernelMaxSeq
+        let forceFullWindowSync = DecodeRuntimeOptions.forceFullWindowSync
+        precondition(laneSpatial > 0)
+        for handles in surfaceHandles {
+            precondition(handles.laneSpatial == laneSpatial)
+            precondition(handles.kernelMaxSeq == kernelMaxSeq)
+        }
+        let windowBase = DecodeTiling.windowBase(for: tokenIndex, laneSpatial: kernelMaxSeq)
+        let windowLocalIndex = DecodeTiling.localIndex(for: tokenIndex, laneSpatial: kernelMaxSeq)
+
+        var t0 = RuntimeClock.now()
+        do {
+            try xCur.withUnsafeBufferPointer { xBuf in
+                try SurfaceIO.writeFP16SpatialSlice(
+                    to: surfaceHandles[0].fusedIn,
+                    channelOffset: 0,
+                    spatialIndex: 0,
+                    spatial: laneSpatial,
+                    data: xBuf,
+                    channels: dim
+                )
+            }
+        } catch {
+            throw .invalidArguments("fused two-layer token lane write failed: \(error)")
+        }
+        timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
+
+        for pairIndex in 0..<kernels.count {
+            let handles = surfaceHandles[pairIndex]
+
+            if handles.maxSeq != handles.kernelMaxSeq {
+                if forceFullWindowSync || DecodeTiling.shouldSyncWindow(for: tokenIndex, laneSpatial: kernelMaxSeq) {
+                    t0 = RuntimeClock.now()
+                    try synchronizeFusedTwoLayerDecodeWindowCaches(
+                        handles: handles,
+                        windowBase: windowBase,
+                        dim: dim
+                    )
+                    let windowSyncDelta = RuntimeClock.now() - t0
+                    timings.tIO += RuntimeClock.ms(windowSyncDelta)
+                }
+            }
+
+            t0 = RuntimeClock.now()
+            do {
+                try kernels[pairIndex].fusedPair.eval()
+            } catch {
+                throw .invalidArguments("fusedTwoLayerDecode eval failed at pair \(pairIndex), token \(tokenIndex): \(error)")
+            }
+            let fusedEvalDelta = RuntimeClock.now() - t0
+            timings.tAne += RuntimeClock.ms(fusedEvalDelta)
+            let fusedEvalUS = RuntimeClock.us(fusedEvalDelta)
+            let fusedHwNS = kernels[pairIndex].fusedPair.lastHWExecutionTimeNS()
+            let fusedHostOverheadUS = max(0, fusedEvalUS - Double(fusedHwNS) / 1_000.0)
+
+            let writebackSpecs = [
+                (dstOffset: FusedTwoLayerCacheLayout.layer0K, srcSurface: handles.kPackedOut, srcOffset: 0),
+                (dstOffset: FusedTwoLayerCacheLayout.layer0V, srcSurface: handles.vPackedOut, srcOffset: 0),
+                (dstOffset: FusedTwoLayerCacheLayout.layer1K, srcSurface: handles.kPackedOut, srcOffset: dim),
+                (dstOffset: FusedTwoLayerCacheLayout.layer1V, srcSurface: handles.vPackedOut, srcOffset: dim),
+            ]
+            var packedKVUpdateUS: Double = 0
+            for spec in writebackSpecs {
+                t0 = RuntimeClock.now()
+                do {
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: handles.packedKVCacheFull,
+                        dstChannelOffset: spec.dstOffset,
+                        dstSpatialIndex: tokenIndex,
+                        dstSpatial: maxSeq,
+                        src: spec.srcSurface,
+                        srcChannelOffset: spec.srcOffset,
+                        srcSpatialIndex: 0,
+                        srcSpatial: laneSpatial,
+                        channels: dim
+                    )
+                    if handles.maxSeq != handles.kernelMaxSeq && !forceFullWindowSync {
+                        try SurfaceIO.copyFP16SpatialSlice(
+                            dst: handles.packedKVCache,
+                            dstChannelOffset: spec.dstOffset,
+                            dstSpatialIndex: windowLocalIndex,
+                            dstSpatial: kernelMaxSeq,
+                            src: spec.srcSurface,
+                            srcChannelOffset: spec.srcOffset,
+                            srcSpatialIndex: 0,
+                            srcSpatial: laneSpatial,
+                            channels: dim
+                        )
+                    }
+                } catch {
+                    throw .invalidArguments("fused two-layer packed K/V writeback failed: \(error)")
+                }
+                let updateDelta = RuntimeClock.now() - t0
+                timings.tIO += RuntimeClock.ms(updateDelta)
+                packedKVUpdateUS += RuntimeClock.us(updateDelta)
+            }
+            var maskUpdateUS: Double = 0
+            let maskTargets = [
+                (window: handles.maskCache0, full: handles.maskCache0Full),
+                (window: handles.maskCache1, full: handles.maskCache1Full),
+            ]
+            for maskTarget in maskTargets {
+                t0 = RuntimeClock.now()
+                do {
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: maskTarget.full,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: tokenIndex,
+                        dstSpatial: maxSeq,
+                        src: handles.zeroLane,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: 0,
+                        srcSpatial: laneSpatial,
+                        channels: dim
+                    )
+                    if handles.maxSeq != handles.kernelMaxSeq && !forceFullWindowSync {
+                        try SurfaceIO.copyFP16SpatialSlice(
+                            dst: maskTarget.window,
+                            dstChannelOffset: 0,
+                            dstSpatialIndex: windowLocalIndex,
+                            dstSpatial: kernelMaxSeq,
+                            src: handles.zeroLane,
+                            srcChannelOffset: 0,
+                            srcSpatialIndex: 0,
+                            srcSpatial: laneSpatial,
+                            channels: dim
+                        )
+                    }
+                } catch {
+                    throw .invalidArguments("fused two-layer mask flip failed: \(error)")
+                }
+                let maskDelta = RuntimeClock.now() - t0
+                timings.tIO += RuntimeClock.ms(maskDelta)
+                maskUpdateUS += RuntimeClock.us(maskDelta)
+            }
+
+            var chainToNextUS: Double = 0
+            if pairIndex + 1 < kernels.count {
+                t0 = RuntimeClock.now()
+                do {
+                    try SurfaceIO.copyFP16SpatialSlice(
+                        dst: surfaceHandles[pairIndex + 1].fusedIn,
+                        dstChannelOffset: 0,
+                        dstSpatialIndex: 0,
+                        dstSpatial: laneSpatial,
+                        src: handles.xNextOut,
+                        srcChannelOffset: 0,
+                        srcSpatialIndex: 0,
+                        srcSpatial: laneSpatial,
+                        channels: dim
+                    )
+                } catch {
+                    throw .invalidArguments("fused two-layer -> next pair chain failed: \(error)")
+                }
+                let nextCopyDelta = RuntimeClock.now() - t0
+                timings.tIO += RuntimeClock.ms(nextCopyDelta)
+                chainToNextUS = RuntimeClock.us(nextCopyDelta)
+            }
+
+            profiler?.record(
+                layerIndex: pairIndex,
+                attnEvalUS: fusedEvalUS,
+                attnHwNS: fusedHwNS,
+                attnHostOverheadUS: fusedHostOverheadUS,
+                selfMaskUpdateUS: 0,
+                kCacheUpdateUS: packedKVUpdateUS,
+                vCacheUpdateUS: 0,
+                maskUpdateUS: maskUpdateUS,
+                x2ToFfnCopyUS: 0,
+                ffnEvalUS: 0,
+                ffnHwNS: 0,
+                ffnHostOverheadUS: 0,
+                ffnToNextAttnCopyUS: chainToNextUS
+            )
+        }
+
+        let finalHandles = surfaceHandles[kernels.count - 1]
+        t0 = RuntimeClock.now()
+        do {
+            try xCur.withUnsafeMutableBufferPointer { out in
+                try SurfaceIO.readFP16SpatialSlice(
+                    from: finalHandles.xNextOut,
+                    channelOffset: 0,
+                    spatialIndex: 0,
+                    spatial: laneSpatial,
+                    into: out,
+                    channels: dim
+                )
+            }
+        } catch {
+            throw .invalidArguments("fused two-layer final decode lane unpack failed: \(error)")
         }
         timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
 

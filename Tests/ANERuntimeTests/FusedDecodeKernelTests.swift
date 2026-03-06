@@ -132,6 +132,86 @@ final class FusedDecodeLayerGeneratorTests: XCTestCase {
     }
 }
 
+final class FusedTwoLayerDecodeGeneratorTests: XCTestCase {
+
+    func test_mil_text_is_nonempty_and_contains_program_header() {
+        let gen = FusedTwoLayerDecodeGenerator(maxSeq: 32, laneSpatial: 32)
+        let mil = gen.milText
+        XCTAssertFalse(mil.isEmpty)
+        XCTAssertTrue(mil.contains("program(1.3)"))
+        XCTAssertTrue(mil.contains("func main<ios18>"))
+    }
+
+    func test_mil_text_contains_all_eighteen_weight_blobs() {
+        let gen = FusedTwoLayerDecodeGenerator(maxSeq: 32, laneSpatial: 32)
+        let mil = gen.milText
+        let expectedBlobs = [
+            "l0_rms1.bin", "l0_wq.bin", "l0_wk.bin", "l0_wv.bin", "l0_wo.bin",
+            "l0_rms2.bin", "l0_w1.bin", "l0_w3.bin", "l0_w2.bin",
+            "l1_rms1.bin", "l1_wq.bin", "l1_wk.bin", "l1_wv.bin", "l1_wo.bin",
+            "l1_rms2.bin", "l1_w1.bin", "l1_w3.bin", "l1_w2.bin",
+        ]
+        for blob in expectedBlobs {
+            XCTAssertTrue(mil.contains(blob), "Missing weight blob: \(blob)")
+        }
+    }
+
+    func test_mil_text_contains_packed_kv_input_and_output_concat() {
+        let gen = FusedTwoLayerDecodeGenerator(maxSeq: 32, laneSpatial: 32)
+        let mil = gen.milText
+        XCTAssertTrue(mil.contains("tensor<fp16, [1, 3072, 1, 32]> packedKVCache"))
+        XCTAssertTrue(mil.contains("> maskCache0,"))
+        XCTAssertTrue(mil.contains("> maskCache1)"))
+        XCTAssertTrue(mil.contains("concat(axis=cax,interleave=cid,values=(kfL0,l1_kf))"))
+        XCTAssertTrue(mil.contains("concat(axis=cax,interleave=cid,values=(vfL0,l1_vf))"))
+    }
+
+    func test_mil_text_contains_four_packed_kv_slices() {
+        let gen = FusedTwoLayerDecodeGenerator(maxSeq: 32, laneSpatial: 32)
+        let mil = gen.milText
+        let count = mil.components(separatedBy: "slice_by_size(x=packedKVCache").count - 1
+        XCTAssertEqual(count, 4, "Expected 4 packed-K/V slices (K/V for 2 layers)")
+    }
+
+    func test_mil_text_has_unique_ssa_names() {
+        let gen = FusedTwoLayerDecodeGenerator(maxSeq: 32, laneSpatial: 32)
+        let mil = gen.milText
+
+        var names: [String] = []
+        var scanner = mil[mil.startIndex...]
+        let namePrefix = "name=string(\""
+        let nameSuffix = "\")"
+        while let range = scanner.range(of: namePrefix) {
+            let afterPrefix = range.upperBound
+            if let endRange = scanner[afterPrefix...].range(of: nameSuffix) {
+                names.append(String(scanner[afterPrefix..<endRange.lowerBound]))
+                scanner = scanner[endRange.upperBound...]
+            } else {
+                break
+            }
+        }
+
+        XCTAssertEqual(names.count, Set(names).count, "Duplicate SSA names found in two-layer MIL")
+    }
+
+    func test_inputByteSizes_has_four_entries() {
+        let gen = FusedTwoLayerDecodeGenerator(maxSeq: 64, laneSpatial: 32)
+        XCTAssertEqual(gen.inputByteSizes.count, 4)
+        XCTAssertEqual(gen.inputByteSizes[0], ModelConfig.dim * 32 * 2)
+        XCTAssertEqual(gen.inputByteSizes[1], 4 * ModelConfig.dim * 64 * 2)
+        XCTAssertEqual(gen.inputByteSizes[2], ModelConfig.dim * 64 * 2)
+        XCTAssertEqual(gen.inputByteSizes[3], ModelConfig.dim * 64 * 2)
+    }
+
+    func test_outputByteSizes_has_three_entries() {
+        let gen = FusedTwoLayerDecodeGenerator(maxSeq: 32, laneSpatial: 32)
+        XCTAssertEqual(gen.outputByteSizes.count, 3)
+        XCTAssertEqual(gen.outputByteSizes[0], ModelConfig.dim * 32 * 2)
+        XCTAssertEqual(gen.outputByteSizes[1], 2 * ModelConfig.dim * 32 * 2)
+        XCTAssertEqual(gen.outputByteSizes[2], 2 * ModelConfig.dim * 32 * 2)
+    }
+}
+
 // MARK: - Hardware-gated compilation tests
 
 private func requireANEHardware(file: StaticString = #filePath, line: UInt = #line) throws {
@@ -346,6 +426,26 @@ final class FusedDecodeKernelSetTests: XCTestCase {
             let unfusedPerStep = unfusedTimings.tAne / Double(unfusedStepsCompleted)
             let savedMS = unfusedPerStep - fusedPerStep
             print("  Savings: \(String(format: "%.3f", savedMS))ms/step (\(String(format: "%.1f", savedMS / unfusedPerStep * 100))%)")
+        }
+    }
+}
+
+final class FusedTwoLayerDecodeKernelSetTests: XCTestCase {
+
+    func test_fused_two_layer_compile_fails_with_controlled_error_on_hardware() throws {
+        try requireANEHardware()
+        let layer0Weights = makeTestLayerWeights(value: 0.01)
+        let layer1Weights = makeTestLayerWeights(value: 0.02)
+        do {
+            _ = try FusedTwoLayerDecodeKernelSet(
+                layer0Weights: layer0Weights,
+                layer1Weights: layer1Weights,
+                maxSeq: 32
+            )
+            XCTFail("Expected fused two-layer fallback compile to fail with a controlled error")
+        } catch {
+            print("  NOTE: fused two-layer fallback compile failed as expected: \(error)")
+            XCTAssertTrue("\(error)".contains("ANE kernel compilation failed"))
         }
     }
 }

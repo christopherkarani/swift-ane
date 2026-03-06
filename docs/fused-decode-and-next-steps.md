@@ -258,6 +258,64 @@ budget (which is capped at ~100 per process) and surface memory.
 |---|----------|----------------|--------|------|
 | 1 | 2-layer KV cache packing | 0.285ms/token + zero inter-layer IO | Medium | Low |
 | 2 | `evaluateRealTimeWithModel:` probe | Unknown (possibly 0.05ms/dispatch) | Small | Low |
+
+---
+
+## 7. Avenue 1 Result — Multi-Layer Kernel Fusion (ABANDONED)
+
+**Date:** March 6, 2026
+
+### Attempt 1: Fully packed K/V/mask cache input
+
+- Built `FusedTwoLayerDecodeGenerator` / `FusedTwoLayerDecodeKernelSet` with a packed cache input
+  `[1, 4608, 1, maxSeq]` and `slice_by_size` extraction for:
+  - L0 K, V, mask
+  - L1 K, V, mask
+- Added non-hardware TDD coverage for:
+  - MIL header / blob paths
+  - packed-cache slice count
+  - unique SSA names
+  - I/O byte-size contract
+- Hardware result:
+  - `ANE_HARDWARE_TESTS=1 swift test --filter FusedTwoLayerDecodeKernelSetTests`
+  - `_ANECompiler : ANECCompile() FAILED`
+  - underlying compiler error: `InvalidMILProgram`
+
+### Fallback: K/V-only packing, masks split back out
+
+- Reduced the candidate to:
+  - `packedKVCache` input `[1, 3072, 1, maxSeq]`
+  - `maskCache0` input `[1, 768, 1, maxSeq]`
+  - `maskCache1` input `[1, 768, 1, maxSeq]`
+- This isolates packed K/V slicing from packed mask slicing while preserving the paired-kernel objective.
+- Hardware result:
+  - `ANE_HARDWARE_TESTS=1 swift test --filter FusedTwoLayerDecodeKernelSetTests/test_fused_two_layer_compile_fails_with_controlled_error_on_hardware`
+  - same `_ANECompiler : ANECCompile() FAILED`
+  - same underlying `InvalidMILProgram`
+
+### Outcome
+
+- Status: **abandoned**
+- Reason: both the full packed-cache design and the K/V-only fallback fail at compile time with
+  `InvalidMILProgram`, so the avenue never reaches eval.
+- Benchmark delta: **N/A**. No post-change per-token timing exists because the candidate kernel never compiled.
+- Per-token gain credited to this avenue: **+0.000ms**
+- Running cumulative savings toward the 4x goal: **0.000ms**
+
+## Results Summary
+
+| Avenue | Status | Per-Token Gain | Cumulative |
+|--------|--------|----------------|------------|
+| 1. Multi-layer fusion | abandoned (`InvalidMILProgram` on full pack and K/V-only fallback) | +0.000ms | 0.000ms |
+| 2. Metal SharedEvent | pending | pending | 0.000ms |
+| 3. Metal+ANE hybrid | pending | pending | 0.000ms |
+| 4. CoreML baseline | pending | N/A | N/A |
+| 5. Speculative decode | pending | pending | 0.000ms |
+| 6. GCD pipeline | pending | pending | 0.000ms |
+
+Direct ANE: 2.574ms/token
+CoreML:     pending
+Speedup:    pending
 | 3 | Metal + ANE hybrid decode | Potentially 2-4x (parallel accelerators) | Large | Medium |
 | 4 | Metal SharedEvent on standard eval | True async dispatch | Medium | Medium |
 | 5 | Speculative decoding | 3-5x algorithmic | Large | Low |
