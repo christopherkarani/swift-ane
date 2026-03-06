@@ -444,6 +444,60 @@ public struct ANEKernel: ~Copyable {
         )
     }
 
+    // MARK: - Real-time eval probe
+
+    public struct RealTimeEvalProbe: Sendable {
+        public let hasBeginRealTimeTask: Bool
+        public let hasEndRealTimeTask: Bool
+        public let hasLoadRealTimeModel: Bool
+        public let hasUnloadRealTimeModel: Bool
+        public let hasEvaluateRealTime: Bool
+        public let realtimeLoadSucceeded: Bool
+        public let realtimeEvalSucceeded: Bool
+        public let standardEvalSucceeded: Bool
+        public let realtimeEvalsCompleted: Int
+        public let standardEvalsCompleted: Int
+        public let realtimeTotalMS: Double
+        public let standardTotalMS: Double
+        public let realtimePerEvalMS: Double
+        public let standardPerEvalMS: Double
+        public let savedPerEvalMS: Double
+        public let savedPercent: Double
+    }
+
+    /// Benchmark the real-time eval path vs standard eval on this kernel.
+    ///
+    /// Runs `nIters` evaluations on both paths and returns per-eval timing.
+    /// The real-time path uses `beginRealTimeTask` → `loadRealTimeModel:` →
+    /// `evaluateRealTimeWithModel:` → `unloadRealTimeModel:` → `endRealTimeTask`.
+    public func realTimeEvalProbe(nIters: Int = 30) -> RealTimeEvalProbe {
+        var raw = ANEInteropRealTimeProbeResult()
+        ane_interop_probe_realtime_eval(handle, Int32(nIters), &raw)
+        return RealTimeEvalProbe(
+            hasBeginRealTimeTask: raw.hasBeginRealTimeTask,
+            hasEndRealTimeTask: raw.hasEndRealTimeTask,
+            hasLoadRealTimeModel: raw.hasLoadRealTimeModel,
+            hasUnloadRealTimeModel: raw.hasUnloadRealTimeModel,
+            hasEvaluateRealTime: raw.hasEvaluateRealTime,
+            realtimeLoadSucceeded: raw.realtimeLoadSucceeded,
+            realtimeEvalSucceeded: raw.realtimeEvalSucceeded,
+            standardEvalSucceeded: raw.standardEvalSucceeded,
+            realtimeEvalsCompleted: Int(raw.realtimeEvalsCompleted),
+            standardEvalsCompleted: Int(raw.standardEvalsCompleted),
+            realtimeTotalMS: raw.realtimeTotalMS,
+            standardTotalMS: raw.standardTotalMS,
+            realtimePerEvalMS: raw.realtimePerEvalMS,
+            standardPerEvalMS: raw.standardPerEvalMS,
+            savedPerEvalMS: raw.savedPerEvalMS,
+            savedPercent: raw.savedPercent
+        )
+    }
+
+    /// Quick check: does this kernel's _ANEClient support the real-time eval path?
+    public var hasRealTimeEvalSupport: Bool {
+        ane_interop_runtime_has_realtime_eval(handle)
+    }
+
     deinit {
         ane_interop_free(handle)
     }

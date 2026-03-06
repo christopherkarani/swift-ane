@@ -1903,3 +1903,200 @@ void ane_interop_probe_standard_completion_handler(
         }
     }
 }
+
+// --- Real-time eval path probe ---
+
+bool ane_interop_runtime_has_realtime_eval(ANEHandle *handle) {
+    if (!handle || !handle->client) return false;
+    id client = (__bridge id)handle->client;
+    return [client respondsToSelector:@selector(evaluateRealTimeWithModel:options:request:error:)]
+        && [client respondsToSelector:@selector(beginRealTimeTask)]
+        && [client respondsToSelector:@selector(endRealTimeTask)]
+        && [client respondsToSelector:@selector(loadRealTimeModel:options:qos:error:)]
+        && [client respondsToSelector:@selector(unloadRealTimeModel:options:qos:error:)];
+}
+
+void ane_interop_probe_realtime_eval(ANEHandle *handle,
+                                      int nIters,
+                                      ANEInteropRealTimeProbeResult *result)
+{
+    @autoreleasepool {
+        if (!result) return;
+        memset(result, 0, sizeof(*result));
+        if (!handle || nIters <= 0) return;
+        if (!handle->client || !handle->clientModel) return;
+
+        bool trace = ane_interop_trace_enabled();
+        id client = (__bridge id)handle->client;
+        id modelObj = (__bridge id)handle->clientModel;
+        id mdl = (__bridge id)handle->model;
+        id req = (__bridge id)handle->request;
+        NSDictionary *options = handle->evalOptions
+            ? (__bridge NSDictionary *)handle->evalOptions : @{};
+
+        // --- Selector discovery ---
+        result->hasBeginRealTimeTask =
+            [client respondsToSelector:@selector(beginRealTimeTask)];
+        result->hasEndRealTimeTask =
+            [client respondsToSelector:@selector(endRealTimeTask)];
+        result->hasLoadRealTimeModel =
+            [client respondsToSelector:@selector(loadRealTimeModel:options:qos:error:)];
+        result->hasUnloadRealTimeModel =
+            [client respondsToSelector:@selector(unloadRealTimeModel:options:qos:error:)];
+        result->hasEvaluateRealTime =
+            [client respondsToSelector:@selector(evaluateRealTimeWithModel:options:request:error:)];
+
+        if (trace) {
+            fprintf(stderr, "ANE rt-probe: beginRT=%d endRT=%d loadRT=%d unloadRT=%d evalRT=%d\n",
+                    result->hasBeginRealTimeTask, result->hasEndRealTimeTask,
+                    result->hasLoadRealTimeModel, result->hasUnloadRealTimeModel,
+                    result->hasEvaluateRealTime);
+        }
+
+        mach_timebase_info_data_t tbi;
+        mach_timebase_info(&tbi);
+
+        // --- Standard eval benchmark (InMemoryModel path, warmup + timed) ---
+        @try {
+            // Warmup: 3 evals via _ANEInMemoryModel.evaluateWithQoS:
+            for (int i = 0; i < 3; i++) {
+                NSError *we = nil;
+                ((BOOL(*)(id,SEL,unsigned int,id,id,NSError**))objc_msgSend)(
+                    mdl, @selector(evaluateWithQoS:options:request:error:),
+                    21, options, req, &we);
+            }
+
+            // Timed: nIters evals via InMemoryModel (same path as decode loop)
+            uint64_t stdStart = mach_absolute_time();
+            int stdOK = 0;
+            for (int i = 0; i < nIters; i++) {
+                NSError *e = nil;
+                BOOL ok = ((BOOL(*)(id,SEL,unsigned int,id,id,NSError**))objc_msgSend)(
+                    mdl, @selector(evaluateWithQoS:options:request:error:),
+                    21, options, req, &e);
+                if (ok) stdOK++;
+                else if (trace) {
+                    fprintf(stderr, "ANE rt-probe: std eval %d failed: %s\n",
+                            i, e ? [[e description] UTF8String] : "no error");
+                    break;
+                }
+            }
+            uint64_t stdEnd = mach_absolute_time();
+
+            result->standardEvalsCompleted = stdOK;
+            result->standardEvalSucceeded = stdOK > 0;
+            double stdNS = (double)(stdEnd - stdStart) * (double)tbi.numer / (double)tbi.denom;
+            result->standardTotalMS = stdNS / 1e6;
+            if (stdOK > 0) {
+                result->standardPerEvalMS = result->standardTotalMS / (double)stdOK;
+            }
+
+            if (trace) {
+                fprintf(stderr, "ANE rt-probe: std %d/%d evals, total=%.3fms, per=%.3fms\n",
+                        stdOK, nIters, result->standardTotalMS, result->standardPerEvalMS);
+            }
+        } @catch (NSException *ex) {
+            if (trace) fprintf(stderr, "ANE rt-probe: std eval exception: %s\n",
+                               [[ex description] UTF8String]);
+        }
+
+        // --- Real-time eval benchmark ---
+        if (!result->hasBeginRealTimeTask || !result->hasLoadRealTimeModel ||
+            !result->hasEvaluateRealTime) {
+            if (trace) fprintf(stderr, "ANE rt-probe: missing real-time selectors, skipping\n");
+            return;
+        }
+
+        @try {
+            // Begin real-time task
+            ((BOOL(*)(id,SEL))objc_msgSend)(client, @selector(beginRealTimeTask));
+
+            // Load real-time model
+            NSError *loadErr = nil;
+            BOOL loaded = ((BOOL(*)(id,SEL,id,id,unsigned int,NSError**))objc_msgSend)(
+                client, @selector(loadRealTimeModel:options:qos:error:),
+                modelObj, options, 21, &loadErr);
+            result->realtimeLoadSucceeded = loaded ? true : false;
+
+            if (!loaded) {
+                if (trace) fprintf(stderr, "ANE rt-probe: loadRealTimeModel failed: %s\n",
+                                   loadErr ? [[loadErr description] UTF8String] : "no error");
+                // End task and return
+                if (result->hasEndRealTimeTask) {
+                    ((BOOL(*)(id,SEL))objc_msgSend)(client, @selector(endRealTimeTask));
+                }
+                return;
+            }
+
+            if (trace) fprintf(stderr, "ANE rt-probe: loadRealTimeModel succeeded\n");
+
+            // Warmup: 3 evals
+            for (int i = 0; i < 3; i++) {
+                NSError *we = nil;
+                ((BOOL(*)(id,SEL,id,id,id,NSError**))objc_msgSend)(
+                    client, @selector(evaluateRealTimeWithModel:options:request:error:),
+                    modelObj, options, req, &we);
+            }
+
+            // Timed: nIters evals
+            uint64_t rtStart = mach_absolute_time();
+            int rtOK = 0;
+            for (int i = 0; i < nIters; i++) {
+                NSError *e = nil;
+                BOOL ok = ((BOOL(*)(id,SEL,id,id,id,NSError**))objc_msgSend)(
+                    client, @selector(evaluateRealTimeWithModel:options:request:error:),
+                    modelObj, options, req, &e);
+                if (ok) rtOK++;
+                else if (trace) {
+                    fprintf(stderr, "ANE rt-probe: rt eval %d failed: %s\n",
+                            i, e ? [[e description] UTF8String] : "no error");
+                    break;
+                }
+            }
+            uint64_t rtEnd = mach_absolute_time();
+
+            result->realtimeEvalsCompleted = rtOK;
+            result->realtimeEvalSucceeded = rtOK > 0;
+            double rtNS = (double)(rtEnd - rtStart) * (double)tbi.numer / (double)tbi.denom;
+            result->realtimeTotalMS = rtNS / 1e6;
+            if (rtOK > 0) {
+                result->realtimePerEvalMS = result->realtimeTotalMS / (double)rtOK;
+            }
+
+            // Compute savings
+            if (result->standardPerEvalMS > 0 && result->realtimePerEvalMS > 0) {
+                result->savedPerEvalMS = result->standardPerEvalMS - result->realtimePerEvalMS;
+                result->savedPercent =
+                    (result->savedPerEvalMS / result->standardPerEvalMS) * 100.0;
+            }
+
+            if (trace) {
+                fprintf(stderr, "ANE rt-probe: rt %d/%d evals, total=%.3fms, per=%.3fms\n",
+                        rtOK, nIters, result->realtimeTotalMS, result->realtimePerEvalMS);
+                fprintf(stderr, "ANE rt-probe: saved=%.3fms/eval (%.1f%%)\n",
+                        result->savedPerEvalMS, result->savedPercent);
+            }
+
+            // Unload real-time model
+            if (result->hasUnloadRealTimeModel) {
+                NSError *unloadErr = nil;
+                ((BOOL(*)(id,SEL,id,id,unsigned int,NSError**))objc_msgSend)(
+                    client, @selector(unloadRealTimeModel:options:qos:error:),
+                    modelObj, options, 21, &unloadErr);
+            }
+            // End real-time task
+            if (result->hasEndRealTimeTask) {
+                ((BOOL(*)(id,SEL))objc_msgSend)(client, @selector(endRealTimeTask));
+            }
+        } @catch (NSException *ex) {
+            if (trace) fprintf(stderr, "ANE rt-probe: exception: %s\n",
+                               [[ex description] UTF8String]);
+            // Best-effort cleanup
+            @try {
+                if (result->hasEndRealTimeTask) {
+                    ((BOOL(*)(id,SEL))objc_msgSend)(client, @selector(endRealTimeTask));
+                }
+            } @catch (NSException *ignored) {}
+        }
+    }
+}

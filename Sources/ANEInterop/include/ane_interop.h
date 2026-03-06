@@ -314,6 +314,40 @@ void ane_interop_probe_standard_completion_handler(
     ANEHandle *handle,
     ANEInteropStandardCompletionProbeResult *result);
 
+// --- Real-time eval path probe ---
+
+/// Probes `evaluateRealTimeWithModel:options:request:error:` vs standard eval.
+/// Compiles a kernel, loads via both standard and real-time paths, runs N evals
+/// on each, and returns per-eval timing for comparison.
+typedef struct {
+    bool hasBeginRealTimeTask;
+    bool hasEndRealTimeTask;
+    bool hasLoadRealTimeModel;
+    bool hasUnloadRealTimeModel;
+    bool hasEvaluateRealTime;
+    bool realtimeLoadSucceeded;
+    bool realtimeEvalSucceeded;
+    bool standardEvalSucceeded;
+    int realtimeEvalsCompleted;
+    int standardEvalsCompleted;
+    double realtimeTotalMS;
+    double standardTotalMS;
+    double realtimePerEvalMS;
+    double standardPerEvalMS;
+    double savedPerEvalMS;
+    double savedPercent;
+} ANEInteropRealTimeProbeResult;
+
+/// Run the real-time vs standard eval benchmark probe.
+/// `handle` must be an already-compiled kernel.
+/// `nIters` is the number of eval iterations per path (recommended: 20-50).
+void ane_interop_probe_realtime_eval(ANEHandle *handle,
+                                      int nIters,
+                                      ANEInteropRealTimeProbeResult *result);
+
+/// Check if the _ANEClient on a compiled handle supports the real-time eval selectors.
+bool ane_interop_runtime_has_realtime_eval(ANEHandle *handle);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
