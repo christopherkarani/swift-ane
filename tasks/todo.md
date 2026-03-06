@@ -80,3 +80,9 @@
 - CoreML `.cpuAndNeuralEngine` median: `3.007 ms/token`.
 - Speedup vs CoreML `.cpuAndNeuralEngine`: `1.05x`.
 - Strict fastest-CoreML speedup observed in the same run: `1.04x`.
+
+### Avenue 5 review
+- Status: abandoned
+- Blocker: the current benchmark/runtime path is hidden-state based and does not provide a token-level generation + batched verification loop for speculative decoding.
+- Existing training code has embeddings/classifier math, but there is no ready-made inference path for meaningful accept-rate measurement.
+- Net effect for this pass: no benchmark and no landed decode savings.

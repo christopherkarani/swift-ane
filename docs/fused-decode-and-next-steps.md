@@ -310,7 +310,7 @@ budget (which is capped at ~100 per process) and surface memory.
 | 2. Metal SharedEvent | abandoned | +0.000ms | 0.000ms |
 | 3. Metal+ANE hybrid | abandoned | +0.000ms | 0.000ms |
 | 4. CoreML baseline | measured | N/A | 0.000ms |
-| 5. Speculative decode | pending | pending | 0.000ms |
+| 5. Speculative decode | abandoned | +0.000ms | 0.000ms |
 | 6. GCD pipeline | pending | pending | 0.000ms |
 
 Direct ANE: 2.875ms/token
@@ -468,3 +468,27 @@ Strict fastest-CoreML gate:
 Interpretation:
 - The direct `_ANEClient` path currently beats CoreML on this workload, but only narrowly.
 - The current project is far from the `4x over CoreML` target; the measured headroom is about `5%` over `.cpuAndNeuralEngine` and `4%` over the fastest CoreML configuration observed here.
+
+## 11. Avenue 5 Result — Speculative Decoding (ABANDONED)
+
+Date: 2026-03-06
+
+Why this was stopped quickly:
+- The current decode benchmark path is hidden-state based, not token-generation based.
+- `ANEDirectBench.runDecode(...)` pre-generates token embeddings directly and measures layer execution on those embeddings.
+- Training-side code has embeddings, classifier weights, and cross-entropy, but there is no existing inference path that takes token ids to logits, samples candidates, and then verifies them in a batched prefill-style pass.
+- There is also no existing batched verification/prefill decode path that would let the full model verify `N` draft tokens in one pass without building substantial new model/runtime support first.
+
+What I verified locally:
+- `ModelConfig` includes `vocab=32000` and the training path has embedding/classifier machinery.
+- The live decode/inference runtime exposed in the benchmark suite does not currently surface a meaningful token-level speculative decode loop or accept-rate harness.
+
+Abandon reason:
+- On the current random-weight decode harness, speculative acceptance would be numerically possible to simulate but not meaningful.
+- Building a real speculative benchmark here would require a separate generation stack (token ids -> embeddings -> decode -> final norm/classifier -> sampling) and a batched verification path, which is beyond a fast avenue probe.
+- Per the protocol, this is a dead end for the current session because it cannot yield a credible throughput number quickly.
+
+Timing impact recorded for this pass:
+- No benchmark recorded.
+- Landed decode savings: `+0.000 ms/token`
+- Cumulative savings after Avenue 5: `0.000 ms/token`
