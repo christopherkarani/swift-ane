@@ -213,6 +213,73 @@ bool ane_interop_io_write_fp16_unlocked(IOSurfaceRef surface,
 bool ane_interop_io_read_fp16_unlocked(IOSurfaceRef surface, int ch_off,
                                         float *data, int channels, int spatial);
 
+// --- VirtualClient eval path probe ---
+
+typedef enum {
+    ANE_INTEROP_VC_STAGE_UNAVAILABLE = 0,
+    ANE_INTEROP_VC_STAGE_NO_VIRTUAL_CLIENT = 1,
+    ANE_INTEROP_VC_STAGE_SHARED_EVENT_BUILD_FAILED = 2,
+    ANE_INTEROP_VC_STAGE_WAIT_EVENT_BUILD_FAILED = 3,
+    ANE_INTEROP_VC_STAGE_SHARED_EVENTS_BUILD_FAILED = 4,
+    ANE_INTEROP_VC_STAGE_REQUEST_BUILD_FAILED = 5,
+    ANE_INTEROP_VC_STAGE_MAP_SURFACES_FAILED = 6,
+    ANE_INTEROP_VC_STAGE_EVAL_FAILED = 7,
+    ANE_INTEROP_VC_STAGE_EVAL_SUCCEEDED = 8,
+    ANE_INTEROP_VC_STAGE_COMPLETION_EVENT_EVAL_FAILED = 9,
+    ANE_INTEROP_VC_STAGE_COMPLETION_EVENT_EVAL_SUCCEEDED = 10,
+    ANE_INTEROP_VC_STAGE_COMPLETION_HANDLER_EVAL_FAILED = 11,
+    ANE_INTEROP_VC_STAGE_COMPLETION_HANDLER_EVAL_SUCCEEDED = 12,
+    ANE_INTEROP_VC_STAGE_EXCEPTION = 13,
+} ANEInteropVCProbeStage;
+
+typedef struct {
+    bool useCompletionEvent;
+    bool useCompletionHandler;
+    bool useSharedEvents;
+    bool useWaitEvent;
+    bool skipEval;
+    bool mapSurfaces;
+    bool loadOnVirtualClient;
+    uint64_t waitEventValue;
+    uint64_t waitEventType;
+    uint32_t signalSymbolIndex;
+    uint32_t waitSymbolIndex;
+} ANEInteropVCProbeOptions;
+
+typedef struct {
+    bool hasVirtualClientClass;
+    bool hasVirtualClientProperty;
+    bool hasSharedEventsClass;
+    bool hasSharedWaitEventClass;
+    bool hasSharedSignalEventClass;
+    bool hasIOSurfaceSharedEventClass;
+    bool hasDoEvaluateCompletionEvent;
+    bool hasStandardEvaluate;
+    bool hasMapIOSurfaces;
+    bool hasLoadModel;
+    bool hasRequestSharedEventsFactory;
+    bool hasSetSharedEvents;
+    bool hasSetCompletionHandler;
+    bool obtainedVirtualClient;
+    bool builtIOSurfaceSharedEvent;
+    bool builtWaitEvent;
+    bool builtSignalEvent;
+    bool builtSharedEventsContainer;
+    bool builtRequest;
+    bool mappedSurfaces;
+    bool loadedOnVirtualClient;
+    bool standardEvalSucceeded;
+    bool completionEventEvalSucceeded;
+    bool completionHandlerFired;
+    int stage;
+} ANEInteropVCProbeResult;
+
+bool ane_interop_runtime_has_virtual_client(void);
+bool ane_interop_runtime_has_shared_events_request(void);
+void ane_interop_probe_virtual_client_eval(ANEHandle *handle,
+                                            const ANEInteropVCProbeOptions *options,
+                                            ANEInteropVCProbeResult *result);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
