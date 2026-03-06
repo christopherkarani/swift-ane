@@ -1,74 +1,83 @@
-# RWKV-Style Recurrent Decode Prototype (2026-03-06)
+# Recurrent End-to-End Generation Benchmark (2026-03-06)
 
 ## Plan
-- [x] Re-read the latest decode/speculative findings, project memory, and the current decode/runtime code before changing direction.
-- [x] Reconfirm the gating conclusion from the generation harness:
-  - [x] Direct ANE decode remains the transformer control at `2.894 ms/token`.
-  - [x] The real token-generation harness exists and is no longer the blocker.
-  - [x] The current speculative verifier/state-sync design is structurally dead even under forced perfect acceptance.
-- [x] Rewrite the task plan around the next architecture bet:
-  - [x] Primary next step is a minimal recurrent decode-step prototype.
-  - [x] Retain speculative decoding only as documented negative evidence, not an active branch.
-  - [x] Defer RetNet/Mamba unless the recurrent path hits a fundamental wall after honest benchmarking.
-- [x] Record the comparison controls before implementation:
-  - [x] Keep the refreshed transformer control run on hand: `2.894 ms/token` at `--decode-max-seq 32`.
-  - [x] Re-run transformer decode controls at effective contexts `32`, `256`, `1024`, and `4096` using the same tail-step protocol as the recurrent benchmark.
-  - [x] Transformer controls beyond `256` remained runnable and therefore credible on this tiled graph.
-- [x] Add failing tests first for the recurrent prototype:
-  - [x] MIL generator contract for a 2-input / 2-output recurrent step kernel.
-  - [x] Kernel wrapper contract and weight-blob mapping.
-  - [x] Repeated-step loop accounting and state advance semantics.
-  - [x] Hardware-gated compile/eval smoke coverage.
-- [x] Implement the minimal recurrent prototype with minimal surface area:
-  - [x] Add a recurrent MIL generator using only already-proven ops (`conv`, `add`, `mul`, `sigmoid`, `reduce_sum`, `pow`).
-  - [x] Add a runtime kernel set for `x_t, state_in -> x_next, state_out`.
-  - [x] Add a simple repeated-step harness that compiles once and reuses surfaces across all steps.
-  - [x] Keep state size constant across all effective contexts so the benchmark answers the real scaling question.
-- [x] Benchmark the recurrent step honestly:
-  - [x] Use `mach_absolute_time()` / `mach_timebase_info`.
-  - [x] Use at least `3` warmup iterations.
-  - [x] Use at least `20` timed iterations.
-  - [x] Report median latency and effective tokens/sec for effective contexts `32`, `256`, `1024`, and `4096`.
-  - [x] Compare against transformer decode controls at the same effective contexts where available.
-- [x] Apply the RWKV continuation gate immediately:
-  - [x] The recurrent step stayed effectively flat across `32 -> 4096`.
-  - [x] Deeper recurrent tuning is deferred for now because the current tiled transformer control also stayed roughly flat and the prototype is not yet depth-matched to the 6-layer transformer.
+- [x] Re-read the latest recurrent/speculative findings, project memory, lessons, and current generation/bench code before changing anything.
+- [x] State the breakthrough hypothesis up front:
+  - [x] A depth-matched recurrent generation path can still preserve a large runtime advantage after adding prompt handling, output-head projection, and autoregressive loop costs.
+  - [x] The likely new bottleneck is final RMSNorm + classifier logits, not the recurrent trunk itself.
+- [x] State the decisive metric and stop condition up front:
+  - [x] Continue only if end-to-end recurrent generation remains at least `2x` faster than the current transformer generation path after including logits/output head.
+  - [x] Stop deeper recurrent tuning if the gain collapses below that threshold or if compile-time iteration becomes impractical.
+- [x] Record the current controls:
+  - [x] Transformer ANE decode control remains `2.872-2.894 ms/token`.
+  - [x] CoreML `.cpuAndNeuralEngine` decode control remains `3.007 ms/token`.
+  - [x] Transformer generation harness control remains `6.110643 ms/token` on the synthetic echo path.
+  - [x] Minimal recurrent step remains `~0.20-0.32 ms/token`, but only for a single recurrent layer.
+- [x] Rewrite the task around the next honest test:
+  - [x] Integrate the recurrent path into `GenerationHarness.swift`.
+  - [x] Benchmark `2` recurrent layers first as the compile-time / structure gate.
+  - [x] Benchmark `6` recurrent layers only if `2` layers still looks structurally promising.
+  - [x] Compare against current transformer ANE generation and an honest CoreML transformer generation baseline.
+- [x] Add failing tests first for recurrent-backed generation:
+  - [ ] recurrent `AutoregressiveLanguageModel` control flow through prompt + decode loop
+  - [x] benchmark accounting exposes compile time and trunk-vs-logits timing
+  - [x] hardware-gated recurrent generation benchmark reports `2`-layer and `6`-layer numbers
+- [x] Implement recurrent generation integration with minimal surface area:
+  - [x] add recurrent generation weights/storage for multi-layer recurrent stacks
+  - [x] add a recurrent-backed `AutoregressiveLanguageModel`
+  - [x] preserve the existing token-id / embedding / argmax / logits path
+  - [x] surface compile time separately from runtime
+  - [x] surface trunk time separately from output-head/logits time
+- [x] Implement an honest CoreML generation comparison:
+  - [x] use the same token-id / embedding / output-head logic around the CoreML transformer trunk where possible
+  - [x] if the CoreML model only provides hidden-state forward passes, document that explicitly and keep the comparison aligned with the same surrounding CPU work
+- [x] Benchmark in order:
+  - [x] transformer ANE generation baseline
+  - [x] recurrent generation, `2` layers
+  - [x] recurrent generation, `6` layers only if justified by the `2`-layer result
+  - [x] CoreML generation baseline
+- [x] Report:
+  - [x] `ms/token`
+  - [x] `tok/s`
+  - [x] compile time
+  - [x] trunk time vs output-head/logits time
+- [x] Apply the gate immediately after results:
+  - [ ] continue recurrent tuning only if the `6`-layer or best available depth-matched recurrent path is still `>=2x` faster end-to-end than transformer generation
+  - [x] otherwise stop and document that the trunk win did not survive full-generation overhead
 - [x] Append findings to `docs/fused-decode-and-next-steps.md`.
-- [x] Update project memory with durable recurrent findings.
-- [x] Fill in this review section with measured results and commit atomically.
+- [x] Update project memory with durable findings.
+- [ ] Fill in this review section and commit atomically.
 
 ## Review
-- Status: in progress; implementation and benchmarks complete, documentation/memory/commit pending.
-- Transformer control carried forward from the completed generation/speculative pass:
-  - Direct ANE decode median: `2.894 ms/token` (`--decode --ane-only --layers 6 --warmup 3 --iterations 20 --decode-steps 32 --decode-max-seq 32 --profile-kernels`).
-  - Direct attention stage: `209.383 us/layer`.
-  - Direct FFN stage: `210.511 us/layer`.
-  - CoreML `.cpuAndNeuralEngine` median: `3.007 ms/token`.
-- Completed prerequisite from the last step:
-  - Real token-generation harness exists and supports token ids, embedding lookup, ANE decode stepping, final RMSNorm/classifier logits, argmax, and batched verification.
-- Negative evidence that now gates the next move:
-  - Best-case speculative upper bound was still worse than direct generation even at forced `100%` agreement.
-  - Direct generation harness, 6-layer full model: `6.110643 ms/token`, `163.65 tok/s`.
-  - Speculative `k=2`, draft=2 / full=6: `38.032148 ms/token`, `26.29 tok/s`, acceptance=`1.0`.
-  - Speculative `k=4`, draft=2 / full=6: `28.609625 ms/token`, `34.95 tok/s`, acceptance=`1.0`.
-- Current thesis for this pass:
-  - Do not spend more time tuning the current speculative stack.
-  - The next serious question is whether a constant-state recurrent step can hold near-flat latency while the transformer control accumulates context-management cost.
-- Recurrent prototype delivered:
-  - Added `RWKVStyleRecurrentWeights`, `RWKVStyleRecurrentStepGenerator`, `RWKVStyleRecurrentKernelSet`, `RWKVStyleRecurrentSession`, and `RWKVStyleRecurrentBench`.
-  - Added non-hardware TDD coverage for the recurrent MIL contract and kernel compile-spec surface.
-  - Added hardware-gated compile/eval coverage plus a repeated context-scaling benchmark.
-- Hardware findings:
-  - First recurrent hardware compile succeeded but was very slow: `131.362 s` for `test_recurrent_kernel_compiles_on_hardware`.
-  - Recurrent step eval succeeded after compile and surfaces were accessible.
-  - Two replicated context-scaling runs (`ANE_HARDWARE_TESTS=1 swift test --filter RWKVStyleRecurrentPrototypeHardwareTests`) showed recurrent tail-step medians staying effectively flat:
-    - Run 1 recurrent medians: `0.314`, `0.215`, `0.206`, `0.218 ms/token` at contexts `32`, `256`, `1024`, `4096`.
-    - Run 2 recurrent medians: `0.316`, `0.218`, `0.217`, `0.201 ms/token` at the same contexts.
-  - The transformer control on this graph did not show monotonic context growth under the same tail-step protocol because the current decode path is tiled:
-    - Run 1 transformer medians: `2.908`, `4.056`, `3.925`, `2.868 ms/token`.
-    - Run 2 transformer medians: `2.954`, `2.873`, `2.848`, `2.924 ms/token`.
-- Scientific-critique conclusion:
-  - The recurrent prototype passed the narrow scaling question: constant-state recurrent stepping stayed flat through `4096`.
-  - The current transformer control also stayed roughly flat on this graph, so the result is not evidence that recurrent decode uniquely solves a context-scaling bottleneck in the existing implementation.
-  - Absolute throughput comparisons are not apples-to-apples yet because this is a single recurrent layer against a 6-layer transformer control.
-  - This is still a credible architecture signal because the recurrent step is fast, stable, and hardware-runnable; the next meaningful recurrent experiment would be a depth-matched multi-layer stack, not more speculative work on the current transformer verifier.
+- Status: completed for the depth-matched recurrent generation gate.
+- Starting point:
+  - Direct transformer ANE decode: `2.872-2.894 ms/token`
+  - CoreML `.cpuAndNeuralEngine` decode: `3.007 ms/token`
+  - Current transformer generation harness: `6.110643 ms/token`
+  - Minimal recurrent step: `~0.20-0.32 ms/token`
+- Important validity note:
+  - The current recurrent result is only a single recurrent layer.
+  - The current transformer generation baseline is a full transformer path.
+  - Therefore the next useful experiment is depth-matched recurrent generation, not more single-step trunk timing.
+- What changed:
+  - Added `GenerationPerformanceSnapshot` / `GenerationPerformanceTrackable` to the generation harness surface.
+  - Integrated `ANERecurrentGenerationModel` into `GenerationHarness.swift`.
+  - Added recurrent generation hardware benchmarks with compile-time and trunk-vs-logits accounting.
+  - Added a benchmark-local CoreML generation wrapper that reuses token-id input, CPU embedding lookup, and CPU output-head projection around the CoreML transformer trunk.
+- Hardware benchmark results:
+  - Direct transformer ANE generation, 6 layers: `6.558745 ms/token`, `152.47 tok/s`, compile `2158.23 ms`, trunk `5.28449 ms/token`, logits `1.26048 ms/token`
+  - Recurrent generation, 2 layers: `2.271112 ms/token`, `440.32 tok/s`, compile `123.02 ms`, trunk `1.00656 ms/token`, logits `1.27095 ms/token`
+  - Recurrent generation, 6 layers: `4.000445 ms/token`, `249.97 tok/s`, compile `349.07 ms`, trunk `2.73244 ms/token`, logits `1.26102 ms/token`
+  - CoreML generation baseline, `.cpuAndNeuralEngine`: `6.582224 ms/token`, `151.93 tok/s`, compile+load `1384.60 ms`, trunk `5.11926 ms/token`, logits `1.35556 ms/token`
+- Decision:
+  - `2` recurrent layers cleared the structural gate at about `2.89x` faster end-to-end than the direct transformer generation harness.
+  - `6` recurrent layers did not preserve the stricter `>=2x` depth-matched gate; they landed at about `1.64x` faster than direct transformer generation and about `1.65x` faster than the CoreML baseline.
+  - The recurrent trunk win is real, but the CPU logits/output head is now a major limiter.
+  - The next high-upside step is output-head optimization or ANE offload, not blind recurrent depth scaling.
+- Verification:
+  - `swift test`
+  - `ANE_HARDWARE_TESTS=1 swift test --filter GenerationHarnessHardwareTests/test_recurrent_generation_reports_compile_and_runtime_breakdown_on_hardware`
+  - `ANE_HARDWARE_TESTS=1 swift test --filter GenerationHarnessHardwareTests/test_recurrent_generation_6layer_and_coreml_generation_baseline_if_gate_passes`
+  - `ANE_HARDWARE_TESTS=1 swift test --filter GenerationHarnessHardwareTests/test_speculative_upper_bound_reports_metrics_on_hardware`
+- Residual test risk:
+  - Running the full `GenerationHarnessHardwareTests` class in one shot exposed a temp-dir cleanup failure in the older speculative test, while the same speculative test passes in isolation. Treat that as cross-test hygiene risk rather than a blocker on the new recurrent/CoreML measurements.

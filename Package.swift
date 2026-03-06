@@ -97,7 +97,11 @@ let package = Package(
             resources: [.copy("Fixtures")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
-        .testTarget(name: "EspressoTests", dependencies: ["Espresso"], swiftSettings: [.swiftLanguageMode(.v6)]),
+        .testTarget(
+            name: "EspressoTests",
+            dependencies: ["Espresso", "CPUOps"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "CrossValidationTests",
             dependencies: ["ANERuntime", "CPUOps", "ANETypes", "Espresso", "MILGenerator"],

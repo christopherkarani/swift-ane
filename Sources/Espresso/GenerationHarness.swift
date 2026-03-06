@@ -14,6 +14,30 @@ public enum TokenSelectionStrategy: Sendable {
     case argmax
 }
 
+public struct GenerationPerformanceSnapshot: Sendable, Equatable {
+    public let compileTimeMs: Double
+    public let trunkLatencyMs: Double
+    public let logitsLatencyMs: Double
+
+    public init(
+        compileTimeMs: Double = 0,
+        trunkLatencyMs: Double = 0,
+        logitsLatencyMs: Double = 0
+    ) {
+        self.compileTimeMs = compileTimeMs
+        self.trunkLatencyMs = trunkLatencyMs
+        self.logitsLatencyMs = logitsLatencyMs
+    }
+
+    public var totalRuntimeMs: Double {
+        trunkLatencyMs + logitsLatencyMs
+    }
+}
+
+public protocol GenerationPerformanceTrackable: ~Copyable {
+    var performanceSnapshot: GenerationPerformanceSnapshot { get }
+}
+
 public protocol AutoregressiveLanguageModel: ~Copyable {
     var vocabSize: Int { get }
 
@@ -129,6 +153,24 @@ enum GenerationWeightCloner {
     static func cloneLayers(_ source: borrowing LayerStorage<LayerWeights>) -> LayerStorage<LayerWeights> {
         LayerStorage<LayerWeights>(count: source.count) { idx in
             cloneLayer(source[idx])
+        }
+    }
+
+    static func cloneRecurrentLayer(_ source: borrowing RWKVStyleRecurrentWeights) -> RWKVStyleRecurrentWeights {
+        let layer = RWKVStyleRecurrentWeights()
+        copyTensor(source.rms, into: layer.rms)
+        copyTensor(source.Wx, into: layer.Wx)
+        copyTensor(source.Ws, into: layer.Ws)
+        copyTensor(source.Wd, into: layer.Wd)
+        copyTensor(source.Wo, into: layer.Wo)
+        return layer
+    }
+
+    static func cloneRecurrentLayers(
+        _ source: borrowing LayerStorage<RWKVStyleRecurrentWeights>
+    ) -> LayerStorage<RWKVStyleRecurrentWeights> {
+        LayerStorage<RWKVStyleRecurrentWeights>(count: source.count) { idx in
+            cloneRecurrentLayer(source[idx])
         }
     }
 }
@@ -412,7 +454,32 @@ public struct GenerationWeights: ~Copyable {
     }
 }
 
-public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
+public struct RecurrentGenerationWeights: ~Copyable {
+    public let layers: LayerStorage<RWKVStyleRecurrentWeights>
+    public let rmsFinal: TensorBuffer
+    public let embedding: TensorBuffer
+    public let classifier: TensorBuffer
+    public let sharedClassifier: Bool
+    public let vocabSize: Int
+
+    public init(
+        layers: consuming LayerStorage<RWKVStyleRecurrentWeights>,
+        rmsFinal: consuming TensorBuffer,
+        embedding: consuming TensorBuffer,
+        classifier: consuming TensorBuffer,
+        sharedClassifier: Bool,
+        vocabSize: Int = ModelConfig.vocab
+    ) {
+        self.layers = layers
+        self.rmsFinal = rmsFinal
+        self.embedding = embedding
+        self.classifier = classifier
+        self.sharedClassifier = sharedClassifier
+        self.vocabSize = vocabSize
+    }
+}
+
+public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel, GenerationPerformanceTrackable {
     public let vocabSize: Int
     public let layerCount: Int
     public let decodeMaxSeq: Int
@@ -434,6 +501,17 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
     private var inferenceHandles: [InferenceSurfaceHandles]
     private var decodeState: DecodeState
     private var xCur: TensorBuffer
+    public private(set) var compileTimeMs: Double
+    private var trunkLatencyMs: Double
+    private var logitsLatencyMs: Double
+
+    public var performanceSnapshot: GenerationPerformanceSnapshot {
+        GenerationPerformanceSnapshot(
+            compileTimeMs: compileTimeMs,
+            trunkLatencyMs: trunkLatencyMs,
+            logitsLatencyMs: logitsLatencyMs
+        )
+    }
 
     public init(
         weights: borrowing GenerationWeights,
@@ -453,6 +531,7 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
             throw .invalidArguments("vocabSize must be > 0")
         }
 
+        let compileStart = GenerationClock.now()
         let decodeKernels = try Self.compileDecodeKernels(
             weights: weights,
             layerCount: layerCount,
@@ -462,6 +541,7 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
             weights: weights,
             layerCount: layerCount
         )
+        let compileTimeMs = GenerationClock.milliseconds(start: compileStart, end: GenerationClock.now())
         let decodeHandles = try Self.makeDecodeHandles(
             kernels: decodeKernels,
             layerCount: layerCount,
@@ -495,6 +575,9 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
         self.inferenceHandles = inferenceHandles
         self.decodeState = decodeState
         self.xCur = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.compileTimeMs = compileTimeMs
+        self.trunkLatencyMs = 0
+        self.logitsLatencyMs = 0
     }
 
     public static func load(
@@ -582,6 +665,8 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
         ForwardPass.initializeDecodeCachesAndMask(surfaceHandles: decodeHandles)
         decodeState.reset()
         xCur.zero()
+        trunkLatencyMs = 0
+        logitsLatencyMs = 0
     }
 
     public mutating func prefill(promptTokens: [UInt16]) throws(GenerationError) -> [Float] {
@@ -668,6 +753,7 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
             throw .invalidArguments("decodeState overflow at maxSeq \(decodeMaxSeq)")
         }
 
+        let trunkStart = GenerationClock.now()
         xCur.withUnsafeMutablePointer { dst in
             embedding.withUnsafePointer { embeddingPtr in
                 let base = Int(token) * ModelConfig.dim
@@ -689,9 +775,11 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
         } catch {
             throw .runtimeFailure("decode failed: \(error)")
         }
+        trunkLatencyMs += GenerationClock.milliseconds(start: trunkStart, end: GenerationClock.now())
     }
 
-    private func projectStepLogits() throws(GenerationError) -> [Float] {
+    private mutating func projectStepLogits() throws(GenerationError) -> [Float] {
+        let logitsStart = GenerationClock.now()
         xCur.withUnsafePointer { xPtr in
             stepNorm.withUnsafeMutablePointer { normPtr in
                 rmsFinal.withUnsafePointer { rmsPtr in
@@ -731,6 +819,7 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
             }
         }
 
+        logitsLatencyMs += GenerationClock.milliseconds(start: logitsStart, end: GenerationClock.now())
         return stepLogits.withUnsafeBufferPointer { Array($0) }
     }
 
@@ -751,7 +840,8 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
         }
     }
 
-    private func projectSequenceLogits() throws(GenerationError) {
+    private mutating func projectSequenceLogits() throws(GenerationError) {
+        let logitsStart = GenerationClock.now()
         verifyNorm.zero()
         verifyLogits.zero()
 
@@ -792,5 +882,245 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel {
                 }
             }
         }
+        logitsLatencyMs += GenerationClock.milliseconds(start: logitsStart, end: GenerationClock.now())
+    }
+}
+
+public struct ANERecurrentGenerationModel: ~Copyable, AutoregressiveLanguageModel, GenerationPerformanceTrackable {
+    public let vocabSize: Int
+    public let layerCount: Int
+    public let maxSequenceTokens: Int
+
+    private let rmsFinal: TensorBuffer
+    private let embedding: TensorBuffer
+    private let classifier: TensorBuffer
+    private let sharedClassifier: Bool
+    private var sessions: LayerStorage<RWKVStyleRecurrentSession>
+    private let stepNorm: TensorBuffer
+    private let stepLogits: TensorBuffer
+    private let stepRMSWorkspace: RMSNorm.Workspace
+    private var activationA: TensorBuffer
+    private var activationB: TensorBuffer
+    private var currentActivationIsA: Bool
+    private var consumedTokens: Int
+    public private(set) var compileTimeMs: Double
+    private var trunkLatencyMs: Double
+    private var logitsLatencyMs: Double
+
+    public var performanceSnapshot: GenerationPerformanceSnapshot {
+        GenerationPerformanceSnapshot(
+            compileTimeMs: compileTimeMs,
+            trunkLatencyMs: trunkLatencyMs,
+            logitsLatencyMs: logitsLatencyMs
+        )
+    }
+
+    public init(
+        weights: borrowing RecurrentGenerationWeights,
+        layerCount: Int,
+        maxSequenceTokens: Int = ModelConfig.seqLen
+    ) throws(GenerationError) {
+        guard layerCount > 0 else {
+            throw .invalidArguments("layerCount must be > 0")
+        }
+        guard layerCount <= weights.layers.count else {
+            throw .invalidArguments("layerCount \(layerCount) exceeds available recurrent layers \(weights.layers.count)")
+        }
+        guard maxSequenceTokens > 0 else {
+            throw .invalidArguments("maxSequenceTokens must be > 0")
+        }
+        guard weights.vocabSize > 0 else {
+            throw .invalidArguments("vocabSize must be > 0")
+        }
+
+        let compileStart = GenerationClock.now()
+        let sessions = try Self.compileSessions(weights: weights, layerCount: layerCount)
+        let compileTimeMs = GenerationClock.milliseconds(start: compileStart, end: GenerationClock.now())
+
+        self.vocabSize = weights.vocabSize
+        self.layerCount = layerCount
+        self.maxSequenceTokens = maxSequenceTokens
+        self.rmsFinal = GenerationWeightCloner.cloneTensor(weights.rmsFinal)
+        self.embedding = GenerationWeightCloner.cloneTensor(weights.embedding)
+        self.classifier = weights.sharedClassifier
+            ? TensorBuffer(count: 0, zeroed: true)
+            : GenerationWeightCloner.cloneTensor(weights.classifier)
+        self.sharedClassifier = weights.sharedClassifier
+        self.sessions = sessions
+        self.stepNorm = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.stepLogits = TensorBuffer(count: weights.vocabSize, zeroed: true)
+        self.stepRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
+        self.activationA = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.activationB = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.currentActivationIsA = true
+        self.consumedTokens = 0
+        self.compileTimeMs = compileTimeMs
+        self.trunkLatencyMs = 0
+        self.logitsLatencyMs = 0
+    }
+
+    private static func compileSessions(
+        weights: borrowing RecurrentGenerationWeights,
+        layerCount: Int
+    ) throws(GenerationError) -> LayerStorage<RWKVStyleRecurrentSession> {
+        do {
+            return try LayerStorage<RWKVStyleRecurrentSession>(count: layerCount, throwingInitializer: { idx in
+                try RWKVStyleRecurrentSession(weights: weights.layers[idx])
+            })
+        } catch {
+            throw .runtimeFailure("recurrent kernel/session setup failed: \(error)")
+        }
+    }
+
+    public mutating func reset() throws(GenerationError) {
+        for idx in 0..<sessions.count {
+            do {
+                try sessions[idx].reset()
+            } catch {
+                throw .runtimeFailure("recurrent reset failed at layer \(idx): \(error)")
+            }
+        }
+        activationA.zero()
+        activationB.zero()
+        currentActivationIsA = true
+        consumedTokens = 0
+        trunkLatencyMs = 0
+        logitsLatencyMs = 0
+    }
+
+    public mutating func prefill(promptTokens: [UInt16]) throws(GenerationError) -> [Float] {
+        guard !promptTokens.isEmpty else {
+            throw .invalidArguments("promptTokens must not be empty")
+        }
+        guard promptTokens.count <= maxSequenceTokens else {
+            throw .invalidArguments("prompt length \(promptTokens.count) exceeds maxSequenceTokens \(maxSequenceTokens)")
+        }
+
+        for token in promptTokens {
+            try runRecurrentStep(token: token)
+        }
+        return try projectCurrentLogits()
+    }
+
+    public mutating func decode(nextToken: UInt16) throws(GenerationError) -> [Float] {
+        try runRecurrentStep(token: nextToken)
+        return try projectCurrentLogits()
+    }
+
+    public mutating func verify(
+        sequenceTokens: [UInt16],
+        startIndex: Int
+    ) throws(GenerationError) -> [[Float]] {
+        throw .runtimeFailure(
+            "recurrent verify is not yet supported without a scratch cursor because replay would mutate live recurrent state"
+        )
+    }
+
+    @inline(__always)
+    private func classifierPointer<R>(_ body: (UnsafePointer<Float>) throws -> R) rethrows -> R {
+        if sharedClassifier {
+            return try embedding.withUnsafePointer(body)
+        }
+        return try classifier.withUnsafePointer(body)
+    }
+
+    private mutating func runRecurrentStep(token: UInt16) throws(GenerationError) {
+        guard Int(token) < vocabSize else {
+            throw .invalidArguments("token \(token) exceeds vocab size \(vocabSize)")
+        }
+        guard consumedTokens < maxSequenceTokens else {
+            throw .invalidArguments("recurrent generation overflow at maxSequenceTokens \(maxSequenceTokens)")
+        }
+
+        let trunkStart = GenerationClock.now()
+        activationA.withUnsafeMutablePointer { dst in
+            embedding.withUnsafePointer { embeddingPtr in
+                let base = Int(token) * ModelConfig.dim
+                for dimIdx in 0..<ModelConfig.dim {
+                    dst[dimIdx] = embeddingPtr[base + dimIdx]
+                }
+            }
+        }
+
+        var sourceIsA = true
+        for idx in 0..<sessions.count {
+            var timings = StepTimingBreakdown()
+            do {
+                if sourceIsA {
+                    try sessions[idx].step(tokenInput: activationA, output: activationB, timings: &timings)
+                } else {
+                    try sessions[idx].step(tokenInput: activationB, output: activationA, timings: &timings)
+                }
+            } catch {
+                throw .runtimeFailure("recurrent step failed at layer \(idx): \(error)")
+            }
+            sourceIsA.toggle()
+        }
+
+        currentActivationIsA = sourceIsA
+        trunkLatencyMs += GenerationClock.milliseconds(start: trunkStart, end: GenerationClock.now())
+        consumedTokens += 1
+    }
+
+    private mutating func projectCurrentLogits() throws(GenerationError) -> [Float] {
+        let logitsStart = GenerationClock.now()
+        if currentActivationIsA {
+            activationA.withUnsafePointer { xPtr in
+                stepNorm.withUnsafeMutablePointer { normPtr in
+                    rmsFinal.withUnsafePointer { rmsPtr in
+                        RMSNorm.forward(
+                            output: normPtr,
+                            input: xPtr,
+                            weights: rmsPtr,
+                            dim: ModelConfig.dim,
+                            seqLen: 1,
+                            workspace: stepRMSWorkspace
+                        )
+                    }
+                }
+            }
+        } else {
+            activationB.withUnsafePointer { xPtr in
+                stepNorm.withUnsafeMutablePointer { normPtr in
+                    rmsFinal.withUnsafePointer { rmsPtr in
+                        RMSNorm.forward(
+                            output: normPtr,
+                            input: xPtr,
+                            weights: rmsPtr,
+                            dim: ModelConfig.dim,
+                            seqLen: 1,
+                            workspace: stepRMSWorkspace
+                        )
+                    }
+                }
+            }
+        }
+
+        stepLogits.zero()
+        stepLogits.withUnsafeMutablePointer { logitsPtr in
+            classifierPointer { clsPtr in
+                stepNorm.withUnsafePointer { normPtr in
+                    BLAS.sgemm(
+                        CblasRowMajor,
+                        CblasNoTrans,
+                        CblasNoTrans,
+                        m: Int32(vocabSize),
+                        n: 1,
+                        k: Int32(ModelConfig.dim),
+                        alpha: 1.0,
+                        a: clsPtr,
+                        lda: Int32(ModelConfig.dim),
+                        b: normPtr,
+                        ldb: 1,
+                        beta: 0.0,
+                        c: logitsPtr,
+                        ldc: 1
+                    )
+                }
+            }
+        }
+
+        logitsLatencyMs += GenerationClock.milliseconds(start: logitsStart, end: GenerationClock.now())
+        return stepLogits.withUnsafeBufferPointer { Array($0) }
     }
 }

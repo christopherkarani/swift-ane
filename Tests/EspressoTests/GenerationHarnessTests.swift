@@ -51,6 +51,16 @@ private struct FakeGenerationModel: AutoregressiveLanguageModel {
 }
 
 final class GenerationHarnessTests: XCTestCase {
+    func test_generation_performance_snapshot_reports_total_runtime() {
+        let snapshot = GenerationPerformanceSnapshot(
+            compileTimeMs: 12.5,
+            trunkLatencyMs: 3.25,
+            logitsLatencyMs: 1.75
+        )
+
+        XCTAssertEqual(snapshot.totalRuntimeMs, 5.0, accuracy: 1e-9)
+    }
+
     func test_autoregressive_harness_prefills_then_decodes_argmax_tokens() throws {
         let model = FakeGenerationModel(
             vocabSize: 3,

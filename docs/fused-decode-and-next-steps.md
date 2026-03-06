@@ -709,3 +709,103 @@ Decision:
 - Do not spend more time on speculative draft tuning for the current verifier design.
 - Do not over-claim the recurrent result yet.
 - The next recurrent step worth doing is a more depth-matched stacked recurrent benchmark, but only if the compile-time iteration cost is acceptable.
+
+## 15. Depth-Matched Recurrent Generation Gate (2026-03-06)
+
+Status:
+- implemented and benchmarked
+- recurrent generation beats both the current direct transformer generation harness and the CoreML generation baseline
+- but the advantage compresses below the strict `>=2x` continuation gate by `6` recurrent layers
+
+What changed:
+- Added `GenerationPerformanceSnapshot` / `GenerationPerformanceTrackable` so generation benchmarks can report:
+  - compile time
+  - trunk time
+  - output-head/logits time
+- Added `ANERecurrentGenerationModel` to the real token-generation harness:
+  - token ids
+  - embedding lookup
+  - recurrent trunk stepping
+  - final RMSNorm + classifier logits
+  - argmax decode loop
+- Added a benchmark-local CoreML generation wrapper that reuses the same surrounding CPU work:
+  - token-id input
+  - embedding lookup
+  - CoreML transformer trunk replay
+  - final RMSNorm + classifier logits on CPU
+
+Important comparison policy:
+- `stories110M.bin` is still not present locally, so these measurements use the synthetic token-generation harness rather than a pretrained semantic model.
+- The CoreML path here is still an honest end-to-end generation comparison because it includes prompt replay, decode replay, and the same CPU output-head work.
+- The CoreML model exports hidden states, not logits, so the output head remains on CPU for parity with the direct generation harness.
+
+Benchmark protocol:
+- `mach_absolute_time()` / `mach_timebase_info`
+- `3` warmup iterations
+- `20` timed iterations
+- prompt: `[0]`
+- generated tokens: `8`
+- report median `ms/token`, `tok/s`, compile time, and median trunk/logits time per generated token
+
+Results:
+- Direct transformer ANE generation, `6` layers:
+  - `6.558745 ms/token`
+  - `152.47 tok/s`
+  - compile `2158.23 ms`
+  - trunk `5.28449 ms/token`
+  - logits `1.26048 ms/token`
+- Recurrent generation, `2` layers:
+  - `2.271112 ms/token`
+  - `440.32 tok/s`
+  - compile `123.02 ms`
+  - trunk `1.00656 ms/token`
+  - logits `1.27095 ms/token`
+- Recurrent generation, `6` layers:
+  - `4.000445 ms/token`
+  - `249.97 tok/s`
+  - compile `349.07 ms`
+  - trunk `2.73244 ms/token`
+  - logits `1.26102 ms/token`
+- CoreML generation baseline, `.cpuAndNeuralEngine`:
+  - `6.582224 ms/token`
+  - `151.93 tok/s`
+  - compile+load `1384.60 ms`
+  - trunk `5.11926 ms/token`
+  - logits `1.35556 ms/token`
+
+Interpretation:
+- The first structural gate came back positive:
+  - `2` recurrent layers are about `2.89x` faster end-to-end than the current direct transformer generation harness.
+- The more honest depth-matched gate came back mixed:
+  - `6` recurrent layers are about `1.64x` faster than direct transformer generation.
+  - `6` recurrent layers are about `1.65x` faster than the CoreML generation baseline.
+- That means the recurrent architecture still has real upside, but the strict continuation rule from this session was not met at `6` layers.
+
+Most important systems finding:
+- The recurrent trunk win is real, but the output head is now a large fraction of the budget.
+- At `2` recurrent layers, logits are already slightly more expensive than the recurrent trunk.
+- At `6` recurrent layers, logits remain about `1.26 ms/token`, which materially caps end-to-end gains.
+- The next high-upside move is therefore:
+  - offload final RMSNorm + classifier to ANE, or
+  - otherwise reduce output-head cost sharply
+- The next low-upside move would be:
+  - adding more recurrent layers without addressing the output head
+
+Compile-time note:
+- The cold recurrent prototype compile from the earlier session was `131.362 s`.
+- The generation-model compile times above (`123-349 ms`) are warm-cache measurements on the now-proven recurrent step shape, so do not treat them as contradictory.
+- The likely explanation is cache reuse for already-compiled identical recurrent kernels.
+
+Decision:
+- Keep recurrent decode as the highest-upside architecture path over transformer decode.
+- Do not keep scaling recurrent depth blindly under the current CPU output-head design.
+- Move the next experiment to output-head optimization / ANE-side logits before spending more time on deeper recurrent stacks.
+
+Verification:
+- `swift test`
+- `ANE_HARDWARE_TESTS=1 swift test --filter GenerationHarnessHardwareTests/test_recurrent_generation_reports_compile_and_runtime_breakdown_on_hardware`
+- `ANE_HARDWARE_TESTS=1 swift test --filter GenerationHarnessHardwareTests/test_recurrent_generation_6layer_and_coreml_generation_baseline_if_gate_passes`
+- `ANE_HARDWARE_TESTS=1 swift test --filter GenerationHarnessHardwareTests/test_speculative_upper_bound_reports_metrics_on_hardware`
+
+Residual test note:
+- Running the entire `GenerationHarnessHardwareTests` class together exposed a temp-dir cleanup failure in the older speculative test, while that same speculative test passes in isolation. That looks like cross-test hygiene in the old speculative path rather than a blocker on the recurrent/CoreML benchmark results above.
