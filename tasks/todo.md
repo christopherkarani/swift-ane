@@ -209,3 +209,7 @@
 - [ ] Append attempt rationale and measured result to `docs/fused-decode-and-next-steps.md`.
 - [x] Measure exact sharded ANE RMSNorm+classifier head (`16384/8192/4096`) against the saved best path.
 - [x] Reject the sharded-head avenue: all measured shard sizes regressed and the regression worsened with shard count.
+- [ ] Probe hot-path surface I/O reductions on fused-triplet direct-select: lock/unlock elimination, batched writes, or direct unlocked slice ops if parity holds.
+- [ ] If surface I/O work stalls, move to the next trunk-side exact experiment with the current direct-select head.
+- [x] Probe unlocked direct-select argmax on the fused-triplet path and rerun for stability.
+- [x] Reject unlocked argmax: parity held, but runtime was flat-to-slower across repeated hardware runs.

@@ -1376,3 +1376,27 @@ Interpretation:
 - Inference: dispatch and repeated surface I/O dominate any benefit from smaller classifier shards.
 - The regression increases with shard count, so this is not a near-miss tuning issue.
 - Reverted the implementation and tests after measurement.
+
+## 2026-03-08 - Rejected unlocked-argmax direct-select path
+
+Why tried:
+- Smallest exact surface-I/O probe after ruling out smaller output-head lane widths.
+- Added an unlocked argmax interop path to remove the read-lock work from inside the hot argmax helper while preserving exact token selection.
+
+Method:
+- Added `ane_interop_io_argmax_fp16_spatial_slice_unlocked` plus Swift wrapper.
+- Gated the direct-select path with `ANE_DIRECT_SELECT_UNLOCKED_ARGMAX=1`.
+- Added parity coverage at the `SurfaceIO` level and benchmarked recurrent fused-triplet direct-select on hardware.
+- Benchmark shape: `6` layers, prompt `[0]`, `8` generated tokens, `3` warmups, `20` timed iterations, median `ms/token`.
+
+Results:
+- Run 1 baseline: compile `1902.6328333333333 ms`, runtime `2.2433463541666665 ms/token`, `445.76264300100416 tok/s`
+- Run 1 unlocked argmax: compile `1839.1164166666667 ms`, runtime `2.3161380208333338 ms/token`, `431.7531990775772 tok/s`
+- Run 2 baseline: compile `1902.8605833333334 ms`, runtime `2.2317421875 ms/token`, `448.0804304372635 tok/s`
+- Run 2 unlocked argmax: compile `1864.6896666666667 ms`, runtime `2.235598958333333 ms/token`, `447.3074190128951 tok/s`
+
+Interpretation:
+- Negative result.
+- Runtime improvement did not reproduce; the path was either slightly slower or effectively flat.
+- Inference: removing the lock work from inside the argmax helper is not enough to move end-to-end throughput on the current path.
+- Reverted the implementation and temporary tests after measurement.
