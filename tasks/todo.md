@@ -153,3 +153,20 @@
 - Next:
   - move off pure argmax ILP unless a more layout-specific specialization appears
   - inspect recurrent-step state/input synchronization for batched or unlocked copy reductions
+## Review - 2026-03-08 rejected lane-0-only recurrent copy path
+
+- Kept only the guard:
+  - `test(ane): guard fused-triplet lane0 parity`
+- Rejected implementation idea:
+  - remove per-token full `xIn` clear
+  - replace full `stateOut -> stateIn` copies with lane-`0` `copyFP16SpatialSlice`
+- Evidence:
+  - parity test stayed green
+  - performance regressed
+  - control: `2.129125 ms/token`
+  - post-change runs: `2.243302083333333`, `2.1020781250000002`, `2.1712968750000003 ms/token`
+  - post-change median: `2.1712968750000003 ms/token`
+  - regression: `~1.98%`
+- Decision:
+  - implementation removed
+  - do not retry this exact lane-`0` narrowing path without a materially different copy primitive or stronger locality evidence

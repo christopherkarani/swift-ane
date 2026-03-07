@@ -1264,3 +1264,24 @@ Decision:
 - Interpretation:
   - another real but still small micro-gain
   - this confirms the output-surface argmax path is movable, but not enough by itself to close the remaining gap to `6x`
+## 2026-03-08 - Rejected lane-0-only recurrent state/input copies
+
+- Hypothesis:
+  - because the current fused-triplet direct-select path only consumes lane `0`, per-token full-width `xIn` clear and `stateOut -> stateIn` copies in `RWKVStyleFusedThreeLayerSession.step` might be reducible to lane-`0` slice operations only
+- Guard:
+  - added hardware parity test `test_recurrent_generation_fused_triplet_direct_select_vs_autoregressive_materialized_on_hardware`
+  - parity stayed green, so semantics on the echo path did not obviously break
+- Rejected implementation:
+  - removed per-token full `xIn` clear
+  - narrowed the three recurrent state carry copies to `SurfaceIO.copyFP16SpatialSlice(... spatialIndex: 0 ...)`
+- Measured result:
+  - control before change: `2.129125 ms/token`
+  - post-change runs:
+    - `2.243302083333333 ms/token`
+    - `2.1020781250000002 ms/token`
+    - `2.1712968750000003 ms/token`
+  - post-change median: `2.1712968750000003 ms/token`
+  - delta: about `0.04217187500000029 ms/token` slower (`~1.98%` regression)
+- Interpretation:
+  - semantic parity on the echo path was not enough; the narrowed copy path regressed throughput and was removed
+  - inference: either the full-width copies are helping memory locality/cache behavior, or the slice-copy path itself is more expensive than expected
