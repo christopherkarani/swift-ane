@@ -103,3 +103,17 @@
     - CoreML aggregate tok/s: `64.72`, `120.49`, `180.59`, `215.38`
   - inference:
     - the matched concurrent CoreML path regressed sharply already at `1` stream, so the `>4x` absolute ratio is not evidence that concurrency is the unlock
+- Current optimization cycle toward `6x`:
+  - exact `6x` target against the standing CoreML baseline:
+    - `<= 1.097037 ms/token`
+    - `>= 911.58 tok/s`
+  - current exact greedy single-stream best remains:
+    - `2.204732 ms/token`
+    - `453.57 tok/s`
+  - gap still to close:
+    - `0.559 ms/token`
+    - about `2.01x` more throughput than the current best single-stream path
+  - ranked active probes for this cycle:
+    - end-to-end ANE fusion of recurrent fused-triplet trunk with fused ANE RMSNorm/classifier head
+    - direct-select host-path reduction beyond the current IOSurface argmax path
+    - only after those: more invasive exact-head redesign or learned multi-token heads
