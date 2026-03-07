@@ -1014,6 +1014,42 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         XCTAssertGreaterThan(triplet.compileTimeMs, 0)
     }
 
+    func test_rwkv_style_fused_three_layer_rmsnorm_classifier_session_smoke_on_hardware() throws {
+        try requireGenerationHardware()
+
+        let weights = makeEchoRecurrentGenerationWeights(layerCount: 6)
+        var session = try RWKVStyleFusedThreeLayerRMSNormClassifierSession(
+            weights0: weights.layers[0],
+            weights1: weights.layers[1],
+            weights2: weights.layers[2],
+            rmsFinal: weights.rmsFinal,
+            classifier: weights.classifier,
+            vocabSize: weights.vocabSize,
+            laneSpatial: 32
+        )
+
+        let tokenInput = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        let output = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        let logits = TensorBuffer(count: weights.vocabSize, zeroed: true)
+        var timings = StepTimingBreakdown()
+
+        try session.reset()
+        try tokenInput.withUnsafeMutableBufferPointer { ptr in
+            if let first = ptr.baseAddress {
+                first[0] = 1.0
+            }
+        }
+        try session.step(
+            tokenInput: tokenInput,
+            output: output,
+            logits: logits,
+            timings: &timings
+        )
+
+        XCTAssertGreaterThan(timings.tAne, 0)
+        XCTAssertGreaterThanOrEqual(timings.tIO, 0)
+    }
+
     func test_recurrent_generation_fused_triplet_direct_select_vs_autoregressive_materialized_on_hardware() throws {
         try requireGenerationHardware()
 
