@@ -284,11 +284,41 @@ bool ane_interop_io_argmax_fp16_spatial_slice(IOSurfaceRef surface,
     if (bytes > IOSurfaceGetAllocSize(surface)) goto cleanup;
 
     const _Float16 *srcF16 = (const _Float16 *)base;
+    const size_t baseIdx = (size_t)ch_off * spatialSz + (size_t)spatial_index;
+    const size_t stride = spatialSz;
     int bestIndex = 0;
-    float bestValue = (float)srcF16[(size_t)ch_off * spatialSz + (size_t)spatial_index];
-    for (int c = 1; c < channels; c++) {
-        size_t idx = (size_t)(ch_off + c) * spatialSz + (size_t)spatial_index;
-        float value = (float)srcF16[idx];
+    _Float16 bestValue = srcF16[baseIdx];
+    int c = 1;
+    const _Float16 *cursor = srcF16 + baseIdx + stride;
+
+    for (; c + 3 < channels; c += 4) {
+        _Float16 value0 = cursor[0];
+        _Float16 value1 = cursor[stride];
+        _Float16 value2 = cursor[stride * 2];
+        _Float16 value3 = cursor[stride * 3];
+
+        if (value0 > bestValue) {
+            bestValue = value0;
+            bestIndex = c;
+        }
+        if (value1 > bestValue) {
+            bestValue = value1;
+            bestIndex = c + 1;
+        }
+        if (value2 > bestValue) {
+            bestValue = value2;
+            bestIndex = c + 2;
+        }
+        if (value3 > bestValue) {
+            bestValue = value3;
+            bestIndex = c + 3;
+        }
+
+        cursor += stride * 4;
+    }
+
+    for (; c < channels; c++, cursor += stride) {
+        _Float16 value = *cursor;
         if (value > bestValue) {
             bestValue = value;
             bestIndex = c;
@@ -296,7 +326,7 @@ bool ane_interop_io_argmax_fp16_spatial_slice(IOSurfaceRef surface,
     }
 
     *out_index = bestIndex;
-    *out_value = bestValue;
+    *out_value = (float)bestValue;
     ok = true;
 
 cleanup:
