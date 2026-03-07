@@ -170,3 +170,19 @@
 - Decision:
   - implementation removed
   - do not retry this exact lane-`0` narrowing path without a materially different copy primitive or stronger locality evidence
+## Review - 2026-03-08 blocked full fused triplet+head session
+
+- Attempted:
+  - full fused final-triplet + RMSNorm+classifier session returning `xNext + 3 states + logits`
+- Built:
+  - committed generator and kernelset scaffolding
+  - temporary hardware smoke test and session/runtime wiring
+- Findings:
+  - shared-classifier recurrent weights required using `embedding` as classifier weights, matching the existing `.aneRMSNormClassifier` path
+  - after fixing that contract, ANE compile still failed with `InvalidMILProgram`
+  - a second, hand-built MIL tail variant still failed the same way
+- Decision:
+  - runtime/session attempt removed
+  - smoke test reverted
+  - keep committed scaffolding as reference only
+  - pivot to a narrower direct-select-only final-triplet fusion

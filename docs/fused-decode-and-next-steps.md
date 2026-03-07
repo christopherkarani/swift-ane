@@ -1285,3 +1285,41 @@ Decision:
 - Interpretation:
   - semantic parity on the echo path was not enough; the narrowed copy path regressed throughput and was removed
   - inference: either the full-width copies are helping memory locality/cache behavior, or the slice-copy path itself is more expensive than expected
+## 2026-03-08 - Blocked full fused triplet + head session
+
+- Goal:
+  - fuse the final recurrent triplet and the ANE RMSNorm+classifier head into one kernel that returns:
+    - `xNext`
+    - `stateOut0`
+    - `stateOut1`
+    - `stateOut2`
+    - `logits`
+- Why:
+  - this was the first boundary-removal path with enough upside to matter for `4x` and `6x`
+  - it could have removed the trunk→head dispatch boundary and one host-side handoff
+- What was built:
+  - committed scaffolding:
+    - `RWKVStyleFusedThreeLayerRMSNormClassifierGenerator`
+    - `RWKVStyleFusedThreeLayerRMSNormClassifierKernelSet`
+    - generator/kernelset contract tests
+  - attempted runtime/session wiring:
+    - direct hardware smoke test for a new fused session
+    - temporary fused session/runtime implementation
+- What failed:
+  - first failure: shared-classifier recurrent weights exposed an empty `classifier` buffer
+    - resolved by following the existing `.aneRMSNormClassifier` rule: use `embedding` when `sharedClassifier == true`
+  - second failure: even after that fix, ANE compile still failed with:
+    - `_ANECompiler : ANECCompile() FAILED`
+    - `InvalidMILProgram`
+- Materially different implementation variants tried:
+  - initial string-splice composition using the existing triplet generator plus the existing RMSNorm+classifier tail
+  - replacement hand-built RMSNorm+classifier tail that reused the triplet generator's shared constants and conv parameters instead of duplicating them
+- Result:
+  - both variants still failed at ANE compile time with `InvalidMILProgram`
+  - runtime/session wiring for this exact `5`-output fused path was rolled back
+- Decision:
+  - do not keep pushing this exact full-session `5`-output fused path
+  - next materially different attempt is narrower:
+    - direct-select-only final-triplet fusion
+    - omit `xNext` on the last fused block
+    - return only recurrent carry state plus logits
