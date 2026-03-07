@@ -117,3 +117,20 @@
     - end-to-end ANE fusion of recurrent fused-triplet trunk with fused ANE RMSNorm/classifier head
     - direct-select host-path reduction beyond the current IOSurface argmax path
     - only after those: more invasive exact-head redesign or learned multi-token heads
+## Review - 2026-03-08 direct-select argmax avenue
+
+- Added guard test: `ANETypesTests/test_surface_argmax_fp16_spatial_slice_respects_channel_offset_and_tail`
+- Kept implementation win:
+  - `perf(ane): speed up fp16 spatial-slice argmax`
+  - fresh baseline: `2.2018489583333336 ms/token`
+  - repeated post-change runs: `2.2109479166666666`, `2.154953125`, `2.159026041666667 ms/token`
+  - post-change median: `2.159026041666667 ms/token`
+  - saved: `0.04282291666666665 ms/token` (`~1.94%`)
+- Verification:
+  - `swift test --filter ANETypesTests/test_surface_argmax_fp16_spatial_slice_matches_materialized_argmax`
+  - `swift test --filter ANETypesTests/test_surface_argmax_fp16_spatial_slice_respects_channel_offset_and_tail`
+  - `ANE_HARDWARE_TESTS=1 swift test --filter GenerationHarnessHardwareTests/test_recurrent_generation_fused_triplet_direct_select_reports_comparison_on_hardware`
+  - `ANE_HARDWARE_TESTS=1 swift test --filter GenerationHarnessHardwareTests/test_recurrent_generation_6layer_and_coreml_generation_baseline_if_gate_passes`
+- Next:
+  - probe explicit lock-amortized or unlocked direct-select path to remove per-token IOSurface lock overhead
+  - if that stalls, move to fused recurrent-triplet + output-head compile path

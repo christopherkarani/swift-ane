@@ -1213,3 +1213,27 @@ Decision:
 - Keep the benchmark as a serving-path measurement tool.
 - Do **not** use this avenue as the main causal explanation for a credible `4x over CoreML` claim.
 - Next best move returns to the fallback plan: reduce remaining direct-select host overhead on the ANE path, and treat the queue-induced CoreML regression as a separate measurement artifact to characterize if a serving claim is needed later.
+## 2026-03-08 - Direct-select argmax micro-optimization
+
+- Change: optimized `ane_interop_io_argmax_fp16_spatial_slice` in `Sources/ANEInterop/surface_io.c`
+  - switched from scalar `float`-converting scan to pointer-stride arithmetic
+  - unrolled the channel walk `4x`
+  - kept comparisons in `_Float16` and converted to `float` only for the final reported value
+- Guard tests:
+  - `swift test --filter ANETypesTests/test_surface_argmax_fp16_spatial_slice_matches_materialized_argmax`
+  - `swift test --filter ANETypesTests/test_surface_argmax_fp16_spatial_slice_respects_channel_offset_and_tail`
+- Baseline before change:
+  - fused-triplet direct-select `2.2018489583333336 ms/token`, `454.16396411257176 tok/s`
+- Post-change repeated runs:
+  - `2.2109479166666666 ms/token`, `452.29748776856803 tok/s`
+  - `2.154953125 ms/token`, `464.0636883108018 tok/s`
+  - `2.159026041666667 ms/token`, `463.1718306072166 tok/s`
+- Post-change median across the three repeated runs:
+  - `2.159026041666667 ms/token`, `463.1718306072166 tok/s`
+- Delta versus the fresh baseline:
+  - `0.04282291666666665 ms/token` faster
+  - about `1.94%` lower latency
+  - about `9.01 tok/s` higher throughput
+- Interpretation:
+  - measured win is small but positive and above the immediate regression/no-regression threshold for this avenue
+  - most of the remaining single-stream budget is still in trunk + output-head boundaries, so this is a saved micro-gain rather than a path-changing breakthrough
