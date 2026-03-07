@@ -50,6 +50,53 @@ private struct FakeGenerationModel: AutoregressiveLanguageModel {
     }
 }
 
+private struct FakeFastSelectionModel: DirectTokenSelectingLanguageModel {
+    let vocabSize: Int
+    let selectedPrefillToken: UInt16
+    let selectedDecodeTokens: [UInt16]
+
+    private(set) var resetCount: Int = 0
+    private(set) var prefillCalls: [[UInt16]] = []
+    private(set) var decodeCalls: [UInt16] = []
+    private(set) var prefillSelectedCalls: [[UInt16]] = []
+    private(set) var decodeSelectedCalls: [UInt16] = []
+
+    mutating func reset() throws(GenerationError) {
+        resetCount += 1
+    }
+
+    mutating func prefill(promptTokens: [UInt16]) throws(GenerationError) -> [Float] {
+        prefillCalls.append(promptTokens)
+        return [0, 1, 0, 0].map(Float.init)
+    }
+
+    mutating func decode(nextToken: UInt16) throws(GenerationError) -> [Float] {
+        decodeCalls.append(nextToken)
+        return [1, 0, 0, 0].map(Float.init)
+    }
+
+    mutating func verify(sequenceTokens: [UInt16], startIndex: Int) throws(GenerationError) -> [[Float]] {
+        []
+    }
+
+    mutating func prefillSelectedToken(
+        promptTokens: [UInt16],
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        prefillSelectedCalls.append(promptTokens)
+        return selectedPrefillToken
+    }
+
+    mutating func decodeSelectedToken(
+        nextToken: UInt16,
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        decodeSelectedCalls.append(nextToken)
+        let idx = decodeSelectedCalls.count - 1
+        return selectedDecodeTokens[idx]
+    }
+}
+
 final class GenerationHarnessTests: XCTestCase {
     func test_generation_performance_snapshot_reports_total_runtime() {
         let snapshot = GenerationPerformanceSnapshot(
@@ -154,5 +201,41 @@ final class GenerationHarnessTests: XCTestCase {
         XCTAssertEqual(harness.fullModel.verifyCalls.count, 1)
         XCTAssertGreaterThan(trace.effectiveTokensPerSecond, 0)
         XCTAssertGreaterThan(trace.totalLatencyMs, 0)
+    }
+
+    func test_direct_token_selection_harness_uses_model_fast_selection() throws {
+        let model = FakeFastSelectionModel(
+            vocabSize: 4,
+            selectedPrefillToken: 2,
+            selectedDecodeTokens: [1, 3, 0]
+        )
+
+        var harness = DirectTokenSelectionGenerationHarness(model: model, strategy: .argmax)
+
+        let trace = try harness.generate(promptTokens: [4, 5], maxNewTokens: 3)
+
+        XCTAssertEqual(trace.generatedTokens, [2, 1, 3])
+        XCTAssertEqual(harness.model.prefillSelectedCalls, [[4, 5]])
+        XCTAssertEqual(harness.model.decodeSelectedCalls, [2, 1, 3])
+        XCTAssertTrue(harness.model.prefillCalls.isEmpty)
+        XCTAssertTrue(harness.model.decodeCalls.isEmpty)
+    }
+
+    func test_autoregressive_harness_materializes_logits_for_fast_selection_model() throws {
+        let model = FakeFastSelectionModel(
+            vocabSize: 4,
+            selectedPrefillToken: 2,
+            selectedDecodeTokens: [1, 3, 0]
+        )
+
+        var harness = AutoregressiveGenerationHarness(model: model, strategy: .argmax)
+
+        let trace = try harness.generate(promptTokens: [4, 5], maxNewTokens: 2)
+
+        XCTAssertEqual(trace.generatedTokens, [1, 0])
+        XCTAssertEqual(harness.model.prefillCalls, [[4, 5]])
+        XCTAssertEqual(harness.model.decodeCalls, [1, 0])
+        XCTAssertTrue(harness.model.prefillSelectedCalls.isEmpty)
+        XCTAssertTrue(harness.model.decodeSelectedCalls.isEmpty)
     }
 }

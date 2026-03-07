@@ -942,3 +942,79 @@ Decision:
 - Do not spend unbounded time tuning this same full-logits-return path further.
 - If head-side work continues, make it a bounded probe around avoiding full-vocab logits readback.
 - Otherwise, return to the higher-upside path: recurrent multi-layer fusion.
+
+## Reduced Readback / Direct Surface Argmax (March 7, 2026)
+
+Goal:
+- Test the next honest head-side follow-up after the fused ANE `RMSNorm + classifier` head:
+  avoid full-vocab logits materialization for `argmax` generation.
+
+Hypothesis:
+- The fused head made the classifier path fast enough that reading a full `vocab`-length logits vector back to CPU every step is now a credible limiter.
+- A bounded host-side direct argmax scan on the ANE output IOSurface can answer that question without betting on unsupported MIL `argmax` / `topk` ops.
+
+Implementation:
+- Added a small C interop helper:
+  - `ane_interop_io_argmax_fp16_spatial_slice`
+- Exposed it in Swift:
+  - `SurfaceIO.argmaxFP16SpatialSlice(...)`
+- Added direct-selection helpers to:
+  - `ANEGenerationClassifierHead`
+  - `ANEGenerationRMSNormClassifierHead`
+- Added an explicit generation harness for models that can return the selected token directly:
+  - `DirectTokenSelectionGenerationHarness`
+- Kept the existing `AutoregressiveGenerationHarness` unchanged as the materialized-logits control.
+
+Correctness checks:
+- `SurfaceIO` direct argmax matches materialized-lane argmax in unit tests.
+- The direct-selection harness preserves token outputs in unit tests.
+- On hardware, the direct-selection and materialized fused-head paths produced the same echo tokens before benchmarking.
+
+Benchmark setup:
+- recurrent generation
+- `6` layers
+- fused ANE `RMSNorm + classifier` head
+- prompt `[0]`
+- `8` generated tokens
+- `3` warmup
+- `20` timed iterations
+- median reported
+
+Results:
+- Materialized logits control:
+  - `3.568122 ms/token`
+  - `280.26 tok/s`
+  - compile `663.66 ms`
+  - trunk `2.614922 ms/token`
+  - head `0.946177 ms/token`
+- Direct surface argmax:
+  - `2.467362 ms/token`
+  - `405.29 tok/s`
+  - compile `659.94 ms`
+  - trunk `1.700138 ms/token`
+  - head `0.768669 ms/token`
+
+Replications:
+- `3.620622 -> 2.454737 ms/token`
+- `3.637203 -> 2.451047 ms/token`
+
+Delta from the parity+benchmark run:
+- `1.100760 ms/token` faster end-to-end (`30.85%`)
+- `125.03 tok/s` faster (`44.61%`)
+- head bucket down by `0.177508 ms/token`
+- observed trunk bucket down by `0.914784 ms/token`
+
+Interpretation:
+- The reduced-readback path clearly removed real head-side overhead.
+- The total end-to-end win is much larger than the head-bucket reduction alone.
+- Inference from the data:
+  the shorter head-side path also appears to reduce host-side delay enough to improve the observed recurrent trunk cadence in this autoregressive harness.
+
+Decision:
+- This probe decisively passed the continuation gate.
+- Avoiding full-vocab logits materialization is now a proven performance avenue, not just a hypothesis.
+- Do not switch away from head-side work yet.
+- The next honest head-side probes are:
+  - reuse one read lock and stream chunked reads if another small gain remains
+  - or move token selection further toward minimal-return / on-device selection
+- Recurrent multi-layer fusion still matters, but it is no longer the automatic next step after the fused head.

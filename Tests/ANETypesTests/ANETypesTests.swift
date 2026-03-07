@@ -584,6 +584,55 @@ final class ANETypesTests: XCTestCase {
         }
     }
 
+    func test_surface_argmax_fp16_spatial_slice_matches_materialized_argmax() throws {
+        let channels = 7
+        let spatial = 4
+        let surface = makeSurface(bytes: channels * spatial * 2)
+
+        let input: [Float] = [
+            -3.0, -2.0, -1.0, 0.0,
+            -0.5, -0.25, 1.0, -0.75,
+            -4.0, -3.5, 8.5, -3.0,
+            1.0, 1.5, 0.5, 2.0,
+            -2.0, -1.0, 8.5, -1.5,
+            0.0, 0.25, 3.0, 4.0,
+            -6.0, -5.0, -4.0, -3.0,
+        ]
+        input.withUnsafeBufferPointer { src in
+            SurfaceIO.writeFP16(to: surface, data: src, channels: channels, spatial: spatial)
+        }
+
+        var lane = Array(repeating: Float.nan, count: channels)
+        try lane.withUnsafeMutableBufferPointer { dst in
+            try SurfaceIO.readFP16SpatialSlice(
+                from: surface,
+                channelOffset: 0,
+                spatialIndex: 2,
+                spatial: spatial,
+                into: dst,
+                channels: channels
+            )
+        }
+
+        var expectedIndex = 0
+        var expectedValue = lane[0]
+        for idx in 1..<lane.count where lane[idx] > expectedValue {
+            expectedIndex = idx
+            expectedValue = lane[idx]
+        }
+
+        let argmax = try SurfaceIO.argmaxFP16SpatialSlice(
+            from: surface,
+            channelOffset: 0,
+            spatialIndex: 2,
+            spatial: spatial,
+            channels: channels
+        )
+
+        XCTAssertEqual(argmax.index, expectedIndex)
+        XCTAssertEqual(argmax.value, expectedValue, accuracy: 1e-2)
+    }
+
     func test_surface_copy_fp16_spatial_slice_with_channel_offsets() throws {
         let srcChannels = 10
         let srcSpatial = 2

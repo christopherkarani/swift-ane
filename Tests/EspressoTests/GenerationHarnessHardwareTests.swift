@@ -720,6 +720,77 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         XCTAssertGreaterThan(fusedHead.medianLogitsMsPerToken, 0)
     }
 
+    func test_recurrent_generation_fused_head_direct_surface_argmax_reports_reduced_readback_on_hardware() throws {
+        try requireGenerationHardware()
+
+        let prompt: [UInt16] = [0]
+        let warmup = 3
+        let iterations = 20
+        let maxNewTokens = 8
+
+        let parityWeights = makeEchoRecurrentGenerationWeights(layerCount: 6)
+        let materializedModel = try ANERecurrentGenerationModel(
+            weights: parityWeights,
+            layerCount: 6,
+            maxSequenceTokens: 32,
+            outputHeadBackend: .aneRMSNormClassifier
+        )
+        let directSelectModel = try ANERecurrentGenerationModel(
+            weights: parityWeights,
+            layerCount: 6,
+            maxSequenceTokens: 32,
+            outputHeadBackend: .aneRMSNormClassifier
+        )
+        var materializedHarness = AutoregressiveGenerationHarness(
+            model: materializedModel,
+            strategy: .argmax
+        )
+        var directSelectHarness = DirectTokenSelectionGenerationHarness(
+            model: directSelectModel,
+            strategy: .argmax
+        )
+        let materializedTrace = try materializedHarness.generate(
+            promptTokens: prompt,
+            maxNewTokens: maxNewTokens
+        )
+        let directSelectTrace = try directSelectHarness.generate(
+            promptTokens: prompt,
+            maxNewTokens: maxNewTokens
+        )
+        XCTAssertEqual(directSelectTrace.generatedTokens, materializedTrace.generatedTokens)
+
+        let materialized = try benchmarkRecurrentEchoGeneration(
+            layerCount: 6,
+            promptTokens: prompt,
+            maxNewTokens: maxNewTokens,
+            warmup: warmup,
+            iterations: iterations,
+            outputHeadBackend: .aneRMSNormClassifier,
+            useDirectTokenSelection: false
+        )
+        let directSelect = try benchmarkRecurrentEchoGeneration(
+            layerCount: 6,
+            promptTokens: prompt,
+            maxNewTokens: maxNewTokens,
+            warmup: warmup,
+            iterations: iterations,
+            outputHeadBackend: .aneRMSNormClassifier,
+            useDirectTokenSelection: true
+        )
+
+        print(
+            """
+            recurrent generation fused-head materialized median=\(materialized.medianTokenMs) ms/token tps=\(materialized.medianTokensPerSecond) compile=\(materialized.compileTimeMs) trunk=\(materialized.medianTrunkMsPerToken) logits=\(materialized.medianLogitsMsPerToken)
+            recurrent generation fused-head direct-select median=\(directSelect.medianTokenMs) ms/token tps=\(directSelect.medianTokensPerSecond) compile=\(directSelect.compileTimeMs) trunk=\(directSelect.medianTrunkMsPerToken) logits=\(directSelect.medianLogitsMsPerToken)
+            """
+        )
+
+        XCTAssertGreaterThan(materialized.medianTokenMs, 0)
+        XCTAssertGreaterThan(directSelect.medianTokenMs, 0)
+        XCTAssertGreaterThan(materialized.compileTimeMs, 0)
+        XCTAssertGreaterThan(directSelect.compileTimeMs, 0)
+    }
+
     private func benchmarkDirectEchoGeneration(
         layerCount: Int,
         promptTokens: [UInt16],
@@ -796,7 +867,8 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         maxNewTokens: Int,
         warmup: Int,
         iterations: Int,
-        outputHeadBackend: GenerationOutputHeadBackend = .cpu
+        outputHeadBackend: GenerationOutputHeadBackend = .cpu,
+        useDirectTokenSelection: Bool = false
     ) throws -> GenerationBenchmarkSample {
         let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount)
         let model = try ANERecurrentGenerationModel(
@@ -805,14 +877,25 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             maxSequenceTokens: 32,
             outputHeadBackend: outputHeadBackend
         )
-        var harness = AutoregressiveGenerationHarness(model: model, strategy: .argmax)
-        return try benchmarkAutoregressiveHarness(
-            harness: &harness,
-            promptTokens: promptTokens,
-            maxNewTokens: maxNewTokens,
-            warmup: warmup,
-            iterations: iterations
-        )
+        if useDirectTokenSelection {
+            var harness = DirectTokenSelectionGenerationHarness(model: model, strategy: .argmax)
+            return try benchmarkDirectSelectionHarness(
+                harness: &harness,
+                promptTokens: promptTokens,
+                maxNewTokens: maxNewTokens,
+                warmup: warmup,
+                iterations: iterations
+            )
+        } else {
+            var harness = AutoregressiveGenerationHarness(model: model, strategy: .argmax)
+            return try benchmarkAutoregressiveHarness(
+                harness: &harness,
+                promptTokens: promptTokens,
+                maxNewTokens: maxNewTokens,
+                warmup: warmup,
+                iterations: iterations
+            )
+        }
     }
 
     private func benchmarkCoreMLGeneration(
@@ -846,6 +929,46 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         iterations: Int
     ) throws -> GenerationBenchmarkSample
     where Model: AutoregressiveLanguageModel & GenerationPerformanceTrackable, Model: ~Copyable {
+        var tokenLatencies: [Double] = []
+        var throughput: [Double] = []
+        var trunkLatencies: [Double] = []
+        var logitsLatencies: [Double] = []
+        tokenLatencies.reserveCapacity(iterations)
+        throughput.reserveCapacity(iterations)
+        trunkLatencies.reserveCapacity(iterations)
+        logitsLatencies.reserveCapacity(iterations)
+
+        let compileTimeMs = harness.model.performanceSnapshot.compileTimeMs
+
+        for iter in 0..<(warmup + iterations) {
+            let trace = try harness.generate(promptTokens: promptTokens, maxNewTokens: maxNewTokens)
+            if iter >= warmup {
+                let snapshot = harness.model.performanceSnapshot
+                tokenLatencies.append(trace.totalLatencyMs / Double(maxNewTokens))
+                throughput.append(trace.tokensPerSecond)
+                trunkLatencies.append(snapshot.trunkLatencyMs / Double(maxNewTokens))
+                logitsLatencies.append(snapshot.logitsLatencyMs / Double(maxNewTokens))
+            }
+        }
+
+        return GenerationBenchmarkSample(
+            medianTokenMs: median(tokenLatencies),
+            medianTokensPerSecond: median(throughput),
+            acceptanceRate: nil,
+            compileTimeMs: compileTimeMs,
+            medianTrunkMsPerToken: median(trunkLatencies),
+            medianLogitsMsPerToken: median(logitsLatencies)
+        )
+    }
+
+    private func benchmarkDirectSelectionHarness<Model>(
+        harness: inout DirectTokenSelectionGenerationHarness<Model>,
+        promptTokens: [UInt16],
+        maxNewTokens: Int,
+        warmup: Int,
+        iterations: Int
+    ) throws -> GenerationBenchmarkSample
+    where Model: DirectTokenSelectingLanguageModel & GenerationPerformanceTrackable, Model: ~Copyable {
         var tokenLatencies: [Double] = []
         var throughput: [Double] = []
         var trunkLatencies: [Double] = []

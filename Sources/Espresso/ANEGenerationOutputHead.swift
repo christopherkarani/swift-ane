@@ -82,6 +82,32 @@ private enum ANEGenerationOutputHeadIO {
             throw .runtimeFailure("ANE output-head output read failed: \(error)")
         }
     }
+
+    static func argmaxSingleTokenLogits(
+        from surface: IOSurfaceRef,
+        vocabSize: Int,
+        laneSpatial: Int
+    ) throws(GenerationError) -> UInt16 {
+        do {
+            let result = try SurfaceIO.argmaxFP16SpatialSlice(
+                from: surface,
+                channelOffset: 0,
+                spatialIndex: 0,
+                spatial: laneSpatial,
+                channels: vocabSize
+            )
+            guard let token = UInt16(exactly: result.index) else {
+                throw GenerationError.invalidArguments(
+                    "selected token index \(result.index) exceeds UInt16 range"
+                )
+            }
+            return token
+        } catch let error as GenerationError {
+            throw error
+        } catch {
+            throw .runtimeFailure("ANE output-head argmax failed: \(error)")
+        }
+    }
 }
 
 final class ANEGenerationClassifierHead {
@@ -139,6 +165,31 @@ final class ANEGenerationClassifierHead {
         try ANEGenerationOutputHeadIO.readSingleTokenLogits(
             from: outputSurface,
             into: logits,
+            vocabSize: vocabSize,
+            laneSpatial: laneSpatial
+        )
+    }
+
+    func selectArgmax(
+        normalizedInput: borrowing TensorBuffer
+    ) throws(GenerationError) -> UInt16 {
+        precondition(normalizedInput.count == ModelConfig.dim)
+
+        try ANEGenerationOutputHeadIO.writeSingleToken(
+            normalizedInput,
+            to: inputSurface,
+            laneSpatial: laneSpatial,
+            zeroInput: zeroInput
+        )
+
+        do {
+            try kernelSet.classifier.eval()
+        } catch {
+            throw .runtimeFailure("ANE classifier eval failed: \(error)")
+        }
+
+        return try ANEGenerationOutputHeadIO.argmaxSingleTokenLogits(
+            from: outputSurface,
             vocabSize: vocabSize,
             laneSpatial: laneSpatial
         )
@@ -202,6 +253,31 @@ final class ANEGenerationRMSNormClassifierHead {
         try ANEGenerationOutputHeadIO.readSingleTokenLogits(
             from: outputSurface,
             into: logits,
+            vocabSize: vocabSize,
+            laneSpatial: laneSpatial
+        )
+    }
+
+    func selectArgmax(
+        rawInput: borrowing TensorBuffer
+    ) throws(GenerationError) -> UInt16 {
+        precondition(rawInput.count == ModelConfig.dim)
+
+        try ANEGenerationOutputHeadIO.writeSingleToken(
+            rawInput,
+            to: inputSurface,
+            laneSpatial: laneSpatial,
+            zeroInput: zeroInput
+        )
+
+        do {
+            try kernelSet.rmsNormClassifier.eval()
+        } catch {
+            throw .runtimeFailure("ANE fused output-head eval failed: \(error)")
+        }
+
+        return try ANEGenerationOutputHeadIO.argmaxSingleTokenLogits(
+            from: outputSurface,
             vocabSize: vocabSize,
             laneSpatial: laneSpatial
         )

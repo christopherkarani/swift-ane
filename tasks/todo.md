@@ -1,97 +1,110 @@
-# ANE Fused Output-Head Gate (2026-03-07)
+# ANE Reduced-Readback Argmax Gate (2026-03-07)
 
 ## Plan
-- [x] Re-read the current classifier-only output-head results and the latest generation harness before continuing.
+- [x] Re-read the current fused output-head findings, lessons, and generation harness before continuing.
 - [x] State the breakthrough hypothesis up front:
-  - [x] The remaining head budget is still large enough that a fused lane-packed `RMSNorm + classifier` head could matter.
-  - [x] The classifier-only ANE head already proved the output head is movable, but not enough of it moved.
+  - [x] The fused ANE `RMSNorm + classifier` head is now good enough that full-vocab logits materialization and host-side token selection are a plausible next limiter.
+  - [x] A host-side direct scan of the ANE output IOSurface can test the reduced-readback idea without depending on unsupported MIL `argmax` / `topk`.
 - [x] State the decisive metric and stop condition up front:
-  - [x] Current recurrent `6`-layer ANE classifier-head baseline: `3.710214 ms/token`, `269.53 tok/s`, logits `1.094966 ms/token`
-  - [x] To get back to `>=2x` over direct transformer generation (`6.558745 ms/token`), recurrent `6`-layer generation needs to get under `3.279373 ms/token`
-  - [x] That means this follow-up needs another `~0.431 ms/token` end-to-end beyond the current ANE classifier backend to fully clear the old gate
-  - [x] Continue only if fused head saves another clearly material chunk of runtime:
-    - [x] roughly `>=0.25 ms/token` over the current ANE classifier-head baseline, or
-    - [x] enough head-side savings to make a second fusion step obviously justified
+  - [x] Current recurrent `6`-layer fused ANE head baseline: `3.564776 ms/token`, `280.54 tok/s`, head `0.936549 ms/token`
+  - [x] To clear the old `>=2x`-over-direct-transformer gate (`6.558745 ms/token`), recurrent generation still needs to get under `3.279373 ms/token`
+  - [x] This follow-up should save a clearly material chunk over the current fused head:
+    - [x] target: about `>=0.15-0.20 ms/token` end-to-end, or
+    - [x] enough head-bucket reduction to justify a second reduced-readback step
   - [x] Stop quickly if:
-    - [x] fused large-vocab head fails with `InvalidMILProgram` / `statusType=0x9` / unrecoverable crash
-    - [x] fused head is not measurably better than classifier-only ANE offload
-    - [x] compile time balloons enough to make iteration impractical
+    - [x] direct surface argmax is not measurably better than materialized logits
+    - [x] correctness diverges from the existing argmax path
+    - [x] interop/surface changes become larger than a bounded helper
 - [x] Record the current baselines before implementation:
   - [x] direct transformer generation, `6` layers: `6.558745 ms/token`, `152.47 tok/s`
-  - [x] recurrent generation, CPU head, `6` layers: `3.965409 ms/token`, `252.18 tok/s`, logits `1.292997`
-  - [x] recurrent generation, ANE classifier head, `6` layers: `3.710214 ms/token`, `269.53 tok/s`, logits `1.094966`
-  - [x] key inference: classifier-only ANE offload saved `0.255195 ms/token`, which is real but too small
+  - [x] recurrent generation, `6` layers, fused ANE head: `3.564776 ms/token`, `280.54 tok/s`, compile `612.15 ms`, trunk `2.615005`, head `0.936549`
 - [x] Rewrite the work around the next honest probe:
-  - [x] keep the proven lane-packed `spatial=32` shape
-  - [x] fuse final RMSNorm + classifier into one ANE kernel
-  - [x] use the recurrent generation path first
-  - [x] preserve CPU and classifier-only ANE heads as controls
+  - [x] keep the existing fused ANE head exactly as the compute control
+  - [x] add a host-side argmax path that scans the output surface directly
+  - [x] keep the old logits-materializing path as the control inside the same benchmark
+  - [x] limit the optimization to `TokenSelectionStrategy.argmax`
 - [x] Add failing tests first:
-  - [x] fused RMSNorm+classifier MIL generator contract test
-  - [x] fused kernel-set compile spec test
-  - [x] generation hardware benchmark comparing:
-    - [x] CPU head
-    - [x] ANE classifier head
-    - [x] fused ANE RMSNorm+classifier head
-- [x] Implement the fused head:
-  - [x] add a MIL generator for lane-packed final RMSNorm + classifier
-  - [x] add a runtime kernel wrapper
-  - [x] add a new generation output-head backend case
-  - [x] write/read only spatial lane `0` at runtime
-  - [x] keep failure behavior explicit and bounded
+  - [x] `SurfaceIO` / output-head test for direct FP16-slice argmax parity vs materialized logits argmax
+  - [x] generation harness test proving the fast-selection path preserves token outputs
+  - [x] hardware benchmark comparing:
+    - [x] fused ANE head with materialized logits
+    - [x] fused ANE head with direct surface argmax
+- [x] Implement the bounded reduced-readback path:
+  - [x] add a small interop/helper that scans an FP16 IOSurface spatial slice for argmax
+  - [x] expose it through `SurfaceIO`
+  - [x] add output-head helpers that can return a selected token without materializing full logits
+  - [x] add generation-model fast paths for argmax selection while preserving the old logits API
 - [x] Integrate with generation:
-  - [x] recurrent generation path first
-  - [x] keep verification on CPU
-  - [x] only extend direct transformer generation if recurrent numbers justify it
+  - [x] keep `AutoregressiveLanguageModel` compatibility for existing callers
+  - [x] add an explicit direct-selection harness so the benchmark can compare both paths honestly
+  - [x] keep speculative verify on logits arrays; do not widen this experiment
 - [x] Benchmark in order:
-  - [x] recurrent `6`-layer CPU head control
-  - [x] recurrent `6`-layer ANE classifier-head control
-  - [x] recurrent `6`-layer fused ANE RMSNorm+classifier head
+  - [x] recurrent `6`-layer fused ANE head with materialized logits control
+  - [x] recurrent `6`-layer fused ANE head with direct surface argmax
 - [x] Report:
   - [x] `ms/token`
   - [x] `tok/s`
   - [x] compile time
   - [x] trunk time vs head time
-  - [x] end-to-end delta vs classifier-only ANE head
+  - [x] delta vs the current fused-head baseline
 - [x] Apply the gate immediately after results:
-  - [ ] continue only if the fused head saves another material chunk (`>=0.25 ms/token`) or obviously unlocks a larger on-device reduction path
-  - [x] otherwise stop and document that head-side work is exhausted enough to shift focus back to recurrent trunk fusion
+  - [x] continue because reduced readback saved far more than the material gate
+  - [x] do not move to recurrent multi-layer fusion yet; there is still credible head-side upside
 - [x] Append findings to `docs/fused-decode-and-next-steps.md`.
 - [x] Update project memory with durable findings.
-- [ ] Fill in this review section and commit atomically.
+- [x] Fill in this review section and commit atomically.
 
 ## Review
-- Status: in progress.
+- Status: completed.
 - Starting point:
+  - recurrent generation, `6` layers, fused ANE head: `3.564776 ms/token`, `280.54 tok/s`
   - direct transformer generation, `6` layers: `6.558745 ms/token`, `152.47 tok/s`
-  - recurrent generation, ANE classifier head, `6` layers: `3.710214 ms/token`, `269.53 tok/s`
 - Most important current constraint:
-  - the head still costs about `1.095 ms/token`
-  - the current ANE classifier head moved only part of that cost
-  - the best remaining bounded head-side probe is fused `RMSNorm + classifier`, not more classifier-only tuning
+  - the fused head already reduced the head bucket to about `0.936549 ms/token`
+  - but the generation API still materializes the entire vocab logits vector and then computes `argmax` on CPU
+  - the next bounded probe is to reduce that readback/materialization cost without changing the ANE compute graph
 - What changed:
-  - added `GenerationRMSNormClassifierGenerator`
-  - added `GenerationRMSNormClassifierKernelSet`
-  - added a new `GenerationOutputHeadBackend.aneRMSNormClassifier`
-  - routed recurrent generation through a fused lane-packed `RMSNorm + classifier` ANE head
-- Results on recurrent generation, `6` layers:
-  - CPU head: `4.128354 ms/token`, `242.23 tok/s`, compile `445.79 ms`, trunk `2.721484`, head `1.375232`
-  - ANE classifier head: `3.761755 ms/token`, `265.83 tok/s`, compile `634.18 ms`, trunk `2.655479`, head `1.098206`
-  - fused ANE RMSNorm+classifier head: `3.564776 ms/token`, `280.54 tok/s`, compile `612.15 ms`, trunk `2.615005`, head `0.936549`
-- Deltas:
-  - fused vs classifier-only ANE head:
-    - `0.196979 ms/token` faster (`5.24%`)
-    - `14.71 tok/s` faster (`5.53%`)
-    - head bucket down by `0.161656 ms/token`
-  - fused vs CPU head:
-    - `0.563578 ms/token` faster (`13.65%`)
-  - remaining gap to `>=2x` over direct transformer generation:
-    - about `0.285404 ms/token`
+  - added `ane_interop_io_argmax_fp16_spatial_slice` in C interop
+  - added `SurfaceIO.argmaxFP16SpatialSlice(...)`
+  - added direct-token-selection helpers to the ANE generation output heads
+  - added `DirectTokenSelectionGenerationHarness`
+  - kept the old materialized-logits harness as the benchmark control
+- Correctness checks:
+  - `SurfaceIO` direct argmax matches materialized-lane argmax in unit tests
+  - the direct-selection harness preserves token outputs in unit tests
+  - on hardware, direct-selection and materialized fused-head generation produced the same echo tokens before benchmarking
+- Results on recurrent generation, `6` layers, fused ANE head:
+  - hardware parity+benchmark run:
+    - materialized logits:
+      - `3.568122 ms/token`
+      - `280.26 tok/s`
+      - compile `663.66 ms`
+      - trunk `2.614922`
+      - head `0.946177`
+    - direct surface argmax:
+      - `2.467362 ms/token`
+      - `405.29 tok/s`
+      - compile `659.94 ms`
+      - trunk `1.700138`
+      - head `0.768669`
+  - replication runs:
+    - `3.620622 -> 2.454737 ms/token`
+    - `3.637203 -> 2.451047 ms/token`
+- Deltas from the parity+benchmark run:
+  - direct surface argmax vs materialized logits:
+    - `1.100760 ms/token` faster (`30.85%`)
+    - `125.03 tok/s` faster (`44.61%`)
+    - head bucket down by `0.177508 ms/token`
+    - trunk bucket down by `0.914784 ms/token`
+- Interpretation:
+  - the direct argmax helper clearly removed real head-side cost
+  - the much larger end-to-end gain is bigger than the head-bucket reduction alone
+  - inference from the measurements:
+    - reducing readback/selection also appears to reduce host-side delay enough to improve the observed recurrent trunk cadence in this harness
 - Decision:
-  - there is still real head-side signal here
-  - fused head is a meaningful improvement over classifier-only offload
-  - but it still misses the predeclared `>=0.25 ms/token` continuation gate over the current ANE classifier-head baseline
-  - the next head-side step would need a different mechanism, most likely:
-    - reduce or avoid full-vocab logits readback
-    - or compute token selection on-device
-  - absent that, the next higher-upside avenue is recurrent multi-layer fusion
+  - this probe decisively passed the continuation gate
+  - reduced-readback head work is still live
+  - the next honest head-side follow-up is:
+    - reuse one read lock and stream chunked reads if more improvement remains, or
+    - push token selection further toward on-device / minimal-return paths
+  - recurrent multi-layer fusion remains a strong parallel avenue, but it is no longer the automatic next step after the fused head

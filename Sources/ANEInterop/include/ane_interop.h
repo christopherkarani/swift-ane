@@ -164,6 +164,13 @@ bool ane_interop_io_read_fp16_spatial_slice(IOSurfaceRef surface,
                                             int spatial,
                                             float *data,
                                             int channels);
+bool ane_interop_io_argmax_fp16_spatial_slice(IOSurfaceRef surface,
+                                              int ch_off,
+                                              int spatial_index,
+                                              int spatial,
+                                              int channels,
+                                              int *out_index,
+                                              float *out_value);
 bool ane_interop_io_write_fp16(IOSurfaceRef surface,
                                const float *data, int channels, int spatial);
 bool ane_interop_io_read_fp16(IOSurfaceRef surface, int ch_off,

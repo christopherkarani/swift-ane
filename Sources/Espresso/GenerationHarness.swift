@@ -47,6 +47,17 @@ public protocol AutoregressiveLanguageModel: ~Copyable {
     mutating func verify(sequenceTokens: [UInt16], startIndex: Int) throws(GenerationError) -> [[Float]]
 }
 
+public protocol DirectTokenSelectingLanguageModel: ~Copyable, AutoregressiveLanguageModel {
+    mutating func prefillSelectedToken(
+        promptTokens: [UInt16],
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16
+    mutating func decodeSelectedToken(
+        nextToken: UInt16,
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16
+}
+
 public struct AutoregressiveGenerationTrace: Sendable {
     public let promptTokens: [UInt16]
     public let generatedTokens: [UInt16]
@@ -214,6 +225,32 @@ private func selectToken(from logits: [Float], strategy: TokenSelectionStrategy)
     }
 }
 
+@inline(__always)
+private func selectToken(
+    from logits: borrowing TensorBuffer,
+    strategy: TokenSelectionStrategy
+) throws(GenerationError) -> UInt16 {
+    guard logits.count > 0 else {
+        throw .invalidArguments("cannot select from empty logits")
+    }
+    switch strategy {
+    case .argmax:
+        let bestIndex = logits.withUnsafeBufferPointer { buffer in
+            var bestIndex = 0
+            var bestValue = buffer[0]
+            for idx in 1..<buffer.count where buffer[idx] > bestValue {
+                bestValue = buffer[idx]
+                bestIndex = idx
+            }
+            return bestIndex
+        }
+        guard let token = UInt16(exactly: bestIndex) else {
+            throw .invalidArguments("selected token index \(bestIndex) exceeds UInt16 range")
+        }
+        return token
+    }
+}
+
 public struct AutoregressiveGenerationHarness<Model: AutoregressiveLanguageModel>: ~Copyable where Model: ~Copyable {
     public var model: Model
     public let strategy: TokenSelectionStrategy
@@ -250,6 +287,59 @@ public struct AutoregressiveGenerationHarness<Model: AutoregressiveLanguageModel
 
             let decodeStart = GenerationClock.now()
             logits = try model.decode(nextToken: token)
+            decodeLatenciesMs.append(
+                GenerationClock.milliseconds(start: decodeStart, end: GenerationClock.now())
+            )
+        }
+
+        return AutoregressiveGenerationTrace(
+            promptTokens: promptTokens,
+            generatedTokens: generatedTokens,
+            prefillLatencyMs: prefillLatencyMs,
+            decodeLatenciesMs: decodeLatenciesMs
+        )
+    }
+}
+
+public struct DirectTokenSelectionGenerationHarness<Model: DirectTokenSelectingLanguageModel>: ~Copyable
+where Model: ~Copyable {
+    public var model: Model
+    public let strategy: TokenSelectionStrategy
+
+    public init(model: consuming Model, strategy: TokenSelectionStrategy = .argmax) {
+        self.model = model
+        self.strategy = strategy
+    }
+
+    public mutating func generate(
+        promptTokens: [UInt16],
+        maxNewTokens: Int
+    ) throws(GenerationError) -> AutoregressiveGenerationTrace {
+        guard !promptTokens.isEmpty else {
+            throw .invalidArguments("promptTokens must not be empty")
+        }
+        guard maxNewTokens > 0 else {
+            throw .invalidArguments("maxNewTokens must be > 0")
+        }
+
+        try model.reset()
+        let prefillStart = GenerationClock.now()
+        var nextToken = try model.prefillSelectedToken(
+            promptTokens: promptTokens,
+            strategy: strategy
+        )
+        let prefillLatencyMs = GenerationClock.milliseconds(start: prefillStart, end: GenerationClock.now())
+
+        var generatedTokens: [UInt16] = []
+        var decodeLatenciesMs: [Double] = []
+        generatedTokens.reserveCapacity(maxNewTokens)
+        decodeLatenciesMs.reserveCapacity(maxNewTokens)
+
+        for _ in 0..<maxNewTokens {
+            generatedTokens.append(nextToken)
+
+            let decodeStart = GenerationClock.now()
+            nextToken = try model.decodeSelectedToken(nextToken: nextToken, strategy: strategy)
             decodeLatenciesMs.append(
                 GenerationClock.milliseconds(start: decodeStart, end: GenerationClock.now())
             )
@@ -479,7 +569,7 @@ public struct RecurrentGenerationWeights: ~Copyable {
     }
 }
 
-public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel, GenerationPerformanceTrackable {
+public struct ANEDirectGenerationModel: ~Copyable, DirectTokenSelectingLanguageModel, GenerationPerformanceTrackable {
     public let vocabSize: Int
     public let layerCount: Int
     public let decodeMaxSeq: Int
@@ -764,6 +854,31 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel, 
         return try projectStepLogits()
     }
 
+    public mutating func prefillSelectedToken(
+        promptTokens: [UInt16],
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        guard !promptTokens.isEmpty else {
+            throw .invalidArguments("promptTokens must not be empty")
+        }
+        guard promptTokens.count <= decodeMaxSeq else {
+            throw .invalidArguments("prompt length \(promptTokens.count) exceeds decodeMaxSeq \(decodeMaxSeq)")
+        }
+
+        for token in promptTokens {
+            try runDecodeStep(token: token)
+        }
+        return try selectStepToken(strategy: strategy)
+    }
+
+    public mutating func decodeSelectedToken(
+        nextToken: UInt16,
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        try runDecodeStep(token: nextToken)
+        return try selectStepToken(strategy: strategy)
+    }
+
     public mutating func verify(
         sequenceTokens: [UInt16],
         startIndex: Int
@@ -914,6 +1029,70 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel, 
         return stepLogits.withUnsafeBufferPointer { Array($0) }
     }
 
+    private mutating func selectStepToken(
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        let logitsStart = GenerationClock.now()
+        if outputHeadBackend != .aneRMSNormClassifier {
+            xCur.withUnsafePointer { xPtr in
+                stepNorm.withUnsafeMutablePointer { normPtr in
+                    rmsFinal.withUnsafePointer { rmsPtr in
+                        RMSNorm.forward(
+                            output: normPtr,
+                            input: xPtr,
+                            weights: rmsPtr,
+                            dim: ModelConfig.dim,
+                            seqLen: 1,
+                            workspace: stepRMSWorkspace
+                        )
+                    }
+                }
+            }
+        }
+
+        let token: UInt16
+        switch outputHeadBackend {
+        case .cpu:
+            stepLogits.zero()
+            stepLogits.withUnsafeMutablePointer { logitsPtr in
+                classifierPointer { clsPtr in
+                    stepNorm.withUnsafePointer { normPtr in
+                        BLAS.sgemm(
+                            CblasRowMajor,
+                            CblasNoTrans,
+                            CblasNoTrans,
+                            m: Int32(vocabSize),
+                            n: 1,
+                            k: Int32(ModelConfig.dim),
+                            alpha: 1.0,
+                            a: clsPtr,
+                            lda: Int32(ModelConfig.dim),
+                            b: normPtr,
+                            ldb: 1,
+                            beta: 0.0,
+                            c: logitsPtr,
+                            ldc: 1
+                        )
+                    }
+                }
+            }
+            token = try selectToken(from: stepLogits, strategy: strategy)
+        case .aneClassifier:
+            guard let aneClassifierHead else {
+                throw .runtimeFailure("ANE classifier backend requested without compiled head")
+            }
+            token = try aneClassifierHead.selectArgmax(normalizedInput: stepNorm)
+        case .aneRMSNormClassifier:
+            guard let aneRMSNormClassifierHead else {
+                throw .runtimeFailure("ANE fused output-head backend requested without compiled head")
+            }
+            token = try aneRMSNormClassifierHead.selectArgmax(rawInput: xCur)
+        }
+
+        logitsLatencyMs += GenerationClock.milliseconds(start: logitsStart, end: GenerationClock.now())
+        return token
+    }
+
     private mutating func writeSequenceTokens(_ tokens: [UInt16]) throws(GenerationError) {
         verifySequence.zero()
         for token in tokens where Int(token) >= vocabSize {
@@ -977,7 +1156,7 @@ public struct ANEDirectGenerationModel: ~Copyable, AutoregressiveLanguageModel, 
     }
 }
 
-public struct ANERecurrentGenerationModel: ~Copyable, AutoregressiveLanguageModel, GenerationPerformanceTrackable {
+public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLanguageModel, GenerationPerformanceTrackable {
     public let vocabSize: Int
     public let layerCount: Int
     public let maxSequenceTokens: Int
@@ -1172,6 +1351,31 @@ public struct ANERecurrentGenerationModel: ~Copyable, AutoregressiveLanguageMode
         return try projectCurrentLogits()
     }
 
+    public mutating func prefillSelectedToken(
+        promptTokens: [UInt16],
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        guard !promptTokens.isEmpty else {
+            throw .invalidArguments("promptTokens must not be empty")
+        }
+        guard promptTokens.count <= maxSequenceTokens else {
+            throw .invalidArguments("prompt length \(promptTokens.count) exceeds maxSequenceTokens \(maxSequenceTokens)")
+        }
+
+        for token in promptTokens {
+            try runRecurrentStep(token: token)
+        }
+        return try selectCurrentToken(strategy: strategy)
+    }
+
+    public mutating func decodeSelectedToken(
+        nextToken: UInt16,
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        try runRecurrentStep(token: nextToken)
+        return try selectCurrentToken(strategy: strategy)
+    }
+
     public mutating func verify(
         sequenceTokens: [UInt16],
         startIndex: Int
@@ -1306,5 +1510,90 @@ public struct ANERecurrentGenerationModel: ~Copyable, AutoregressiveLanguageMode
 
         logitsLatencyMs += GenerationClock.milliseconds(start: logitsStart, end: GenerationClock.now())
         return stepLogits.withUnsafeBufferPointer { Array($0) }
+    }
+
+    private mutating func selectCurrentToken(
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        let logitsStart = GenerationClock.now()
+        if outputHeadBackend != .aneRMSNormClassifier {
+            if currentActivationIsA {
+                activationA.withUnsafePointer { xPtr in
+                    stepNorm.withUnsafeMutablePointer { normPtr in
+                        rmsFinal.withUnsafePointer { rmsPtr in
+                            RMSNorm.forward(
+                                output: normPtr,
+                                input: xPtr,
+                                weights: rmsPtr,
+                                dim: ModelConfig.dim,
+                                seqLen: 1,
+                                workspace: stepRMSWorkspace
+                            )
+                        }
+                    }
+                }
+            } else {
+                activationB.withUnsafePointer { xPtr in
+                    stepNorm.withUnsafeMutablePointer { normPtr in
+                        rmsFinal.withUnsafePointer { rmsPtr in
+                            RMSNorm.forward(
+                                output: normPtr,
+                                input: xPtr,
+                                weights: rmsPtr,
+                                dim: ModelConfig.dim,
+                                seqLen: 1,
+                                workspace: stepRMSWorkspace
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        let token: UInt16
+        switch outputHeadBackend {
+        case .cpu:
+            stepLogits.zero()
+            stepLogits.withUnsafeMutablePointer { logitsPtr in
+                classifierPointer { clsPtr in
+                    stepNorm.withUnsafePointer { normPtr in
+                        BLAS.sgemm(
+                            CblasRowMajor,
+                            CblasNoTrans,
+                            CblasNoTrans,
+                            m: Int32(vocabSize),
+                            n: 1,
+                            k: Int32(ModelConfig.dim),
+                            alpha: 1.0,
+                            a: clsPtr,
+                            lda: Int32(ModelConfig.dim),
+                            b: normPtr,
+                            ldb: 1,
+                            beta: 0.0,
+                            c: logitsPtr,
+                            ldc: 1
+                        )
+                    }
+                }
+            }
+            token = try selectToken(from: stepLogits, strategy: strategy)
+        case .aneClassifier:
+            guard let aneClassifierHead else {
+                throw .runtimeFailure("ANE classifier backend requested without compiled head")
+            }
+            token = try aneClassifierHead.selectArgmax(normalizedInput: stepNorm)
+        case .aneRMSNormClassifier:
+            guard let aneRMSNormClassifierHead else {
+                throw .runtimeFailure("ANE fused output-head backend requested without compiled head")
+            }
+            if currentActivationIsA {
+                token = try aneRMSNormClassifierHead.selectArgmax(rawInput: activationA)
+            } else {
+                token = try aneRMSNormClassifierHead.selectArgmax(rawInput: activationB)
+            }
+        }
+
+        logitsLatencyMs += GenerationClock.milliseconds(start: logitsStart, end: GenerationClock.now())
+        return token
     }
 }

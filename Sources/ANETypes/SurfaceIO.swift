@@ -7,6 +7,16 @@ public enum SurfaceIOError: Error, Equatable {
 }
 
 public enum SurfaceIO {
+    public struct FP16ArgmaxResult: Equatable {
+        public let index: Int
+        public let value: Float
+
+        public init(index: Int, value: Float) {
+            self.index = index
+            self.value = value
+        }
+    }
+
     public struct FP16ReadRegion {
         public let destination: UnsafeMutablePointer<Float>
         public let channelOffset: Int
@@ -328,6 +338,36 @@ public enum SurfaceIO {
             channels32
         )
         guard ok else { throw .interopCallFailed }
+    }
+
+    public static func argmaxFP16SpatialSlice(
+        from surface: IOSurfaceRef,
+        channelOffset: Int,
+        spatialIndex: Int,
+        spatial: Int,
+        channels: Int
+    ) throws(SurfaceIOError) -> FP16ArgmaxResult {
+        let chOff32 = try checkedNonNegativeInt32(channelOffset)
+        let spatialIndex32 = try checkedNonNegativeInt32(spatialIndex)
+        let spatial32 = try checkedNonNegativeInt32(spatial)
+        let channels32 = try checkedNonNegativeInt32(channels)
+        guard spatial > 0, channels > 0, spatialIndex < spatial else {
+            throw .argumentOutOfRange
+        }
+
+        var index32: Int32 = 0
+        var value: Float = 0
+        let ok = ane_interop_io_argmax_fp16_spatial_slice(
+            surface,
+            chOff32,
+            spatialIndex32,
+            spatial32,
+            channels32,
+            &index32,
+            &value
+        )
+        guard ok else { throw .interopCallFailed }
+        return FP16ArgmaxResult(index: Int(index32), value: value)
     }
 
     public static func copyFP16Batched(dst: IOSurfaceRef,
