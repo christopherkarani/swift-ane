@@ -1517,3 +1517,23 @@ Interpretation:
 - The GPU reduction preserved exactness but added too much per-token dispatch/synchronization overhead.
 - The extra cost landed almost entirely in the logits/selection budget, which grew by about `0.509 ms/token`.
 - Inference: a standalone Metal reduction is not a viable replacement for the current host argmax on this branch.
+
+## 2026-03-08 - Packed-state fused-triplet compiles but fails at eval
+
+What was tried:
+- Kept the fused-triplet recurrent math unchanged but packed the three recurrent states into one channel-concatenated IOSurface.
+- Implemented a packed-state fused-triplet generator using `slice_by_size` on the packed state input and `concat` on the three state outputs.
+- Added a matching kernelset, session, harness backend, and hardware comparison test.
+
+Why:
+- The previous low-cost I/O idea was to reduce the triplet session's surface count and collapse three state copy/reset operations into one without increasing fusion depth.
+
+Measured result:
+- Unit contracts passed.
+- The ANE compiler accepted the packed-state MIL.
+- The first hardware eval failed immediately with `statusType=0x9` / `Program Inference error` before any steady-state runtime measurement.
+
+Interpretation:
+- This is a different failure class from the larger-fusion `InvalidMILProgram` wall: packing the recurrent state compiles, but the runtime/evaluator rejects the program at execution.
+- Inference: the current packed-state recurrent surface topology is not viable on this branch as implemented, even though the underlying MIL is syntactically acceptable.
+- The probe should be reverted and treated as blocked unless a materially different packing strategy appears.

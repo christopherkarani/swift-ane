@@ -296,3 +296,26 @@
 - Conclusion:
   - revert the Metal reducer and tests
   - do not spend more time on standalone GPU argmax for this branch
+
+## Next Probe - 2026-03-08 batched IOSurface copy/write on fused-triplet path
+- [ ] Check existing batched SurfaceIO primitives and current triplet session I/O shape.
+- [ ] Replace per-state copy operations with batched copies where the surfaces and regions line up cleanly.
+- [ ] Benchmark on the fused-triplet direct-select harness and keep only a measured win.
+
+## Next Probe - 2026-03-08 packed-state fused-triplet recurrent session
+- [ ] Add failing contracts for a fused-triplet generator/kernelset that takes one packed recurrent-state surface instead of three separate state surfaces.
+- [ ] Implement a packed-state fused-triplet session using `slice_by_size` and packed state copy/reset.
+- [ ] Benchmark it against the current fused-triplet direct-select path and keep only a measured win.
+
+## Review - 2026-03-08 packed-state fused-triplet blocked at eval
+- Tried:
+  - packed the fused-triplet recurrent state into one input/output surface using `slice_by_size` and `concat`
+- Why:
+  - reduce triplet session surface count and collapse three state copy/reset operations into one
+- Result:
+  - unit contracts passed
+  - MIL compiled on ANE
+  - first hardware eval failed immediately with `statusType=0x9`
+- Conclusion:
+  - revert the packed-state generator/kernelset/session/backend
+  - treat the current packed-state topology as blocked
