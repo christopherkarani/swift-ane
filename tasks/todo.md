@@ -258,3 +258,21 @@
 - Conclusion:
   - revert the test-only sweep extension
   - treat `32` as the best current lane geometry for the existing fused RMSNorm+classifier head
+
+## Next Probe - 2026-03-08 larger recurrent trunk lanes on fused-triplet direct-select
+- [ ] Add a fused-triplet recurrent lane sweep above `32` using the existing direct-select hardware harness.
+- [ ] Benchmark supported larger trunk lanes against the same-test `32`-lane baseline.
+- [ ] Keep only a measured runtime win; otherwise revert the probe and retain docs.
+
+## Review - 2026-03-08 larger fused-triplet trunk lanes regress
+- Tried:
+  - fused-triplet direct-select recurrent trunk lane sweep at `64`, `96`, and `128`
+- Why:
+  - larger recurrent lane geometries were still unmeasured on the best backend
+- Result:
+  - `32` remained best at `2.231127604166667 ms/token`
+  - `64`, `96`, and `128` all regressed
+  - `16`, `8`, and `1` still failed at eval
+- Conclusion:
+  - revert the test-only sweep
+  - treat `32` as the best lane geometry for the existing fused-triplet recurrent trunk

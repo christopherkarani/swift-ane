@@ -1475,3 +1475,24 @@ Interpretation:
 - Larger head lanes reduce trunk time slightly but increase logits time more, so end-to-end throughput regresses.
 - Inference: the current fused ANE RMSNorm+classifier head is already near its best lane geometry at `32` for this branch.
 - Further lane-width sweeps are low-value unless the head architecture changes materially.
+
+## 2026-03-08 - Larger fused-triplet trunk lanes regress
+
+What was tried:
+- Added a fused-triplet direct-select recurrent trunk lane sweep to probe larger lane widths: `64`, `96`, and `128`, while also rechecking the known-small `16`, `8`, and `1` cases.
+- Kept the output head fixed on the existing fused ANE RMSNorm+classifier configuration.
+
+Why:
+- Smaller recurrent trunk lanes were already known to fail, but larger recurrent lane geometries were still unmeasured on the best fused-triplet backend.
+
+Measured results:
+- `32`: `2.231127604166667 ms/token`, `448.2061019920989 tok/s`, trunk `1.1512213541666667`, logits `1.0835572916666667`
+- `64`: `2.3024348958333336 ms/token`, `434.3348113545743 tok/s`, trunk `1.2098203125000002`, logits `1.114390625`
+- `96`: `2.459033854166667 ms/token`, `406.66380257293986 tok/s`, trunk `1.3670260416666664`, logits `1.0531848958333332`
+- `128`: `2.471630208333333 ms/token`, `404.6890353350651 tok/s`, trunk `1.4412317708333333`, logits `1.0442265625`
+- `16`, `8`, and `1` remain unsupported at eval with `statusType=0x9`-class recurrent step failures.
+
+Interpretation:
+- Larger recurrent lanes make the fused-triplet trunk slower end-to-end, even when logits time holds roughly flat.
+- Inference: `32` is also the best lane geometry for the current fused-triplet recurrent trunk on this branch.
+- Combined with the larger output-head lane sweep, this largely closes the remaining low-cost lane-geometry space for the current exact architecture.
