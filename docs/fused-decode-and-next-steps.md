@@ -1400,3 +1400,31 @@ Interpretation:
 - Runtime improvement did not reproduce; the path was either slightly slower or effectively flat.
 - Inference: removing the lock work from inside the argmax helper is not enough to move end-to-end throughput on the current path.
 - Reverted the implementation and temporary tests after measurement.
+
+## 2026-03-08 - Blocked 4+2 recurrent trunk fusion
+
+Why tried:
+- Next lower-risk trunk-side experiment beyond fused triplets.
+- Used a new fused four-layer recurrent block composed with the existing fused two-layer block, while keeping the current direct-select head unchanged.
+
+Implementation slice:
+- Added `RWKVStyleFusedFourLayerStepGenerator` and `RWKVStyleFusedFourLayerKernelSet`.
+- Added a composed `RWKVStyleFusedFourPlusTwoSession` and a new `.fusedFourPlusTwo` trunk backend in the generation harness.
+- Added compile-spec/unit tests for the 4-layer generator/kernelset and a non-multiple-of-6 harness guard.
+
+What passed:
+- `swift test --filter 'RWKVStyleFusedFourLayer|test_recurrent_generation_rejects_non_multiple_of_six_for_fused_four_plus_two_backend'`
+- Four-layer MIL generator contract tests
+- Four-layer kernelset compile-spec test
+- Harness validation for the multiple-of-6 requirement
+
+Where it failed:
+- First hardware smoke/benchmark for `fusedFourPlusTwo` failed during ANE compile.
+- Error:
+  - `_ANECompiler : ANECCompile() FAILED`
+  - `InvalidMILProgram`
+
+Interpretation:
+- Strong structural negative result.
+- Inference: extending recurrent trunk fusion beyond current triplets hits the same compiler wall seen in other larger-fusion attempts on this branch.
+- Reverted the implementation after the first blocked hardware attempt.

@@ -213,3 +213,7 @@
 - [ ] If surface I/O work stalls, move to the next trunk-side exact experiment with the current direct-select head.
 - [x] Probe unlocked direct-select argmax on the fused-triplet path and rerun for stability.
 - [x] Reject unlocked argmax: parity held, but runtime was flat-to-slower across repeated hardware runs.
+- [ ] Design and try the next trunk-side fusion beyond fused triplets, keeping the current direct-select head unchanged.
+- [ ] If larger trunk fusion dead-ends on compiler/runtime walls, move to the next exact architecture step with the smallest testable slice.
+- [x] Try a 4+2 recurrent trunk fusion backend with the current direct-select head.
+- [x] Reject 4+2 recurrent trunk fusion: generator/kernel contracts passed, but the first hardware compile failed with `InvalidMILProgram`.
