@@ -81,3 +81,12 @@
 ## 2026-03-10 — Student Pivot Packaging
 - When a new decode contract needs trainable artifacts but runtime truth is blocked, add a separate sidecar format instead of extending the base checkpoint/resume blob; future-head artifacts should version independently from optimizer-resume state.
 - Seed new auxiliary heads from the teacher weights that already define the contract entrypoint (`rmsFinal` and classifier/embedding) so export produces a recoverable training start, not an empty placeholder.
+
+## 2026-03-10 — Throughput Search Persistence
+- When the user explicitly asks for an open-ended throughput hunt, do not treat a bounded checkpoint or one failed gate as a stopping point; convert immediately into an iterative search loop with longer-budget probes, new avenues, and exhaustive attempt logging.
+- A failed fast-path benchmark timeout is evidence about that timeout budget, not necessarily about the architecture ceiling; before pivoting permanently, try at least one lower-overhead or longer-budget measurement route and document the result.
+
+## 2026-03-10 — Matched-Control Scaling Ladder
+- A shallow exact throughput win is not enough; map the same architecture against the 1-layer, 2-layer, 3-layer, and strong 6-layer controls before calling it a scalable breakthrough.
+- When the sign of a hardware result is close or flips across runs, repeat the full benchmark at the same iteration count and report the repeated medians instead of the best-looking run.
+- If `xctest` blocks hardware truth, move immediately to a lower-overhead fresh-process probe so compile/init latency and runtime throughput can be separated honestly.

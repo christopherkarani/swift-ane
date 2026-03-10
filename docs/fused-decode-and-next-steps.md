@@ -447,6 +447,95 @@ That size matches the intended artifact shape: one `768`-float RMS vector, one f
 - use the new sidecar/export seam as the student-route starting point
 - do not start runtime future-head integration on this checkpoint family until a future host/session can produce honest same-session hardware medians
 
+## 2026-03-10 — Standalone release probe recovered exact hardware truth; two-step wins at 1 layer only
+
+### Why this probe exists
+
+The `xctest` hardware seam was good enough to prove the architecture and isolate the compile/init stall, but it was too brittle to settle runtime truth. I added a standalone release executable:
+
+- `espresso-multitoken-probe`
+
+The probe measures the exact recurrent control and the exact two-step branch-state-promotion path in one fresh process, with the same `warmup=3`, `iterations=20`, `prompt=[0]`, `maxNewTokens=8`, and `maxSequenceTokens=32` contract used by the committed harness.
+
+### Compile/init truth recovered outside `xctest`
+
+Fresh-process compile/init-only run:
+
+- command: `/tmp/espresso-ane-multitoken-release/release/espresso-multitoken-probe --mode compile-init-only --layer-count 6 --control-backend fused-triplet --output-head-backend ane-rmsnorm-classifier --max-sequence-tokens 32`
+- control compile/init wall: `36625.965583333338 ms`
+- control reported compile: `36625.956166666663 ms`
+- two-step compile/init wall: `812.4782083333333 ms`
+- two-step reported compile: `812.4590833333334 ms`
+
+This changed the status of the earlier gate:
+
+- the ANE path was not deadlocked in general
+- the earlier `xctest` unblock pass had measured a bad route to first output, not the permanent absence of hardware truth
+
+### Exact runtime results
+
+All reported comparisons preserved:
+
+- exact parity status: `match`
+- committed exact tokens/pass: `2.0`
+- accepted future tokens/pass: `1.0`
+
+Measured release-probe medians:
+
+| Depth | Control backend | Control `ms/token` | Two-step `ms/token` | Verdict |
+|---|---|---:|---:|---|
+| 1 | `single` | `1.452750`, `1.768331`, `1.788609` | `1.354299`, `1.419352`, `1.484302` | exact two-step win in `3/3` repeats |
+| 2 | `fused-pair` | `1.478724`, `1.918604`, `1.787354` | `1.853026`, `1.908977`, `1.969635` | noisy crossover; centered slightly behind control |
+| 3 | `fused-triplet` | `1.642930`, `1.820557` | `1.794927`, `2.339016` | exact two-step loss in `2/2` repeats |
+| 6 | `fused-triplet` | `2.493940` | `3.386833` | exact two-step loss |
+
+Representative repeated 1-layer win:
+
+- control: `1.7683307291666666 ms/token`, `565.51 tok/s`
+- two-step: `1.4193515625000002 ms/token`, `704.55 tok/s`
+
+Representative repeated 2-layer near-crossover:
+
+- control: `1.9186041666666664 ms/token`, `521.21 tok/s`
+- two-step: `1.9089765625000001 ms/token`, `523.85 tok/s`
+
+Representative repeated 3-layer loss:
+
+- control: `1.8205572916666664 ms/token`, `549.92 tok/s`
+- two-step: `2.339015625 ms/token`, `427.55 tok/s`
+
+Representative 6-layer loss:
+
+- control: `2.4939401041666667 ms/token`, `400.97 tok/s`
+- two-step: `3.386833333333333 ms/token`, `295.27 tok/s`
+
+### Interpretation
+
+Measured result:
+
+- the exact two-step branch-state-promotion path materially raises the ceiling beyond one-token decode
+- the architecture achieves more than one exact committed token per expensive pass on average
+- there is a real exact throughput win against the matched 1-layer recurrent control
+
+Measured limit on the current checkpoint family:
+
+- the win does not scale through the stronger fused controls yet
+- 2 layers is a noisy crossover regime
+- 3 and 6 layers are still clear losses
+
+Measured bottleneck:
+
+- proposer cost is effectively zero on the echo checkpoint family
+- state advancement is effectively zero compared with trunk and logits
+- the remaining runtime tax is verifier-side, especially the cost of making the two-step path competitive with the fused control trunk and head
+
+### Decision
+
+- keep `3e6cced` as the architectural checkpoint that proves reusable accepted-work state promotion
+- keep the new release probe as the honest hardware truth seam for future exact two-step iterations
+- do not claim a win against the current strong 6-layer fused-triplet exact control
+- next hypothesis should attack verifier cost directly, not proposer quality
+
 ## 2026-03-10 — Rejected clustered exact CPU staged head
 
 ### Attempt

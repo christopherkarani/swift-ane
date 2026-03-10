@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .executable(name: "espresso-train", targets: ["EspressoTrain"]),
         .executable(name: "espresso-bench", targets: ["EspressoBench"]),
+        .executable(name: "espresso-multitoken-probe", targets: ["EspressoMultitokenProbe"]),
         .library(name: "Espresso", targets: ["Espresso"]),
     ],
     targets: [
@@ -78,6 +79,16 @@ let package = Package(
                 .linkedFramework("Accelerate"),
                 .linkedFramework("IOSurface"),
                 .linkedFramework("CoreML"),
+            ]
+        ),
+        .executableTarget(
+            name: "EspressoMultitokenProbe",
+            dependencies: ["Espresso", "ANERuntime", "ANETypes"],
+            path: "Sources/EspressoMultitokenProbe",
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [
+                .linkedFramework("Accelerate"),
+                .linkedFramework("IOSurface"),
             ]
         ),
         .testTarget(name: "ANEInteropTests", dependencies: ["ANEInterop"], swiftSettings: [.swiftLanguageMode(.v6)]),
