@@ -46,17 +46,22 @@
     - [x] visit shards in descending upper-bound order
     - [x] stop only when the current best exact score safely beats every remaining shard bound
     - [x] preserve exact global argmax token selection
-  - [ ] implement staged exact CPU direct-select runtime:
-    - [ ] compute the normalized token vector once
-    - [ ] score block bounds cheaply on CPU
-    - [ ] run exact BLAS scoring only on surviving blocks
-    - [ ] keep full-logits materialization unchanged for non-direct-select paths
-  - [ ] benchmark the staged exact head against the saved exact control:
-    - [ ] median `ms/token`
-    - [ ] `tok/s`
-    - [ ] compile/init overhead
-    - [ ] head/logits `ms/token`
+  - [x] implement staged exact CPU direct-select runtime:
+    - [x] compute the normalized token vector once
+    - [x] score block bounds cheaply on CPU
+    - [x] run exact BLAS scoring only on surviving blocks
+    - [x] keep full-logits materialization unchanged for non-direct-select paths
+  - [x] benchmark the staged exact head against the saved exact control:
+    - [x] median `ms/token`
+    - [x] `tok/s`
+    - [x] compile/init overhead
+    - [x] head/logits `ms/token`
     - [ ] median evaluated blocks per token if the runtime surface exposes it cheaply
+  - [x] reject the contiguous-shard staged exact CPU head:
+    - [x] exact token parity held on the hardware echo test
+    - [x] runtime regressed catastrophically (`28.1385625 ms/token` vs `2.3946458333333336 ms/token` control)
+    - [x] compile/init regressed (`5176.693166666667 ms` vs `542.6085 ms`)
+    - [x] treat contiguous shard geometry as a dead end
   - [ ] stop the avenue immediately if:
     - [ ] the shard bound cannot be defended as exact
     - [ ] most shards still need evaluation in steady state
@@ -90,5 +95,9 @@
   - brute-force exact sharded head regressed badly
   - extra ANE-side staging is therefore a poor first probe; the cheaper first control is CPU-routed exact block pruning on the direct-select path
   - output-head cost remains large enough that a structurally cheaper exact head is still the highest-upside exact path
+- Outcome so far:
+  - contiguous-shard staged exact CPU head is a strong negative result, not a win
+  - the path preserved exact token parity but regressed to `28.1385625 ms/token`
+  - the rejection is architectural: contiguous shard bounds are too loose to make branch-and-bound useful here
 - Completion gate for this avenue:
   - either produce a new exact single-stream best over `2.129125 ms/token`, or produce a strong measured negative result showing the shard bounds are too loose or too expensive to help

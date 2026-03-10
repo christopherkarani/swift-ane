@@ -218,6 +218,47 @@ prefill-like workload.
 
 | Approach | Failure Mode | Evidence |
 |----------|-------------|----------|
+
+## 2026-03-10 — Rejected contiguous-shard CPU staged exact head
+
+### Attempt
+
+Added an exact branch-and-bound output-head seam for direct-select generation:
+
+- stage 1: compute admissible per-shard upper bounds from shard center/radius summaries on the normalized token vector
+- stage 2: run exact CPU BLAS scoring only on shards whose bound can still beat the current best exact score
+- tie policy preserved the current first-max argmax behavior
+
+This was intentionally CPU-routed for the first probe because the branch already had strong evidence that extra ANE head staging/regrouping regresses and full fused recurrent+head attachment is compiler-blocked.
+
+### Hardware measurement
+
+Matched recurrent fused-triplet direct-select comparison (`warmup=3`, `iterations=20`, `maxNewTokens=8`, echo weights):
+
+| Path | Median ms/token | tok/s | Compile/init ms | Trunk ms/token | Head/logits ms/token |
+|---|---:|---:|---:|---:|---:|
+| Control: fused-triplet + `.aneRMSNormClassifier` | `2.3946458333333336` | `417.60` | `542.6085` | `1.259015625` | `1.0993333333333333` |
+| Contiguous-shard staged exact CPU head | `28.1385625` | `35.54` | `5176.693166666667` | `1.7956223958333335` | `26.325609375` |
+
+Exactness/parity check:
+
+- generated tokens matched the control on the hardware echo test
+- the path is exact, but not competitive
+
+### Interpretation
+
+This avenue is rejected in its contiguous-shard form.
+
+- The shard bounds were too loose to prune enough work.
+- The runtime effectively degenerated into repeated CPU block GEMMs, so head time exploded instead of shrinking.
+- Init/compile time also regressed badly because the staged head now has to build the shard summaries up front.
+
+### Decision
+
+- keep the exact branch-and-bound seam and tests as reference infrastructure
+- reject contiguous-shard CPU staged exact head as a throughput path
+- if exact head work continues, it must use materially better block geometry (for example clustered blocks with admissible bounds), not contiguous shards
+- otherwise move to the next architecture class rather than spending more time tuning this path
 | IOSurface aliasing between kernels | `statusType=0x9: Program Inference error` | Compile-time external surface fails at eval |
 | _ANERequest surface rebinding | `-[__NSArrayM procedureIndex]` type confusion, then `0x9` | Request is immutable after construction |
 | _ANEVirtualClient instantiation | All 5 init paths return nil | Kernel-level IOKit entitlement gate |
