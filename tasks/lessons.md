@@ -104,3 +104,8 @@
 - Do not compare a new ANE result to saved CoreML numbers when deciding what is publicly claimable; rerun CoreML in the same session and under the same fresh-process harness first.
 - For probe-style benchmarks, synthetic shortcuts must be explicit in the CLI and in the claim text; never leave an `echo` path as an implicit default when the output may be quoted publicly.
 - A one-command reproduction script should treat `.mlpackage` as a directory artifact, capture raw JSON for every run, and summarize medians from those raw artifacts rather than from copied notes.
+
+## 2026-03-11 — Real-Artifact Benchmark Plumbing
+- For benchmark-only generation artifacts, do not reuse the full pretrained-model loader when the artifact can legitimately vary layer count; add a dedicated head-weight loader that validates shape-critical fields without hardcoding `ModelConfig.nLayers`.
+- When moving off synthetic prompts, the prompt token must come from the saved artifact manifest or corpus, not a hardcoded `0`; otherwise a “real-data” rerun silently falls back to an unrepresentative start token.
+- CoreML export tooling for reproducible local benchmarks should pin to a supported Python version (`3.12` here); the Python `3.14` `coremltools` install lacked the native `BlobWriter`/`libcoremlpython` pieces needed to save `.mlpackage` models.

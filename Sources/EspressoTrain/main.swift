@@ -21,6 +21,19 @@ enum EspressoTrainMain {
         var modelPath: String = defaultModelPath
         var dataPath: String = defaultDataPath
         var twoStepStudentSidecarPath: String?
+        var generationModelExportPath: String?
+        var localTextDatasetPath: String?
+        var localBigramPrefix: String?
+        var artifactLayerCount: Int = 6
+        var offlineAcceptanceJSONPath: String?
+        var offlineRecurrentCheckpointPath: String?
+        var offlineFutureSidecarPath: String?
+        var promptToken: UInt16?
+        var gateMaxNewTokens: Int = 8
+        var textRoots: [String] = []
+        var textExtensions: Set<String> = ["swift", "md", "txt", "py", "sh", "m", "h", "c"]
+        var maxCorpusFiles: Int?
+        var maxCorpusBytes: Int?
     }
 
     private enum TrainExit {
@@ -63,6 +76,38 @@ enum EspressoTrainMain {
                 if i + 1 < argv.count { a.dataPath = argv[i + 1]; i += 1 }
             case "--export-two-step-student":
                 if i + 1 < argv.count { a.twoStepStudentSidecarPath = argv[i + 1]; i += 1 }
+            case "--export-generation-model":
+                if i + 1 < argv.count { a.generationModelExportPath = argv[i + 1]; i += 1 }
+            case "--build-local-text-dataset":
+                if i + 1 < argv.count { a.localTextDatasetPath = argv[i + 1]; i += 1 }
+            case "--export-local-bigram-prefix":
+                if i + 1 < argv.count { a.localBigramPrefix = argv[i + 1]; i += 1 }
+            case "--artifact-layer-count":
+                if i + 1 < argv.count { a.artifactLayerCount = Int(argv[i + 1]) ?? a.artifactLayerCount; i += 1 }
+            case "--offline-acceptance-json":
+                if i + 1 < argv.count { a.offlineAcceptanceJSONPath = argv[i + 1]; i += 1 }
+            case "--offline-recurrent-checkpoint":
+                if i + 1 < argv.count { a.offlineRecurrentCheckpointPath = argv[i + 1]; i += 1 }
+            case "--offline-future-sidecar":
+                if i + 1 < argv.count { a.offlineFutureSidecarPath = argv[i + 1]; i += 1 }
+            case "--prompt-token":
+                if i + 1 < argv.count, let token = UInt16(argv[i + 1]) { a.promptToken = token; i += 1 }
+            case "--gate-max-new-tokens":
+                if i + 1 < argv.count { a.gateMaxNewTokens = Int(argv[i + 1]) ?? a.gateMaxNewTokens; i += 1 }
+            case "--text-root":
+                if i + 1 < argv.count { a.textRoots.append(argv[i + 1]); i += 1 }
+            case "--text-ext":
+                if i + 1 < argv.count {
+                    let ext = argv[i + 1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if !ext.isEmpty {
+                        a.textExtensions.insert(ext)
+                    }
+                    i += 1
+                }
+            case "--max-corpus-files":
+                if i + 1 < argv.count { a.maxCorpusFiles = Int(argv[i + 1]); i += 1 }
+            case "--max-corpus-bytes":
+                if i + 1 < argv.count { a.maxCorpusBytes = Int(argv[i + 1]); i += 1 }
             default:
                 break
             }
@@ -107,6 +152,75 @@ enum EspressoTrainMain {
         let beta2: Float = 0.999
         let eps: Float = 1e-8
         let posix = Locale(identifier: "en_US_POSIX")
+
+        if let datasetPath = args.localTextDatasetPath {
+            let roots = args.textRoots.isEmpty ? [FileManager.default.currentDirectoryPath] : args.textRoots
+            let tokens = try LocalTextTokenDatasetBuilder.collectTokens(
+                roots: roots,
+                allowedExtensions: args.textExtensions,
+                maxFiles: args.maxCorpusFiles,
+                maxBytes: args.maxCorpusBytes
+            )
+            try LocalTextTokenDatasetBuilder.writeUInt16Dataset(tokens: tokens, to: datasetPath)
+            print("[built local text dataset: \(datasetPath) tokens=\(tokens.count) roots=\(roots.count)]")
+            return .finished
+        }
+
+        var offlineRecurrentCheckpointPath = args.offlineRecurrentCheckpointPath
+        var offlineFutureSidecarPath = args.offlineFutureSidecarPath
+        var offlinePromptToken = args.promptToken
+
+        if let prefix = args.localBigramPrefix {
+            let manifest = try LocalRealArtifactPipeline.exportLocalBigramArtifacts(
+                datasetPath: args.dataPath,
+                prefix: prefix,
+                layerCount: args.artifactLayerCount,
+                vocabSize: vocab
+            )
+            offlineRecurrentCheckpointPath = offlineRecurrentCheckpointPath ?? manifest.recurrentCheckpointPath
+            offlineFutureSidecarPath = offlineFutureSidecarPath ?? manifest.futureSidecarPath
+            offlinePromptToken = offlinePromptToken ?? manifest.promptToken
+            print(
+                "[exported local bigram artifacts: manifest=\(manifest.manifestPath) prompt=\(manifest.promptToken) tokens=\(manifest.tokenCount)]"
+            )
+            if args.offlineAcceptanceJSONPath == nil {
+                return .finished
+            }
+        }
+
+        if let offlineAcceptanceJSONPath = args.offlineAcceptanceJSONPath {
+            guard let recurrentCheckpointPath = offlineRecurrentCheckpointPath else {
+                throw GenerationError.invalidArguments("offline gate requires --offline-recurrent-checkpoint or --export-local-bigram-prefix")
+            }
+            guard let futureSidecarPath = offlineFutureSidecarPath else {
+                throw GenerationError.invalidArguments("offline gate requires --offline-future-sidecar or --export-local-bigram-prefix")
+            }
+            guard let promptToken = offlinePromptToken else {
+                throw GenerationError.invalidArguments("offline gate requires --prompt-token or an exported local-bigram manifest")
+            }
+
+            let trace = try LocalRealArtifactPipeline.offlineAcceptanceGate(
+                recurrentCheckpointPath: recurrentCheckpointPath,
+                futureSidecarPath: futureSidecarPath,
+                promptTokens: [promptToken],
+                maxNewTokens: args.gateMaxNewTokens
+            )
+            let payload: [String: Any] = [
+                "prompt_tokens": [Int(promptToken)],
+                "generated_tokens": trace.generatedTokens.map(Int.init),
+                "committed_exact_token_counts": trace.committedExactTokenCounts,
+                "accepted_future_token_counts": trace.acceptedFutureTokenCounts,
+                "parity_status": trace.parityMatchedAllCommittedTokens ? "match" : "mismatch",
+                "committed_exact_tokens_per_pass": trace.committedExactTokensPerPass,
+                "accepted_future_tokens_per_pass": trace.acceptedFutureTokensPerPass,
+                "recurrent_checkpoint": recurrentCheckpointPath,
+                "future_sidecar": futureSidecarPath,
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: URL(fileURLWithPath: offlineAcceptanceJSONPath), options: .atomic)
+            print("[wrote offline acceptance gate: \(offlineAcceptanceJSONPath)]")
+            return .finished
+        }
 
         // Allocate per-layer state.
         let layers = LayerStorage<LayerWeights>(count: nLayers) { _ in LayerWeights() }
@@ -285,6 +399,23 @@ enum EspressoTrainMain {
                 embed.withUnsafeMutablePointer { ptr in
                     for i in 0..<(vocab * dim) { ptr[i] = randSymmetric(scale: escaleD) }
                 }
+            }
+        }
+
+        if let generationModelPath = args.generationModelExportPath {
+            let emptyClassifier = TensorBuffer(count: 0, zeroed: true)
+            try GenerationModelWeightStore.save(
+                layers: layers,
+                rmsFinal: rmsFinal,
+                embed: embed,
+                classifier: emptyClassifier,
+                sharedClassifier: true,
+                vocabSize: vocab,
+                to: generationModelPath
+            )
+            print("[exported generation model: \(generationModelPath)]")
+            if args.twoStepStudentSidecarPath == nil {
+                return .finished
             }
         }
 

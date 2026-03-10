@@ -18,7 +18,9 @@ OUTPUT_HEAD_BACKEND="${OUTPUT_HEAD_BACKEND:-ane-rmsnorm-classifier}"
 INPUT_MODE="${INPUT_MODE:-echo}"
 COREML_MODEL="${COREML_MODEL:-$ROOT/benchmarks/models/transformer_6layer.mlpackage}"
 RECURRENT_CHECKPOINT="${RECURRENT_CHECKPOINT:-}"
+FUTURE_SIDECAR="${FUTURE_SIDECAR:-}"
 GENERATION_MODEL="${GENERATION_MODEL:-}"
+PROMPT_TOKEN="${PROMPT_TOKEN:-0}"
 
 if [[ "$REPEATS" -lt 3 || $((REPEATS % 2)) -ne 1 ]]; then
   echo "REPEATS must be an odd integer >= 3" >&2
@@ -50,6 +52,14 @@ case "$INPUT_MODE" in
       echo "Generation model not found at $GENERATION_MODEL" >&2
       exit 1
     fi
+    if [[ -z "$FUTURE_SIDECAR" ]]; then
+      echo "FUTURE_SIDECAR is required when INPUT_MODE=recurrent-checkpoint" >&2
+      exit 1
+    fi
+    if [[ ! -f "$FUTURE_SIDECAR" ]]; then
+      echo "Future sidecar not found at $FUTURE_SIDECAR" >&2
+      exit 1
+    fi
     ;;
   *)
     echo "Unsupported INPUT_MODE=$INPUT_MODE (expected echo|recurrent-checkpoint)" >&2
@@ -68,8 +78,19 @@ mkdir -p "$RESULTS_DIR"
   echo "input_mode=$INPUT_MODE"
   echo "coreml_model=$COREML_MODEL"
   echo "recurrent_checkpoint=${RECURRENT_CHECKPOINT:-<none>}"
+  echo "future_sidecar=${FUTURE_SIDECAR:-<none>}"
   echo "generation_model=${GENERATION_MODEL:-<none>}"
+  echo "prompt_token=$PROMPT_TOKEN"
   echo "repeats=$REPEATS warmup=$WARMUP iterations=$ITERATIONS max_new_tokens=$MAX_NEW_TOKENS max_sequence_tokens=$MAX_SEQUENCE_TOKENS layer_count=$LAYER_COUNT"
+  if [[ -n "$RECURRENT_CHECKPOINT" ]]; then
+    echo "recurrent_checkpoint_sha256=$(shasum -a 256 "$RECURRENT_CHECKPOINT" | awk '{print $1}')"
+  fi
+  if [[ -n "$FUTURE_SIDECAR" ]]; then
+    echo "future_sidecar_sha256=$(shasum -a 256 "$FUTURE_SIDECAR" | awk '{print $1}')"
+  fi
+  if [[ -n "$GENERATION_MODEL" ]]; then
+    echo "generation_model_sha256=$(shasum -a 256 "$GENERATION_MODEL" | awk '{print $1}')"
+  fi
 } > "$RESULTS_DIR/metadata.txt"
 
 echo "Building release probe into $SCRATCH_PATH"
@@ -80,6 +101,7 @@ COMMON_ARGS=(
   --input "$INPUT_MODE"
   --compare-coreml
   --coreml-model "$COREML_MODEL"
+  --prompt-token "$PROMPT_TOKEN"
   --warmup "$WARMUP"
   --iterations "$ITERATIONS"
   --max-new-tokens "$MAX_NEW_TOKENS"
@@ -92,6 +114,7 @@ COMMON_ARGS=(
 
 if [[ "$INPUT_MODE" == "recurrent-checkpoint" ]]; then
   COMMON_ARGS+=(--recurrent-checkpoint "$RECURRENT_CHECKPOINT")
+  COMMON_ARGS+=(--future-sidecar "$FUTURE_SIDECAR")
 fi
 
 if [[ -n "$GENERATION_MODEL" ]]; then

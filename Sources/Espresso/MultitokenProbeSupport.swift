@@ -258,7 +258,11 @@ public func loadGenerationWeightsForCoreML(
     case .echo:
         return makeEchoGenerationWeights(layerCount: 1)
     case let .generationModel(path):
-        return try GenerationWeights.load(modelPath: path)
+        do {
+            return try GenerationModelWeightStore.load(path: path)
+        } catch {
+            throw .modelLoadFailed("\(error)")
+        }
     }
 }
 

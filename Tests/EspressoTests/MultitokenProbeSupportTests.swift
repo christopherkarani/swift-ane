@@ -21,6 +21,22 @@ final class MultitokenProbeSupportTests: XCTestCase {
         XCTAssertEqual(floats(loaded.layers[1].Wo, prefix: 16), floats(weights.layers[1].Wo, prefix: 16))
     }
 
+    func test_generation_model_weight_store_loads_benchmark_head_weights_with_non_default_layer_count() throws {
+        let weights = makeTestGenerationWeights(layerCount: 6, sharedClassifier: false)
+        let path = temporaryFilePath(named: "generation-weights.bin")
+
+        try GenerationModelWeightStore.save(weights, to: path)
+        let loaded = try GenerationModelWeightStore.load(path: path)
+
+        XCTAssertEqual(loaded.layers.count, 6)
+        XCTAssertFalse(loaded.sharedClassifier)
+        XCTAssertEqual(loaded.vocabSize, ModelConfig.vocab)
+        XCTAssertEqual(floats(loaded.rmsFinal, prefix: 8), floats(weights.rmsFinal, prefix: 8))
+        XCTAssertEqual(floats(loaded.embedding, prefix: 16), floats(weights.embedding, prefix: 16))
+        XCTAssertEqual(floats(loaded.classifier, prefix: 16), floats(weights.classifier, prefix: 16))
+        XCTAssertEqual(floats(loaded.layers[5].W2, prefix: 16), floats(weights.layers[5].W2, prefix: 16))
+    }
+
     func test_probe_plan_requires_generation_model_for_coreml_when_recurrent_checkpoint_is_selected() throws {
         let configuration = MultitokenProbeConfiguration(
             input: .recurrentCheckpoint(path: "/tmp/recurrent.bin"),
@@ -93,6 +109,47 @@ final class MultitokenProbeSupportTests: XCTestCase {
         }
 
         return RecurrentGenerationWeights(
+            layers: layers,
+            rmsFinal: rmsFinal,
+            embedding: embedding,
+            classifier: classifier,
+            sharedClassifier: sharedClassifier
+        )
+    }
+
+    private func makeTestGenerationWeights(
+        layerCount: Int,
+        sharedClassifier: Bool
+    ) -> GenerationWeights {
+        let layers = LayerStorage<LayerWeights>(count: layerCount) { layerIndex in
+            let weights = LayerWeights()
+            fill(weights.Wq, seed: 1_000 + layerIndex * 100)
+            fill(weights.Wk, seed: 2_000 + layerIndex * 100)
+            fill(weights.Wv, seed: 3_000 + layerIndex * 100)
+            fill(weights.Wo, seed: 4_000 + layerIndex * 100)
+            fill(weights.W1, seed: 5_000 + layerIndex * 100)
+            fill(weights.W2, seed: 6_000 + layerIndex * 100)
+            fill(weights.W3, seed: 7_000 + layerIndex * 100)
+            fill(weights.rmsAtt, seed: 8_000 + layerIndex * 100)
+            fill(weights.rmsFfn, seed: 9_000 + layerIndex * 100)
+            return weights
+        }
+
+        let rmsFinal = TensorBuffer(count: ModelConfig.dim, zeroed: false)
+        fill(rmsFinal, seed: 10_000)
+
+        let embedding = TensorBuffer(count: ModelConfig.vocab * ModelConfig.dim, zeroed: false)
+        fill(embedding, seed: 11_000)
+
+        let classifier = TensorBuffer(
+            count: sharedClassifier ? 0 : ModelConfig.vocab * ModelConfig.dim,
+            zeroed: false
+        )
+        if !sharedClassifier {
+            fill(classifier, seed: 12_000)
+        }
+
+        return GenerationWeights(
             layers: layers,
             rmsFinal: rmsFinal,
             embedding: embedding,

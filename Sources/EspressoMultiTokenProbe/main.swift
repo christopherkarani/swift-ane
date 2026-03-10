@@ -24,9 +24,11 @@ private struct Options {
     var outputHeadBackend: GenerationOutputHeadBackend = .aneRMSNormClassifier
     var inputModeRaw: String? = nil
     var recurrentCheckpointPath: String? = nil
+    var futureSidecarPath: String? = nil
     var compareCoreML: Bool = false
     var coreMLModelPath: String? = nil
     var generationModelPath: String? = nil
+    var promptToken: UInt16 = 0
 
     static func parse(_ argv: [String]) -> Options {
         var options = Options()
@@ -90,6 +92,12 @@ private struct Options {
                     fatal("Expected --recurrent-checkpoint PATH")
                 }
                 options.recurrentCheckpointPath = argv[idx]
+            case "--future-sidecar":
+                idx += 1
+                guard idx < argv.count else {
+                    fatal("Expected --future-sidecar PATH")
+                }
+                options.futureSidecarPath = argv[idx]
             case "--compare-coreml":
                 options.compareCoreML = true
             case "--coreml-model":
@@ -104,6 +112,12 @@ private struct Options {
                     fatal("Expected --generation-model PATH")
                 }
                 options.generationModelPath = argv[idx]
+            case "--prompt-token":
+                idx += 1
+                guard idx < argv.count, let promptToken = UInt16(argv[idx]) else {
+                    fatal("Expected --prompt-token UINT16")
+                }
+                options.promptToken = promptToken
             case "--help":
                 printUsageAndExit()
             default:
@@ -219,9 +233,11 @@ private func printUsageAndExit() -> Never {
       --mode compare|compile-init-only
       --input echo|recurrent-checkpoint
       --recurrent-checkpoint PATH
+      --future-sidecar PATH
       --compare-coreml
       --coreml-model PATH
       --generation-model PATH
+      --prompt-token UINT16
       --warmup N
       --iterations N
       --max-new-tokens N
@@ -366,15 +382,30 @@ private func measureTwoStepCompileInitOnly(options: Options) throws -> CompileIn
     let plan = try options.validatedProbeConfiguration()
     let weights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
     let start = mach_absolute_time()
-    let model = try ANEExactTwoTokenBranchStatePromotionModel(
-        weights: weights,
-        layerCount: options.layerCount,
-        maxSequenceTokens: options.maxSequenceTokens,
-        outputHeadBackend: options.outputHeadBackend,
-        trunkBackend: options.twoStepBackend,
-        trunkLaneSpatial: options.trunkLaneSpatial,
-        outputHeadLaneSpatial: options.outputHeadLaneSpatial
-    )
+    let model: ANEExactTwoTokenBranchStatePromotionModel
+    if let futureSidecarPath = options.futureSidecarPath {
+        let futureSidecar = try TwoStepStudentCheckpoint.load(path: futureSidecarPath)
+        model = try ANEExactTwoTokenBranchStatePromotionModel(
+            weights: weights,
+            futureSidecar: futureSidecar,
+            layerCount: options.layerCount,
+            maxSequenceTokens: options.maxSequenceTokens,
+            outputHeadBackend: options.outputHeadBackend,
+            trunkBackend: options.twoStepBackend,
+            trunkLaneSpatial: options.trunkLaneSpatial,
+            outputHeadLaneSpatial: options.outputHeadLaneSpatial
+        )
+    } else {
+        model = try ANEExactTwoTokenBranchStatePromotionModel(
+            weights: weights,
+            layerCount: options.layerCount,
+            maxSequenceTokens: options.maxSequenceTokens,
+            outputHeadBackend: options.outputHeadBackend,
+            trunkBackend: options.twoStepBackend,
+            trunkLaneSpatial: options.trunkLaneSpatial,
+            outputHeadLaneSpatial: options.outputHeadLaneSpatial
+        )
+    }
     let wallInitMs = machMilliseconds(mach_absolute_time() - start)
     return CompileInitBenchmarkSample(
         wallInitMs: wallInitMs,
@@ -419,7 +450,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     printStderr("Resetting compile budget")
     try? CompileBudget.setCount(0)
 
-    let prompt: [UInt16] = [0]
+    let prompt: [UInt16] = [options.promptToken]
     let weights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
 
     printStderr("Starting control model init")
@@ -439,15 +470,30 @@ private func comparePayload(options: Options) throws -> [String: Any] {
 
     printStderr("Starting two-step model init")
     let twoStepInitStart = mach_absolute_time()
-    let twoStepModel = try ANEExactTwoTokenBranchStatePromotionModel(
-        weights: weights,
-        layerCount: options.layerCount,
-        maxSequenceTokens: options.maxSequenceTokens,
-        outputHeadBackend: options.outputHeadBackend,
-        trunkBackend: options.twoStepBackend,
-        trunkLaneSpatial: options.trunkLaneSpatial,
-        outputHeadLaneSpatial: options.outputHeadLaneSpatial
-    )
+    let twoStepModel: ANEExactTwoTokenBranchStatePromotionModel
+    if let futureSidecarPath = options.futureSidecarPath {
+        let futureSidecar = try TwoStepStudentCheckpoint.load(path: futureSidecarPath)
+        twoStepModel = try ANEExactTwoTokenBranchStatePromotionModel(
+            weights: weights,
+            futureSidecar: futureSidecar,
+            layerCount: options.layerCount,
+            maxSequenceTokens: options.maxSequenceTokens,
+            outputHeadBackend: options.outputHeadBackend,
+            trunkBackend: options.twoStepBackend,
+            trunkLaneSpatial: options.trunkLaneSpatial,
+            outputHeadLaneSpatial: options.outputHeadLaneSpatial
+        )
+    } else {
+        twoStepModel = try ANEExactTwoTokenBranchStatePromotionModel(
+            weights: weights,
+            layerCount: options.layerCount,
+            maxSequenceTokens: options.maxSequenceTokens,
+            outputHeadBackend: options.outputHeadBackend,
+            trunkBackend: options.twoStepBackend,
+            trunkLaneSpatial: options.trunkLaneSpatial,
+            outputHeadLaneSpatial: options.outputHeadLaneSpatial
+        )
+    }
     let twoStepInitMs = machMilliseconds(mach_absolute_time() - twoStepInitStart)
     printStderr(String(format: "Two-step model init done in %.3f ms", twoStepInitMs))
     var twoStepHarness = ExactTwoTokenGenerationHarness(model: twoStepModel, strategy: .argmax)
@@ -505,6 +551,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         "iterations": options.iterations,
         "max_new_tokens": options.maxNewTokens,
         "max_sequence_tokens": options.maxSequenceTokens,
+        "prompt_tokens": prompt.map(Int.init),
         "parity_status": exactParity ? "match" : "mismatch",
         "control": [
             "init_wall_ms": controlInitMs,

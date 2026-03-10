@@ -2284,3 +2284,51 @@ Decision:
 - Kill the current `k=2` branch/commit architecture as a single-stream performance path.
 - Keep only the measured result and docs; revert the implementation.
 - If multi-token work continues, it needs a materially different verifier/state-reuse architecture, not this substrate with more tuning.
+
+## 2026-03-11 — Real local-text artifact preserves exact multi-token behavior but collapses the public speedup
+
+What was built:
+- Added a real local-data artifact path that does not depend on external model downloads:
+  - local text corpus builder over repo files
+  - deterministic bigram teacher generation artifact
+  - matching recurrent checkpoint in `RecurrentGenerationWeightStore`
+  - two-step future sidecar trained for the exact `t+2` contract under that deterministic teacher
+- Added an offline acceptance gate and a one-command wrapper that:
+  - exports the local artifact
+  - verifies parity and accepted prefix behavior on CPU first
+  - generates a matching zero-weight `6`-layer CoreML trunk
+  - reruns the same public recurrent-checkpoint harness with the saved artifact paths
+
+Offline gate on the saved local artifact:
+- prompt token: `35`
+- parity: `match`
+- committed exact tokens/pass: `2.0`
+- accepted future tokens/pass: `1.0`
+
+Matched same-session public harness (`5` repeats, `3` warmup, `20` timed):
+- exact two-step: `2.2881979166666664 ms/token`
+- exact one-token recurrent control: `2.3190312500000001 ms/token`
+- matching zero-weight `6`-layer CoreML trunk: `5.049015625 ms/token`
+- speedup vs CoreML: `2.2143844268455086x`
+- parity: `match`
+- committed exact tokens/pass: `2.0`
+- accepted future tokens/pass: `1.0`
+
+One-command wrapper smoke rerun (`3` repeats, `1` warmup, `3` timed):
+- exact two-step: `2.3702291666666664 ms/token`
+- exact one-token recurrent control: `2.4252135416666665 ms/token`
+- matching zero-weight CoreML: `5.2113958333333334 ms/token`
+- speedup vs CoreML: `2.1655591458127317x`
+- parity: `match`
+
+Interpretation:
+- This is a strong architectural validation of the exact multi-token mechanism beyond the synthetic echo family:
+  - the saved real local-data artifact still commits `2` exact tokens/pass
+  - the future proposer is real, not the echo upper bound
+  - the ANE two-step path remains exactly parity-matched with the one-token recurrent control
+- It is also a strong negative result for the public `4x` claim:
+  - once the artifact is real local data and the CoreML trunk is matched to that artifact family, the ratio falls to about `2.2x`, not `4x`
+  - the exact two-step path only barely beats the one-token recurrent control on this artifact family
+- Important honesty note:
+  - this route is still a controlled local-data bigram teacher/student, not a pretrained production checkpoint
+  - the real artifact proves the mechanism survives off the synthetic echo shortcut, but it does not close the case for a public `4x` decode claim

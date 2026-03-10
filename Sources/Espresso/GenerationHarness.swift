@@ -827,14 +827,21 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     private let embedding: TensorBuffer
     private let classifier: TensorBuffer
     private let sharedClassifier: Bool
+    private let futureRMS: TensorBuffer
+    private let futureClassifier: TensorBuffer
+    private let hasFutureProposer: Bool
     private let stepNorm: TensorBuffer
     private let stepLogits: TensorBuffer
+    private let futureNorm: TensorBuffer
+    private let futureLogits: TensorBuffer
     private let zeroActivation: TensorBuffer
     private let pair0ActivationA: TensorBuffer
     private let pair1ActivationA: TensorBuffer
     private let pair0ActivationB: TensorBuffer
     private let pair1ActivationB: TensorBuffer
+    private let currentProposalActivation: TensorBuffer
     private let stepRMSWorkspace: RMSNorm.Workspace
+    private let futureRMSWorkspace: RMSNorm.Workspace
     private let outputHeadBackend: GenerationOutputHeadBackend
     private let trunkBackend: RecurrentGenerationTrunkBackend
     private let aneClassifierHead: ANEGenerationClassifierHead?
@@ -848,6 +855,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     private var logitsLatencyMs: Double
     private var lastSingleTokenTrunkLatencyMs: Double
     private var lastSingleTokenLogitsLatencyMs: Double
+    private var hasCurrentProposalActivation: Bool
 
     public var performanceSnapshot: GenerationPerformanceSnapshot {
         GenerationPerformanceSnapshot(
@@ -859,6 +867,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
 
     public init(
         weights: borrowing RecurrentGenerationWeights,
+        futureSidecar: consuming TwoStepStudentSidecar? = nil,
         layerCount: Int,
         maxSequenceTokens: Int = ModelConfig.seqLen,
         outputHeadBackend: GenerationOutputHeadBackend = .aneRMSNormClassifier,
@@ -976,6 +985,33 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         let classifier = sharedClassifier
             ? TensorBuffer(count: 0, zeroed: true)
             : GenerationWeightCloner.cloneTensor(weights.classifier)
+        let futureRMS: TensorBuffer
+        let futureClassifier: TensorBuffer
+        let hasFutureProposer: Bool
+        if let futureSidecar {
+            guard futureSidecar.contract.dim == ModelConfig.dim else {
+                throw .invalidArguments(
+                    "futureSidecar dim \(futureSidecar.contract.dim) does not match ModelConfig.dim \(ModelConfig.dim)"
+                )
+            }
+            guard futureSidecar.contract.vocabSize == vocabSize else {
+                throw .invalidArguments(
+                    "futureSidecar vocab \(futureSidecar.contract.vocabSize) does not match recurrent vocab \(vocabSize)"
+                )
+            }
+            guard futureSidecar.contract.layerCount == layerCount else {
+                throw .invalidArguments(
+                    "futureSidecar layerCount \(futureSidecar.contract.layerCount) does not match requested layerCount \(layerCount)"
+                )
+            }
+            futureRMS = GenerationWeightCloner.cloneTensor(futureSidecar.futureRMS)
+            futureClassifier = GenerationWeightCloner.cloneTensor(futureSidecar.futureClassifier)
+            hasFutureProposer = true
+        } else {
+            futureRMS = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+            futureClassifier = TensorBuffer(count: vocabSize * ModelConfig.dim, zeroed: true)
+            hasFutureProposer = false
+        }
 
         let aneClassifierHead: ANEGenerationClassifierHead?
         switch outputHeadBackend {
@@ -1034,14 +1070,21 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         self.embedding = embedding
         self.classifier = classifier
         self.sharedClassifier = sharedClassifier
+        self.futureRMS = futureRMS
+        self.futureClassifier = futureClassifier
+        self.hasFutureProposer = hasFutureProposer
         self.stepNorm = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.stepLogits = TensorBuffer(count: vocabSize, zeroed: true)
+        self.futureNorm = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.futureLogits = TensorBuffer(count: vocabSize, zeroed: true)
         self.zeroActivation = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.pair0ActivationA = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.pair1ActivationA = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.pair0ActivationB = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.pair1ActivationB = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.currentProposalActivation = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.stepRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
+        self.futureRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
         self.outputHeadBackend = outputHeadBackend
         self.trunkBackend = trunkBackend
         self.aneClassifierHead = aneClassifierHead
@@ -1055,6 +1098,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         self.logitsLatencyMs = 0
         self.lastSingleTokenTrunkLatencyMs = 0
         self.lastSingleTokenLogitsLatencyMs = 0
+        self.hasCurrentProposalActivation = false
     }
 
     public mutating func reset() throws(GenerationError) {
@@ -1088,11 +1132,13 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         pair1ActivationA.zero()
         pair0ActivationB.zero()
         pair1ActivationB.zero()
+        currentProposalActivation.zero()
         consumedTokens = 0
         trunkLatencyMs = 0
         logitsLatencyMs = 0
         lastSingleTokenTrunkLatencyMs = 0
         lastSingleTokenLogitsLatencyMs = 0
+        hasCurrentProposalActivation = false
     }
 
     public mutating func prefillSelectedToken(
@@ -1123,9 +1169,10 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         }
 
         let proposerStart = GenerationClock.now()
-        // Upper-bound proposer on the echo checkpoint family: the future token reuses the
-        // current exact token so acceptance probes the state-promotion ceiling, not model quality.
-        let proposedFutureToken = currentToken
+        let proposedFutureToken = try selectProposedFutureToken(
+            currentToken: currentToken,
+            strategy: strategy
+        )
         let proposerLatencyMs = GenerationClock.milliseconds(start: proposerStart, end: GenerationClock.now())
 
         if remainingTokenBudget == 1 {
@@ -1157,6 +1204,10 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
             remainingTokenBudget: remainingTokenBudget
         )
         let stateAdvanceLatencyMs = try promotePreparedPair(stepCount: plan.promotedStepCount)
+        captureProposalActivationForNextPass(
+            sourcePairIsA: prepared.sourcePairIsA,
+            committedStepCount: plan.promotedStepCount
+        )
         consumedTokens += plan.promotedStepCount
 
         return ExactTwoTokenPassResult(
@@ -1188,6 +1239,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         pair1ActivationA.zero()
         let prepared = try prepareActivationPair(strategy: strategy)
         let stateAdvanceLatencyMs = try promotePreparedPair(stepCount: 1)
+        captureProposalActivationForNextPass(sourcePairIsA: prepared.sourcePairIsA, committedStepCount: 1)
         consumedTokens += 1
         lastSingleTokenTrunkLatencyMs = prepared.trunkLatencyMs + stateAdvanceLatencyMs
         lastSingleTokenLogitsLatencyMs = prepared.logitsLatencyMs
@@ -1199,6 +1251,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         let exactFutureToken: UInt16
         let trunkLatencyMs: Double
         let logitsLatencyMs: Double
+        let sourcePairIsA: Bool
     }
 
     private mutating func prepareExactTwoTokenPair(
@@ -1356,7 +1409,8 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
             exactNextToken: exactNextToken,
             exactFutureToken: exactFutureToken,
             trunkLatencyMs: trunkLatencyMs,
-            logitsLatencyMs: logitsLatencyMs
+            logitsLatencyMs: logitsLatencyMs,
+            sourcePairIsA: sourcePairIsA
         )
     }
 
@@ -1402,6 +1456,65 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
                 for dimIdx in 0..<ModelConfig.dim {
                     dst[dimIdx] = embeddingPtr[base + dimIdx]
                 }
+            }
+        }
+    }
+
+    private mutating func selectProposedFutureToken(
+        currentToken: UInt16,
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        guard hasFutureProposer else {
+            // Echo-family upper bound fallback.
+            return currentToken
+        }
+        guard hasCurrentProposalActivation else {
+            throw .runtimeFailure("future proposer requested before a committed activation was prepared")
+        }
+
+        return try Self.selectTokenFromActivation(
+            currentProposalActivation,
+            strategy: strategy,
+            outputHeadBackend: .cpu,
+            rmsFinal: futureRMS,
+            stepNorm: futureNorm,
+            stepLogits: futureLogits,
+            embedding: embedding,
+            classifier: futureClassifier,
+            sharedClassifier: false,
+            aneClassifierHead: nil,
+            aneRMSNormClassifierHead: nil,
+            vocabSize: vocabSize,
+            stepRMSWorkspace: futureRMSWorkspace
+        )
+    }
+
+    private mutating func captureProposalActivationForNextPass(
+        sourcePairIsA: Bool,
+        committedStepCount: Int
+    ) {
+        switch (sourcePairIsA, committedStepCount) {
+        case (true, 1):
+            Self.copyActivation(pair0ActivationA, into: currentProposalActivation)
+        case (true, 2):
+            Self.copyActivation(pair1ActivationA, into: currentProposalActivation)
+        case (false, 1):
+            Self.copyActivation(pair0ActivationB, into: currentProposalActivation)
+        case (false, 2):
+            Self.copyActivation(pair1ActivationB, into: currentProposalActivation)
+        default:
+            return
+        }
+        hasCurrentProposalActivation = true
+    }
+
+    private static func copyActivation(
+        _ source: borrowing TensorBuffer,
+        into destination: borrowing TensorBuffer
+    ) {
+        source.withUnsafePointer { src in
+            destination.withUnsafeMutablePointer { dst in
+                dst.update(from: src, count: ModelConfig.dim)
             }
         }
     }
