@@ -4,55 +4,53 @@ import ANEInterop
 import ANERuntime
 import ANETypes
 
-@inline(__always)
-func makeRWKVTwoStepZeroLaneSurface(laneSpatial: Int) throws(ANEError) -> IOSurfaceRef {
-    guard let zeroLane = ane_interop_create_surface(ModelConfig.dim * laneSpatial * 2) else {
-        throw .surfaceAllocationFailed
-    }
-
-    let zeroValues = Array(repeating: Float(0), count: ModelConfig.dim * laneSpatial)
-    zeroValues.withUnsafeBufferPointer { src in
-        SurfaceIO.writeFP16(to: zeroLane, data: src, channels: ModelConfig.dim, spatial: laneSpatial)
-    }
-    return zeroLane
-}
-
-public struct RWKVStyleTwoStepRecurrentSurfaceHandles {
+public struct RWKVStyleFusedTwoLayerTwoStepSurfaceHandles {
     public let x0In: IOSurfaceRef
     public let x1In: IOSurfaceRef
-    public let stateIn: IOSurfaceRef
+    public let stateIn0: IOSurfaceRef
+    public let stateIn1: IOSurfaceRef
     public let x0Out: IOSurfaceRef
     public let x1Out: IOSurfaceRef
-    public let stateMid: IOSurfaceRef
-    public let stateOut: IOSurfaceRef
+    public let stateMid0: IOSurfaceRef
+    public let stateMid1: IOSurfaceRef
+    public let stateOut0: IOSurfaceRef
+    public let stateOut1: IOSurfaceRef
     public let zeroLane: IOSurfaceRef
     public let laneSpatial: Int
 
-    public init(kernels: borrowing RWKVStyleTwoStepRecurrentKernelSet) throws(ANEError) {
+    public init(kernels: borrowing RWKVStyleFusedTwoLayerTwoStepKernelSet) throws(ANEError) {
         self.x0In = try kernels.step.inputSurface(at: 0)
         self.x1In = try kernels.step.inputSurface(at: 1)
-        self.stateIn = try kernels.step.inputSurface(at: 2)
+        self.stateIn0 = try kernels.step.inputSurface(at: 2)
+        self.stateIn1 = try kernels.step.inputSurface(at: 3)
         self.x0Out = try kernels.step.outputSurface(at: 0)
         self.x1Out = try kernels.step.outputSurface(at: 1)
-        self.stateMid = try kernels.step.outputSurface(at: 2)
-        self.stateOut = try kernels.step.outputSurface(at: 3)
+        self.stateMid0 = try kernels.step.outputSurface(at: 2)
+        self.stateMid1 = try kernels.step.outputSurface(at: 3)
+        self.stateOut0 = try kernels.step.outputSurface(at: 4)
+        self.stateOut1 = try kernels.step.outputSurface(at: 5)
         self.laneSpatial = kernels.laneSpatial
         self.zeroLane = try makeRWKVTwoStepZeroLaneSurface(laneSpatial: kernels.laneSpatial)
     }
 }
 
-public struct RWKVStyleTwoStepRecurrentSession: ~Copyable {
-    public let kernels: RWKVStyleTwoStepRecurrentKernelSet
-    public let handles: RWKVStyleTwoStepRecurrentSurfaceHandles
+public struct RWKVStyleFusedTwoLayerTwoStepSession: ~Copyable {
+    public let kernels: RWKVStyleFusedTwoLayerTwoStepKernelSet
+    public let handles: RWKVStyleFusedTwoLayerTwoStepSurfaceHandles
     public private(set) var stepCount: Int
     private var hasPreparedState: Bool
 
     public init(
-        weights: borrowing RWKVStyleRecurrentWeights,
-        laneSpatial: Int = RWKVStyleTwoStepRecurrentKernelSet.defaultLaneSpatial
+        weights0: borrowing RWKVStyleRecurrentWeights,
+        weights1: borrowing RWKVStyleRecurrentWeights,
+        laneSpatial: Int = RWKVStyleFusedTwoLayerTwoStepKernelSet.defaultLaneSpatial
     ) throws(ANEError) {
-        let kernels = try RWKVStyleTwoStepRecurrentKernelSet(weights: weights, laneSpatial: laneSpatial)
-        let handles = try RWKVStyleTwoStepRecurrentSurfaceHandles(kernels: kernels)
+        let kernels = try RWKVStyleFusedTwoLayerTwoStepKernelSet(
+            weights0: weights0,
+            weights1: weights1,
+            laneSpatial: laneSpatial
+        )
+        let handles = try RWKVStyleFusedTwoLayerTwoStepSurfaceHandles(kernels: kernels)
         self.kernels = kernels
         self.handles = handles
         self.stepCount = 0
@@ -78,7 +76,15 @@ public struct RWKVStyleTwoStepRecurrentSession: ~Copyable {
                 spatial: handles.laneSpatial
             )
             try SurfaceIO.copyFP16(
-                dst: handles.stateIn,
+                dst: handles.stateIn0,
+                dstChannelOffset: 0,
+                src: handles.zeroLane,
+                srcChannelOffset: 0,
+                channels: ModelConfig.dim,
+                spatial: handles.laneSpatial
+            )
+            try SurfaceIO.copyFP16(
+                dst: handles.stateIn1,
                 dstChannelOffset: 0,
                 src: handles.zeroLane,
                 srcChannelOffset: 0,
@@ -86,7 +92,7 @@ public struct RWKVStyleTwoStepRecurrentSession: ~Copyable {
                 spatial: handles.laneSpatial
             )
         } catch {
-            throw .invalidArguments("two-step recurrent zero reset failed: \(error)")
+            throw .invalidArguments("fused two-step recurrent zero reset failed: \(error)")
         }
         self.stepCount = 0
         self.hasPreparedState = false
@@ -143,7 +149,7 @@ public struct RWKVStyleTwoStepRecurrentSession: ~Copyable {
                 )
             }
         } catch {
-            throw .invalidArguments("two-step recurrent input write failed: \(error)")
+            throw .invalidArguments("fused two-step recurrent input write failed: \(error)")
         }
         timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
 
@@ -151,7 +157,7 @@ public struct RWKVStyleTwoStepRecurrentSession: ~Copyable {
         do {
             try kernels.step.eval()
         } catch {
-            throw .invalidArguments("two-step recurrent eval failed at step \(stepCount): \(error)")
+            throw .invalidArguments("fused two-step recurrent eval failed at step \(stepCount): \(error)")
         }
         timings.tAne += RuntimeClock.ms(RuntimeClock.now() - t0)
 
@@ -178,7 +184,7 @@ public struct RWKVStyleTwoStepRecurrentSession: ~Copyable {
                 )
             }
         } catch {
-            throw .invalidArguments("two-step recurrent output readback failed: \(error)")
+            throw .invalidArguments("fused two-step recurrent output readback failed: \(error)")
         }
         timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
         self.hasPreparedState = true
@@ -186,24 +192,33 @@ public struct RWKVStyleTwoStepRecurrentSession: ~Copyable {
 
     public mutating func promotePreparedState(commitCount: Int) throws(ANEError) {
         guard hasPreparedState else {
-            throw .invalidArguments("two-step recurrent state promotion requested without a prepared branch")
+            throw .invalidArguments("fused two-step recurrent state promotion requested without a prepared branch")
         }
         guard commitCount == 1 || commitCount == 2 else {
-            throw .invalidArguments("two-step recurrent promotion commitCount must be 1 or 2")
+            throw .invalidArguments("fused two-step recurrent promotion commitCount must be 1 or 2")
         }
 
-        let source = commitCount == 1 ? handles.stateMid : handles.stateOut
+        let source0 = commitCount == 1 ? handles.stateMid0 : handles.stateOut0
+        let source1 = commitCount == 1 ? handles.stateMid1 : handles.stateOut1
         do {
             try SurfaceIO.copyFP16(
-                dst: handles.stateIn,
+                dst: handles.stateIn0,
                 dstChannelOffset: 0,
-                src: source,
+                src: source0,
+                srcChannelOffset: 0,
+                channels: ModelConfig.dim,
+                spatial: handles.laneSpatial
+            )
+            try SurfaceIO.copyFP16(
+                dst: handles.stateIn1,
+                dstChannelOffset: 0,
+                src: source1,
                 srcChannelOffset: 0,
                 channels: ModelConfig.dim,
                 spatial: handles.laneSpatial
             )
         } catch {
-            throw .invalidArguments("two-step recurrent state promotion failed: \(error)")
+            throw .invalidArguments("fused two-step recurrent state promotion failed: \(error)")
         }
 
         self.stepCount += commitCount

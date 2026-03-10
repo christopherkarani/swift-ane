@@ -19,6 +19,7 @@ private struct Options {
     var trunkLaneSpatial: Int = 32
     var outputHeadLaneSpatial: Int = 32
     var controlBackend: RecurrentGenerationTrunkBackend = .singleLayer
+    var twoStepBackend: RecurrentGenerationTrunkBackend = .singleLayer
     var outputHeadBackend: GenerationOutputHeadBackend = .aneRMSNormClassifier
 
     static func parse(_ argv: [String]) -> Options {
@@ -59,6 +60,12 @@ private struct Options {
                     fatal("Expected --control-backend single|fused-pair|fused-triplet")
                 }
                 options.controlBackend = parseControlBackend(argv[idx])
+            case "--two-step-backend":
+                idx += 1
+                guard idx < argv.count else {
+                    fatal("Expected --two-step-backend single|fused-pair|fused-triplet")
+                }
+                options.twoStepBackend = parseControlBackend(argv[idx])
             case "--output-head-backend":
                 idx += 1
                 guard idx < argv.count else {
@@ -81,6 +88,12 @@ private struct Options {
         }
         if options.controlBackend == .fusedThreeLayerTriplets, !options.layerCount.isMultiple(of: 3) {
             fatal("fused-triplet control backend requires --layer-count multiple of 3")
+        }
+        if options.twoStepBackend == .fusedTwoLayerPairs, !options.layerCount.isMultiple(of: 2) {
+            fatal("fused-pair two-step backend requires even --layer-count")
+        }
+        if options.twoStepBackend == .fusedThreeLayerTriplets, !options.layerCount.isMultiple(of: 3) {
+            fatal("fused-triplet two-step backend requires --layer-count multiple of 3")
         }
 
         return options
@@ -182,6 +195,7 @@ private func printUsageAndExit() -> Never {
       --max-sequence-tokens N
       --layer-count N
       --control-backend single|fused-pair|fused-triplet
+      --two-step-backend single|fused-pair|fused-triplet
       --output-head-backend cpu|ane-classifier|ane-rmsnorm-classifier
       --trunk-lane-spatial N
       --output-head-lane-spatial N
@@ -359,6 +373,7 @@ private func measureTwoStepCompileInitOnly(options: Options) throws -> CompileIn
         layerCount: options.layerCount,
         maxSequenceTokens: options.maxSequenceTokens,
         outputHeadBackend: options.outputHeadBackend,
+        trunkBackend: options.twoStepBackend,
         trunkLaneSpatial: options.trunkLaneSpatial,
         outputHeadLaneSpatial: options.outputHeadLaneSpatial
     )
@@ -384,6 +399,7 @@ private func compileOnlyPayload(options: Options) throws -> [String: Any] {
     return [
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
+        "two_step_backend": describe(options.twoStepBackend),
         "layer_count": options.layerCount,
         "output_head_backend": describe(options.outputHeadBackend),
         "max_sequence_tokens": options.maxSequenceTokens,
@@ -427,6 +443,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         layerCount: options.layerCount,
         maxSequenceTokens: options.maxSequenceTokens,
         outputHeadBackend: options.outputHeadBackend,
+        trunkBackend: options.twoStepBackend,
         trunkLaneSpatial: options.trunkLaneSpatial,
         outputHeadLaneSpatial: options.outputHeadLaneSpatial
     )
@@ -463,6 +480,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     return [
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
+        "two_step_backend": describe(options.twoStepBackend),
         "layer_count": options.layerCount,
         "output_head_backend": describe(options.outputHeadBackend),
         "warmup": options.warmup,

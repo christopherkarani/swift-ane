@@ -836,9 +836,11 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     private let pair1ActivationB: TensorBuffer
     private let stepRMSWorkspace: RMSNorm.Workspace
     private let outputHeadBackend: GenerationOutputHeadBackend
+    private let trunkBackend: RecurrentGenerationTrunkBackend
     private let aneClassifierHead: ANEGenerationClassifierHead?
     private let aneRMSNormClassifierHead: ANEGenerationRMSNormClassifierHead?
     private var twoStepSessions: LayerStorage<RWKVStyleTwoStepRecurrentSession>
+    private var fusedPairTwoStepSessions: LayerStorage<RWKVStyleFusedTwoLayerTwoStepSession>
     private var consumedTokens: Int
     public private(set) var compileTimeMs: Double
     private var trunkLatencyMs: Double
@@ -859,6 +861,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         layerCount: Int,
         maxSequenceTokens: Int = ModelConfig.seqLen,
         outputHeadBackend: GenerationOutputHeadBackend = .aneRMSNormClassifier,
+        trunkBackend: RecurrentGenerationTrunkBackend = .singleLayer,
         trunkLaneSpatial: Int = RWKVStyleTwoStepRecurrentKernelSet.defaultLaneSpatial,
         outputHeadLaneSpatial: Int = 32
     ) throws(GenerationError) {
@@ -883,18 +886,49 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
 
         let compileStart = GenerationClock.now()
         let twoStepSessions: LayerStorage<RWKVStyleTwoStepRecurrentSession>
-        do {
-            twoStepSessions = try LayerStorage<RWKVStyleTwoStepRecurrentSession>(
-                count: layerCount,
-                throwingInitializer: { idx in
-                    try RWKVStyleTwoStepRecurrentSession(
-                        weights: weights.layers[idx],
-                        laneSpatial: trunkLaneSpatial
-                    )
-                }
-            )
-        } catch {
-            throw .runtimeFailure("two-step recurrent kernel/session setup failed: \(error)")
+        let fusedPairTwoStepSessions: LayerStorage<RWKVStyleFusedTwoLayerTwoStepSession>
+        switch trunkBackend {
+        case .singleLayer:
+            do {
+                twoStepSessions = try LayerStorage<RWKVStyleTwoStepRecurrentSession>(
+                    count: layerCount,
+                    throwingInitializer: { idx in
+                        try RWKVStyleTwoStepRecurrentSession(
+                            weights: weights.layers[idx],
+                            laneSpatial: trunkLaneSpatial
+                        )
+                    }
+                )
+            } catch {
+                throw .runtimeFailure("two-step recurrent kernel/session setup failed: \(error)")
+            }
+            fusedPairTwoStepSessions = LayerStorage<RWKVStyleFusedTwoLayerTwoStepSession>(count: 0) { _ in
+                fatalError("unreachable")
+            }
+        case .fusedTwoLayerPairs:
+            guard layerCount.isMultiple(of: 2) else {
+                throw .invalidArguments("exact two-token fused pair trunk backend requires an even layerCount")
+            }
+            twoStepSessions = LayerStorage<RWKVStyleTwoStepRecurrentSession>(count: 0) { _ in
+                fatalError("unreachable")
+            }
+            do {
+                fusedPairTwoStepSessions = try LayerStorage<RWKVStyleFusedTwoLayerTwoStepSession>(
+                    count: layerCount / 2,
+                    throwingInitializer: { idx in
+                        let base = idx * 2
+                        return try RWKVStyleFusedTwoLayerTwoStepSession(
+                            weights0: weights.layers[base],
+                            weights1: weights.layers[base + 1],
+                            laneSpatial: trunkLaneSpatial
+                        )
+                    }
+                )
+            } catch {
+                throw .runtimeFailure("fused two-step recurrent pair kernel/session setup failed: \(error)")
+            }
+        case .fusedThreeLayerTriplets:
+            throw .invalidArguments("exact two-token fused three-layer trunk backend is not implemented")
         }
 
         let vocabSize = weights.vocabSize
@@ -975,9 +1009,11 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         self.pair1ActivationB = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.stepRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
         self.outputHeadBackend = outputHeadBackend
+        self.trunkBackend = trunkBackend
         self.aneClassifierHead = aneClassifierHead
         self.aneRMSNormClassifierHead = aneRMSNormClassifierHead
         self.twoStepSessions = twoStepSessions
+        self.fusedPairTwoStepSessions = fusedPairTwoStepSessions
         self.consumedTokens = 0
         self.compileTimeMs = GenerationClock.milliseconds(start: compileStart, end: GenerationClock.now())
         self.trunkLatencyMs = 0
@@ -987,12 +1023,25 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     }
 
     public mutating func reset() throws(GenerationError) {
-        for idx in 0..<twoStepSessions.count {
-            do {
-                try twoStepSessions[idx].reset()
-            } catch {
-                throw .runtimeFailure("two-step recurrent reset failed at layer \(idx): \(error)")
+        switch trunkBackend {
+        case .singleLayer:
+            for idx in 0..<twoStepSessions.count {
+                do {
+                    try twoStepSessions[idx].reset()
+                } catch {
+                    throw .runtimeFailure("two-step recurrent reset failed at layer \(idx): \(error)")
+                }
             }
+        case .fusedTwoLayerPairs:
+            for idx in 0..<fusedPairTwoStepSessions.count {
+                do {
+                    try fusedPairTwoStepSessions[idx].reset()
+                } catch {
+                    throw .runtimeFailure("fused two-step recurrent reset failed at pair \(idx): \(error)")
+                }
+            }
+        case .fusedThreeLayerTriplets:
+            throw .runtimeFailure("exact two-token fused three-layer trunk backend is not implemented")
         }
         pair0ActivationA.zero()
         pair1ActivationA.zero()
@@ -1137,30 +1186,61 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         let trunkStart = GenerationClock.now()
         var sourcePairIsA = true
 
-        for idx in 0..<twoStepSessions.count {
-            var timings = StepTimingBreakdown()
-            do {
-                if sourcePairIsA {
-                    try twoStepSessions[idx].prepare(
-                        tokenInput0: pair0ActivationA,
-                        tokenInput1: pair1ActivationA,
-                        output0: pair0ActivationB,
-                        output1: pair1ActivationB,
-                        timings: &timings
-                    )
-                } else {
-                    try twoStepSessions[idx].prepare(
-                        tokenInput0: pair0ActivationB,
-                        tokenInput1: pair1ActivationB,
-                        output0: pair0ActivationA,
-                        output1: pair1ActivationA,
-                        timings: &timings
-                    )
+        switch trunkBackend {
+        case .singleLayer:
+            for idx in 0..<twoStepSessions.count {
+                var timings = StepTimingBreakdown()
+                do {
+                    if sourcePairIsA {
+                        try twoStepSessions[idx].prepare(
+                            tokenInput0: pair0ActivationA,
+                            tokenInput1: pair1ActivationA,
+                            output0: pair0ActivationB,
+                            output1: pair1ActivationB,
+                            timings: &timings
+                        )
+                    } else {
+                        try twoStepSessions[idx].prepare(
+                            tokenInput0: pair0ActivationB,
+                            tokenInput1: pair1ActivationB,
+                            output0: pair0ActivationA,
+                            output1: pair1ActivationA,
+                            timings: &timings
+                        )
+                    }
+                } catch {
+                    throw .runtimeFailure("two-step recurrent prepare failed at layer \(idx): \(error)")
                 }
-            } catch {
-                throw .runtimeFailure("two-step recurrent prepare failed at layer \(idx): \(error)")
+                sourcePairIsA.toggle()
             }
-            sourcePairIsA.toggle()
+        case .fusedTwoLayerPairs:
+            for idx in 0..<fusedPairTwoStepSessions.count {
+                var timings = StepTimingBreakdown()
+                do {
+                    if sourcePairIsA {
+                        try fusedPairTwoStepSessions[idx].prepare(
+                            tokenInput0: pair0ActivationA,
+                            tokenInput1: pair1ActivationA,
+                            output0: pair0ActivationB,
+                            output1: pair1ActivationB,
+                            timings: &timings
+                        )
+                    } else {
+                        try fusedPairTwoStepSessions[idx].prepare(
+                            tokenInput0: pair0ActivationB,
+                            tokenInput1: pair1ActivationB,
+                            output0: pair0ActivationA,
+                            output1: pair1ActivationA,
+                            timings: &timings
+                        )
+                    }
+                } catch {
+                    throw .runtimeFailure("fused two-step recurrent prepare failed at pair \(idx): \(error)")
+                }
+                sourcePairIsA.toggle()
+            }
+        case .fusedThreeLayerTriplets:
+            throw .runtimeFailure("exact two-token fused three-layer trunk backend is not implemented")
         }
 
         let trunkLatencyMs = GenerationClock.milliseconds(start: trunkStart, end: GenerationClock.now())
@@ -1245,12 +1325,25 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
 
     private mutating func promotePreparedPair(stepCount: Int) throws(GenerationError) -> Double {
         let start = GenerationClock.now()
-        for idx in 0..<twoStepSessions.count {
-            do {
-                try twoStepSessions[idx].promotePreparedState(commitCount: stepCount)
-            } catch {
-                throw .runtimeFailure("two-step recurrent state promotion failed at layer \(idx): \(error)")
+        switch trunkBackend {
+        case .singleLayer:
+            for idx in 0..<twoStepSessions.count {
+                do {
+                    try twoStepSessions[idx].promotePreparedState(commitCount: stepCount)
+                } catch {
+                    throw .runtimeFailure("two-step recurrent state promotion failed at layer \(idx): \(error)")
+                }
             }
+        case .fusedTwoLayerPairs:
+            for idx in 0..<fusedPairTwoStepSessions.count {
+                do {
+                    try fusedPairTwoStepSessions[idx].promotePreparedState(commitCount: stepCount)
+                } catch {
+                    throw .runtimeFailure("fused two-step recurrent state promotion failed at pair \(idx): \(error)")
+                }
+            }
+        case .fusedThreeLayerTriplets:
+            throw .runtimeFailure("exact two-token fused three-layer trunk backend is not implemented")
         }
         return GenerationClock.milliseconds(start: start, end: GenerationClock.now())
     }

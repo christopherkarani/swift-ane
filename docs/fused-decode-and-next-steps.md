@@ -536,6 +536,81 @@ Measured bottleneck:
 - do not claim a win against the current strong 6-layer fused-triplet exact control
 - next hypothesis should attack verifier cost directly, not proposer quality
 
+## 2026-03-10 — Fused pair two-step trunk extends the exact throughput win through 4 layers
+
+### Hypothesis
+
+The single-layer two-step verifier was still losing to stronger fused controls because it was not inheriting the control path's main trunk win. I replaced the per-layer two-step verifier trunk with pair-fused two-step sessions so the exact path could reuse accepted work and recurrent fusion at the same time.
+
+### Implementation
+
+Added a pair-fused two-step stack:
+
+- new MIL generator: `RWKVStyleFusedTwoLayerTwoStepGenerator`
+- new runtime kernel wrapper: `RWKVStyleFusedTwoLayerTwoStepKernelSet`
+- new exact recurrent session: `RWKVStyleFusedTwoLayerTwoStepSession`
+- extended `ANEExactTwoTokenBranchStatePromotionModel` with `trunkBackend`
+- extended `espresso-multitoken-probe` with `--two-step-backend`
+
+The exact contract stayed unchanged:
+
+- parity remained exact
+- committed exact tokens/pass remained `2.0`
+- accepted future tokens/pass remained `1.0`
+
+### Verification
+
+- `swift test --filter RWKVStyleFusedTwoLayerTwoStepGeneratorTests`
+- `swift test --filter GenerationHarnessTests`
+- `swift build --product espresso-multitoken-probe`
+- `swift build -c release --product espresso-multitoken-probe --scratch-path /tmp/espresso-ane-multitoken-release`
+
+### Measurements
+
+2-layer compile/init-only sanity check:
+
+- control fused-pair: `351.576375 ms`
+- two-step fused-pair: `377.761042 ms`
+
+Repeated 2-layer matched fused-pair comparison:
+
+| Run | Control `ms/token` | Two-step `ms/token` | Verdict |
+|---|---:|---:|---|
+| 1 | `2.124839` | `1.534096` | exact two-step win |
+| 2 | `1.679589` | `1.556641` | exact two-step win |
+
+Repeated 4-layer matched fused-pair comparison:
+
+| Run | Control `ms/token` | Two-step `ms/token` | Verdict |
+|---|---:|---:|---|
+| 1 | `2.195484` | `2.149909` | exact two-step win |
+| 2 | `2.334737` | `2.234477` | exact two-step win |
+
+Repeated 6-layer comparison against the strong fused-triplet control:
+
+| Run | Control backend | Control `ms/token` | Two-step backend | Two-step `ms/token` | Verdict |
+|---|---|---:|---|---:|---|
+| 1 | `fused-triplet` | `2.146151` | `fused-pair` | `2.317794` | loss |
+| 2 | `fused-triplet` | `2.293576` | `fused-pair` | `2.529677` | loss |
+
+### Interpretation
+
+Measured result:
+
+- fused pair reuse is a real architectural breakthrough, not a one-off micro-optimization
+- the exact two-step path now wins through 4 layers with repeated hardware medians
+- the architecture still commits more than one exact token per expensive pass on average
+
+Measured limit:
+
+- pair fusion alone is not enough to beat the strong 6-layer fused-triplet control
+- but it materially narrowed the 6-layer gap versus the old single-layer two-step verifier
+
+### Decision
+
+- keep the fused-pair two-step trunk as the new best exact multi-token path on this branch
+- next hypothesis should extend fused verifier reuse to triplets before falling back to batched verifier heads or future-head training
+
 ## 2026-03-10 — Rejected clustered exact CPU staged head
 
 ### Attempt

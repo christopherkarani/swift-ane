@@ -610,6 +610,67 @@ final class GenerationHarnessTests: XCTestCase {
         XCTAssertEqual(plan.promotedStepCount, 1)
     }
 
+    func test_exact_two_token_branch_state_promotion_rejects_odd_layer_count_for_fused_pair_backend() {
+        let weights = makeGenerationTestRecurrentWeights(layerCount: 3)
+
+        do {
+            _ = try ANEExactTwoTokenBranchStatePromotionModel(
+                weights: weights,
+                layerCount: 3,
+                maxSequenceTokens: 32,
+                outputHeadBackend: .cpu,
+                trunkBackend: .fusedTwoLayerPairs
+            )
+            XCTFail("Expected odd fused-pair layer count to throw")
+        } catch {
+            XCTAssertEqual(
+                error,
+                .invalidArguments("exact two-token fused pair trunk backend requires an even layerCount")
+            )
+        }
+    }
+
+    func test_exact_two_token_branch_state_promotion_rejects_unimplemented_fused_triplet_backend() {
+        let weights = makeGenerationTestRecurrentWeights(layerCount: 3)
+
+        do {
+            _ = try ANEExactTwoTokenBranchStatePromotionModel(
+                weights: weights,
+                layerCount: 3,
+                maxSequenceTokens: 32,
+                outputHeadBackend: .cpu,
+                trunkBackend: .fusedThreeLayerTriplets
+            )
+            XCTFail("Expected fused-triplet exact two-token backend to throw")
+        } catch {
+            XCTAssertEqual(
+                error,
+                .invalidArguments("exact two-token fused three-layer trunk backend is not implemented")
+            )
+        }
+    }
+
+    func test_exact_two_token_branch_state_promotion_rejects_non_positive_trunk_lane_spatial() {
+        let weights = makeGenerationTestRecurrentWeights(layerCount: 2)
+
+        do {
+            _ = try ANEExactTwoTokenBranchStatePromotionModel(
+                weights: weights,
+                layerCount: 2,
+                maxSequenceTokens: 32,
+                outputHeadBackend: .cpu,
+                trunkBackend: .singleLayer,
+                trunkLaneSpatial: 0
+            )
+            XCTFail("Expected non-positive trunk laneSpatial to throw")
+        } catch {
+            XCTAssertEqual(
+                error,
+                .invalidArguments("two-step recurrent trunk laneSpatial must be > 0")
+            )
+        }
+    }
+
     func test_recurrent_generation_rejects_odd_layer_count_for_fused_pair_backend() {
         let weights = makeGenerationTestRecurrentWeights(layerCount: 3)
 

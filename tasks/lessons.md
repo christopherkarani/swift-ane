@@ -90,3 +90,7 @@
 - A shallow exact throughput win is not enough; map the same architecture against the 1-layer, 2-layer, 3-layer, and strong 6-layer controls before calling it a scalable breakthrough.
 - When the sign of a hardware result is close or flips across runs, repeat the full benchmark at the same iteration count and report the repeated medians instead of the best-looking run.
 - If `xctest` blocks hardware truth, move immediately to a lower-overhead fresh-process probe so compile/init latency and runtime throughput can be separated honestly.
+
+## 2026-03-10 — Mirror The Winning Control Path
+- State reuse alone was not enough; the exact two-step path only started winning beyond 1 layer after its verifier trunk inherited the same pair fusion structure that already made the control fast.
+- When the control path has a known fusion win, test the exact multi-token path with the same grouping strategy before assuming the architecture itself has plateaued.
