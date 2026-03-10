@@ -76,3 +76,4 @@
 ## 2026-03-10 — Verification Plumbing
 - Keep SwiftPM test-target dependencies aligned with actual test imports; stale dependency lists can create false `no such module` failures and block focused verification of unrelated ANE work.
 - For hardware-gated generation tests, run the committed XCTest seam with `ANE_HARDWARE_TESTS=1` before trusting any disposable probe; if the run stalls, sample the test process and record the exact compile stack instead of inferring the blocker.
+- When hardware truth is blocked before first output, split the seam into compile/init-only control and compile/init-only candidate tests before touching runtime metrics; this cleanly separates ANE compile stalls from decode/runtime regressions.

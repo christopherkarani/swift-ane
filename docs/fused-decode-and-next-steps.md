@@ -359,26 +359,40 @@ The package build required correcting stale SwiftPM test-target dependencies so 
 
 ### Current measurement blocker
 
-The committed hardware seam was rerun with the hardware gate enabled:
+The committed hardware seam was rerun with the hardware gate enabled, and a smaller compile/init-only seam was added to separate compile failure from runtime failure:
 
-- command: `ANE_HARDWARE_TESTS=1 swift test --skip-build --filter GenerationHarnessHardwareTests/test_recurrent_exact_two_token_branch_state_promotion_reports_pass_breakdown_on_hardware`
+- control compile/init-only: `ANE_HARDWARE_TESTS=1 swift test --skip-build --filter GenerationHarnessHardwareTests/test_recurrent_single_layer_control_reports_compile_init_only_on_hardware`
+- two-step compile/init-only: `ANE_HARDWARE_TESTS=1 swift test --skip-build --filter GenerationHarnessHardwareTests/test_recurrent_exact_two_token_branch_state_promotion_reports_compile_init_only_on_hardware`
+- full same-session comparison: `ANE_HARDWARE_TESTS=1 swift test --skip-build --filter GenerationHarnessHardwareTests/test_recurrent_exact_two_token_branch_state_promotion`
 - matched settings inside the test: `warmup=3`, `iterations=20`, `prompt=[0]`, `maxNewTokens=8`
 
-No valid medians were produced. The run stalled before timed iterations while compiling the single-layer recurrent control, and a live sample showed the stack inside:
+No valid compile/init times or runtime medians were produced in the bounded unblock pass.
 
-- `ANERecurrentGenerationModel.compileSingleLayerSessions`
-- `RWKVStyleRecurrentKernelSet.compileStep`
-- `ANEKernel.init`
-- `_ANEClient compileModel`
+Observed failure modes:
+
+- the control compile/init-only seam did not reach its first print within roughly `45s`
+- a live sample showed `GenerationHarnessHardwareTests.measureRecurrentSingleLayerControlCompileInitOnly` stalled inside `ANERecurrentGenerationModel.compileSingleLayerSessions` -> `RWKVStyleRecurrentKernelSet.compileStep` -> `ANEKernel.init` -> `_ANEClient compileModel`
+- the two-step compile/init-only seam also did not reach its first print within roughly `45s`
+- a live sample showed `GenerationHarnessHardwareTests.measureRecurrentExactTwoTokenBranchStatePromotionCompileInitOnly` stalled inside `RWKVStyleTwoStepRecurrentKernelSet.compileStep` -> `ANEKernel.init` -> `_ANEClient compileModel`
 
 ### Interpretation
 
 Inference from the implemented code path:
 
 - this avenue now satisfies the required structural property that accepted work can promote prepared recurrent state instead of paying a second recurrent decode in the model path
-- the remaining blocker is measurement on this host/session, not the old replay-heavy verifier design
+- the remaining blocker is ANE compile/init on this host/session, not the old replay-heavy verifier design
 
-No throughput claim is made until the same-session exact control and the new branch-state-promotion seam both complete with comparable medians.
+Measured result from the bounded unblock pass:
+
+- compile/init-only control did not reach first output quickly
+- compile/init-only two-step path did not reach first output quickly
+- therefore no honest `compile/init time`, `committed_exact_tokens/pass`, effective `ms/token`, or exact parity status can be reported for this session
+
+Hard gate result:
+
+- keep `3e6cced` as the reference architectural checkpoint
+- do not start future-head work on this checkpoint family
+- pivot next to a student trained for the two-step exact contract unless a future host/session can make the compile/init seam reach first output quickly
 
 ## 2026-03-10 — Rejected clustered exact CPU staged head
 
