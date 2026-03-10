@@ -186,7 +186,6 @@ private struct FakeTwoTokenVerifierModel: TwoTokenBranchVerifyingLanguageModel {
 
     private(set) var resetCount: Int = 0
     private(set) var prefillSelectedCalls: [[UInt16]] = []
-    private(set) var commitCalls: [[UInt16]] = []
     private(set) var verifyCalls: [[UInt16]] = []
 
     mutating func reset() throws(GenerationError) {
@@ -199,10 +198,6 @@ private struct FakeTwoTokenVerifierModel: TwoTokenBranchVerifyingLanguageModel {
     ) throws(GenerationError) -> UInt16 {
         prefillSelectedCalls.append(promptTokens)
         return selectedPrefillToken
-    }
-
-    mutating func commit(tokens: [UInt16]) throws(GenerationError) {
-        commitCalls.append(tokens)
     }
 
     mutating func verifyAndCommit(
@@ -394,7 +389,6 @@ final class GenerationHarnessTests: XCTestCase {
         XCTAssertEqual(harness.draftModel.commitCalls, [[1], [2, 4]])
         XCTAssertEqual(harness.fullModel.resetCount, 1)
         XCTAssertEqual(harness.fullModel.prefillSelectedCalls, [[9]])
-        XCTAssertEqual(harness.fullModel.commitCalls, [[1]])
         XCTAssertEqual(harness.fullModel.verifyCalls, [[2, 3]])
     }
 
@@ -427,47 +421,7 @@ final class GenerationHarnessTests: XCTestCase {
         XCTAssertEqual(trace.generatedTokens, [7, 8, 9])
         XCTAssertEqual(trace.acceptedPrefixLengths, [2])
         XCTAssertEqual(harness.draftModel.commitCalls, [[7], [8, 9]])
-        XCTAssertEqual(harness.fullModel.commitCalls, [[7]])
         XCTAssertEqual(harness.fullModel.verifyCalls, [[8, 9]])
-    }
-
-    func test_two_token_branch_commit_harness_records_round_metrics() throws {
-        let draft = FakeTwoTokenDraftModel(
-            selectedPrefillToken: 5,
-            proposalQueue: [[6, 7]]
-        )
-        let full = FakeTwoTokenVerifierModel(
-            selectedPrefillToken: 5,
-            verificationQueue: [
-                (
-                    proposed: [6, 7],
-                    result: TwoTokenBranchCommitResult(
-                        acceptedPrefixLength: 2,
-                        committedTokens: [6, 7],
-                        verifierTrunkLatencyMs: 1.5,
-                        verifierLogitsLatencyMs: 0.75,
-                        checkpointCopyLatencyMs: 0.25
-                    )
-                ),
-            ]
-        )
-
-        var harness = TwoTokenBranchCommitGenerationHarness(
-            draftModel: draft,
-            fullModel: full,
-            strategy: .argmax
-        )
-
-        let trace = try harness.generate(promptTokens: [2], maxNewTokens: 3)
-
-        XCTAssertEqual(trace.acceptedPrefixLengths, [2])
-        XCTAssertEqual(trace.verifierTrunkLatenciesMs, [1.5])
-        XCTAssertEqual(trace.verifierLogitsLatenciesMs, [0.75])
-        XCTAssertEqual(trace.checkpointCopyLatenciesMs, [0.25])
-        XCTAssertEqual(trace.proposerLatenciesMs.count, 1)
-        XCTAssertEqual(trace.acceptedExactTokensPerPass, 2.0, accuracy: 1e-9)
-        XCTAssertGreaterThan(trace.totalLatencyMs, 0)
-        XCTAssertGreaterThan(trace.effectiveTokensPerSecond, 0)
     }
 
     func test_recurrent_generation_rejects_odd_layer_count_for_fused_pair_backend() {

@@ -20,17 +20,6 @@ private struct GenerationBenchmarkSample {
     let medianLogitsMsPerToken: Double
 }
 
-private struct BranchCommitGenerationBenchmarkSample {
-    let medianTokenMs: Double
-    let medianTokensPerSecond: Double
-    let acceptedExactTokensPerPass: Double
-    let compileTimeMs: Double
-    let medianProposerMsPerPass: Double
-    let medianVerifierTrunkMsPerPass: Double
-    let medianVerifierLogitsMsPerPass: Double
-    let medianCheckpointCopyMsPerPass: Double
-}
-
 private func fill(_ buffer: borrowing TensorBuffer, value: Float) {
     buffer.withUnsafeMutableBufferPointer { ptr in
         for idx in ptr.indices {
@@ -1025,50 +1014,6 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         XCTAssertGreaterThan(triplet.compileTimeMs, 0)
     }
 
-    func test_recurrent_generation_k2_branch_commit_reports_hardware_comparison() throws {
-        try requireGenerationHardware()
-
-        let prompt: [UInt16] = [0]
-        let warmup = 3
-        let iterations = 20
-        let maxNewTokens = 9
-
-        let control = try benchmarkRecurrentEchoGeneration(
-            layerCount: 6,
-            promptTokens: prompt,
-            maxNewTokens: maxNewTokens,
-            warmup: warmup,
-            iterations: iterations,
-            outputHeadBackend: .aneRMSNormClassifier,
-            useDirectTokenSelection: true,
-            trunkBackend: .fusedThreeLayerTriplets
-        )
-        let branchCommit = try benchmarkRecurrentBranchCommitEchoGeneration(
-            draftLayers: 2,
-            verifierLayers: 6,
-            promptTokens: prompt,
-            maxNewTokens: maxNewTokens,
-            warmup: warmup,
-            iterations: iterations
-        )
-
-        print(
-            """
-            recurrent generation fused-triplet direct-select control median=\(control.medianTokenMs) ms/token tps=\(control.medianTokensPerSecond) compile=\(control.compileTimeMs) trunk=\(control.medianTrunkMsPerToken) logits=\(control.medianLogitsMsPerToken)
-            recurrent generation k2 branch-commit median=\(branchCommit.medianTokenMs) ms/token tps=\(branchCommit.medianTokensPerSecond) compile=\(branchCommit.compileTimeMs) accepted_exact_tokens_per_pass=\(branchCommit.acceptedExactTokensPerPass) proposer=\(branchCommit.medianProposerMsPerPass) verifier_trunk=\(branchCommit.medianVerifierTrunkMsPerPass) verifier_logits=\(branchCommit.medianVerifierLogitsMsPerPass) checkpoint_copy=\(branchCommit.medianCheckpointCopyMsPerPass)
-            NOTE: k2 branch-commit currently uses echo recurrent weights only; acceptance here is an upper-bound plumbing signal, not a real-model viability claim.
-            """
-        )
-
-        XCTAssertGreaterThan(control.medianTokenMs, 0)
-        XCTAssertGreaterThan(branchCommit.medianTokenMs, 0)
-        XCTAssertGreaterThan(branchCommit.compileTimeMs, 0)
-        XCTAssertGreaterThan(branchCommit.medianProposerMsPerPass, 0)
-        XCTAssertGreaterThan(branchCommit.medianVerifierTrunkMsPerPass, 0)
-        XCTAssertGreaterThanOrEqual(branchCommit.medianVerifierLogitsMsPerPass, 0)
-        XCTAssertGreaterThanOrEqual(branchCommit.medianCheckpointCopyMsPerPass, 0)
-    }
-
     func test_recurrent_generation_fused_triplet_direct_select_vs_autoregressive_materialized_on_hardware() throws {
         try requireGenerationHardware()
 
@@ -1898,94 +1843,6 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                 iterations: iterations
             )
         }
-    }
-
-    private func benchmarkRecurrentBranchCommitEchoGeneration(
-        draftLayers: Int,
-        verifierLayers: Int,
-        promptTokens: [UInt16],
-        maxNewTokens: Int,
-        warmup: Int,
-        iterations: Int
-    ) throws -> BranchCommitGenerationBenchmarkSample {
-        let weights = makeEchoRecurrentGenerationWeights(layerCount: verifierLayers)
-        let draftModel = try TwoTokenRecurrentDraftModel(
-            model: ANERecurrentGenerationModel(
-                weights: weights,
-                layerCount: draftLayers,
-                maxSequenceTokens: 32,
-                outputHeadBackend: .aneRMSNormClassifier,
-                trunkBackend: .fusedTwoLayerPairs
-            )
-        )
-        let fullModel = try TwoTokenRecurrentBranchVerifierModel(
-            model: ANERecurrentGenerationModel(
-                weights: weights,
-                layerCount: verifierLayers,
-                maxSequenceTokens: 32,
-                outputHeadBackend: .aneRMSNormClassifier,
-                trunkBackend: .fusedThreeLayerTriplets
-            )
-        )
-        var harness = TwoTokenBranchCommitGenerationHarness(
-            draftModel: draftModel,
-            fullModel: fullModel,
-            strategy: .argmax
-        )
-
-        var tokenLatencies: [Double] = []
-        var throughput: [Double] = []
-        var acceptedExactTokens: [Double] = []
-        var proposerPassLatencies: [Double] = []
-        var verifierTrunkPassLatencies: [Double] = []
-        var verifierLogitsPassLatencies: [Double] = []
-        var checkpointCopyPassLatencies: [Double] = []
-        tokenLatencies.reserveCapacity(iterations)
-        throughput.reserveCapacity(iterations)
-        acceptedExactTokens.reserveCapacity(iterations)
-        proposerPassLatencies.reserveCapacity(iterations)
-        verifierTrunkPassLatencies.reserveCapacity(iterations)
-        verifierLogitsPassLatencies.reserveCapacity(iterations)
-        checkpointCopyPassLatencies.reserveCapacity(iterations)
-
-        let compileTimeMs =
-            harness.draftModel.performanceSnapshot.compileTimeMs
-            + harness.fullModel.performanceSnapshot.compileTimeMs
-
-        for iter in 0..<(warmup + iterations) {
-            let start = GenerationClock.now()
-            let trace = try harness.generate(promptTokens: promptTokens, maxNewTokens: maxNewTokens)
-            let elapsedMs = GenerationClock.milliseconds(start: start, end: GenerationClock.now())
-
-            if iter >= warmup {
-                tokenLatencies.append(elapsedMs / Double(maxNewTokens))
-                throughput.append(trace.effectiveTokensPerSecond)
-                acceptedExactTokens.append(trace.acceptedExactTokensPerPass)
-                proposerPassLatencies.append(
-                    trace.proposerLatenciesMs.reduce(0, +) / Double(max(trace.proposerLatenciesMs.count, 1))
-                )
-                verifierTrunkPassLatencies.append(
-                    trace.verifierTrunkLatenciesMs.reduce(0, +) / Double(max(trace.verifierTrunkLatenciesMs.count, 1))
-                )
-                verifierLogitsPassLatencies.append(
-                    trace.verifierLogitsLatenciesMs.reduce(0, +) / Double(max(trace.verifierLogitsLatenciesMs.count, 1))
-                )
-                checkpointCopyPassLatencies.append(
-                    trace.checkpointCopyLatenciesMs.reduce(0, +) / Double(max(trace.checkpointCopyLatenciesMs.count, 1))
-                )
-            }
-        }
-
-        return BranchCommitGenerationBenchmarkSample(
-            medianTokenMs: median(tokenLatencies),
-            medianTokensPerSecond: median(throughput),
-            acceptedExactTokensPerPass: median(acceptedExactTokens),
-            compileTimeMs: compileTimeMs,
-            medianProposerMsPerPass: median(proposerPassLatencies),
-            medianVerifierTrunkMsPerPass: median(verifierTrunkPassLatencies),
-            medianVerifierLogitsMsPerPass: median(verifierLogitsPassLatencies),
-            medianCheckpointCopyMsPerPass: median(checkpointCopyPassLatencies)
-        )
     }
 
     private func benchmarkCoreMLGeneration(

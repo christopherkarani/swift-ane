@@ -1,8 +1,6 @@
 import Accelerate
 import CPUOps
 import Foundation
-import IOSurface
-import ANEInterop
 import ANERuntime
 import ANETypes
 
@@ -10,205 +8,6 @@ public enum GenerationError: Error, Sendable, Equatable {
     case invalidArguments(String)
     case modelLoadFailed(String)
     case runtimeFailure(String)
-}
-
-private struct RecurrentTwoTokenProposal {
-    let firstToken: UInt16
-    let secondToken: UInt16
-    let baseCheckpoint: RecurrentGenerationCheckpoint
-    let stepOneCheckpoint: RecurrentGenerationCheckpoint
-    let nextTokenAfterSecond: UInt16
-}
-
-struct TwoTokenRecurrentDraftModel: ~Copyable, TwoTokenDraftingLanguageModel, GenerationPerformanceTrackable {
-    var model: ANERecurrentGenerationModel
-    let selectionStrategy: TokenSelectionStrategy
-
-    private var currentToken: UInt16?
-    private var inFlightProposal: RecurrentTwoTokenProposal?
-
-    var performanceSnapshot: GenerationPerformanceSnapshot {
-        model.performanceSnapshot
-    }
-
-    init(
-        model: consuming ANERecurrentGenerationModel,
-        selectionStrategy: TokenSelectionStrategy = .argmax
-    ) {
-        self.model = model
-        self.selectionStrategy = selectionStrategy
-        self.currentToken = nil
-        self.inFlightProposal = nil
-    }
-
-    mutating func reset() throws(GenerationError) {
-        try model.reset()
-        currentToken = nil
-        inFlightProposal = nil
-    }
-
-    mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
-        strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
-        let token = try model.prefillSelectedToken(promptTokens: promptTokens, strategy: strategy)
-        currentToken = token
-        inFlightProposal = nil
-        return token
-    }
-
-    mutating func proposeTwoTokens(strategy: TokenSelectionStrategy) throws(GenerationError) -> [UInt16] {
-        guard let firstToken = currentToken else {
-            throw .runtimeFailure("draft proposer is missing the current token cache")
-        }
-
-        let baseCheckpoint = try model.makeCheckpoint()
-        let secondToken = try model.decodeSelectedToken(nextToken: firstToken, strategy: strategy)
-        let stepOneCheckpoint = try model.makeCheckpoint()
-        let nextTokenAfterSecond = try model.decodeSelectedToken(nextToken: secondToken, strategy: strategy)
-
-        currentToken = nextTokenAfterSecond
-        inFlightProposal = RecurrentTwoTokenProposal(
-            firstToken: firstToken,
-            secondToken: secondToken,
-            baseCheckpoint: baseCheckpoint,
-            stepOneCheckpoint: stepOneCheckpoint,
-            nextTokenAfterSecond: nextTokenAfterSecond
-        )
-        return [firstToken, secondToken]
-    }
-
-    mutating func commit(tokens: [UInt16]) throws(GenerationError) {
-        guard !tokens.isEmpty else { return }
-
-        if let proposal = inFlightProposal {
-            defer { inFlightProposal = nil }
-
-            if tokens.count == 1, tokens[0] == proposal.firstToken {
-                try model.restore(checkpoint: proposal.stepOneCheckpoint)
-                currentToken = proposal.secondToken
-                return
-            }
-
-            if tokens.count == 2,
-               tokens[0] == proposal.firstToken,
-               tokens[1] == proposal.secondToken {
-                currentToken = proposal.nextTokenAfterSecond
-                return
-            }
-
-            if tokens.first == proposal.firstToken {
-                try model.restore(checkpoint: proposal.stepOneCheckpoint)
-                currentToken = proposal.secondToken
-                for token in tokens.dropFirst() {
-                    currentToken = try model.decodeSelectedToken(nextToken: token, strategy: selectionStrategy)
-                }
-                return
-            }
-
-            try model.restore(checkpoint: proposal.baseCheckpoint)
-        }
-
-        for token in tokens {
-            currentToken = try model.decodeSelectedToken(nextToken: token, strategy: selectionStrategy)
-        }
-    }
-}
-
-struct TwoTokenRecurrentBranchVerifierModel: ~Copyable, TwoTokenBranchVerifyingLanguageModel, GenerationPerformanceTrackable {
-    var model: ANERecurrentGenerationModel
-    let selectionStrategy: TokenSelectionStrategy
-
-    private var currentToken: UInt16?
-
-    var performanceSnapshot: GenerationPerformanceSnapshot {
-        model.performanceSnapshot
-    }
-
-    init(
-        model: consuming ANERecurrentGenerationModel,
-        selectionStrategy: TokenSelectionStrategy = .argmax
-    ) {
-        self.model = model
-        self.selectionStrategy = selectionStrategy
-        self.currentToken = nil
-    }
-
-    mutating func reset() throws(GenerationError) {
-        try model.reset()
-        currentToken = nil
-    }
-
-    mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
-        strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
-        let token = try model.prefillSelectedToken(promptTokens: promptTokens, strategy: strategy)
-        currentToken = token
-        return token
-    }
-
-    mutating func commit(tokens: [UInt16]) throws(GenerationError) {
-        guard !tokens.isEmpty else { return }
-        for token in tokens {
-            currentToken = try model.decodeSelectedToken(nextToken: token, strategy: selectionStrategy)
-        }
-    }
-
-    mutating func verifyAndCommit(
-        proposedTokens: [UInt16],
-        strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> TwoTokenBranchCommitResult {
-        guard proposedTokens.count == 2 else {
-            throw .runtimeFailure("two-token branch verifier requires exactly 2 proposed tokens")
-        }
-        guard let exactFirst = currentToken else {
-            throw .runtimeFailure("branch verifier is missing the current token cache")
-        }
-
-        let snapshotBefore = model.performanceSnapshot
-        var checkpointCopyLatencyMs = 0.0
-
-        currentToken = try model.decodeSelectedToken(nextToken: exactFirst, strategy: strategy)
-        let stepOneCheckpointStart = GenerationClock.now()
-        _ = try model.makeCheckpoint()
-        checkpointCopyLatencyMs += GenerationClock.milliseconds(
-            start: stepOneCheckpointStart,
-            end: GenerationClock.now()
-        )
-
-        if exactFirst != proposedTokens[0] {
-            let snapshotAfter = model.performanceSnapshot
-            return TwoTokenBranchCommitResult(
-                acceptedPrefixLength: 0,
-                committedTokens: [exactFirst],
-                verifierTrunkLatencyMs: snapshotAfter.trunkLatencyMs - snapshotBefore.trunkLatencyMs,
-                verifierLogitsLatencyMs: snapshotAfter.logitsLatencyMs - snapshotBefore.logitsLatencyMs,
-                checkpointCopyLatencyMs: checkpointCopyLatencyMs
-            )
-        }
-
-        guard let exactSecond = currentToken else {
-            throw .runtimeFailure("branch verifier lost the second exact token cache")
-        }
-
-        currentToken = try model.decodeSelectedToken(nextToken: exactSecond, strategy: strategy)
-        let stepTwoCheckpointStart = GenerationClock.now()
-        _ = try model.makeCheckpoint()
-        checkpointCopyLatencyMs += GenerationClock.milliseconds(
-            start: stepTwoCheckpointStart,
-            end: GenerationClock.now()
-        )
-
-        let snapshotAfter = model.performanceSnapshot
-        return TwoTokenBranchCommitResult(
-            acceptedPrefixLength: exactSecond == proposedTokens[1] ? 2 : 1,
-            committedTokens: [exactFirst, exactSecond],
-            verifierTrunkLatencyMs: snapshotAfter.trunkLatencyMs - snapshotBefore.trunkLatencyMs,
-            verifierLogitsLatencyMs: snapshotAfter.logitsLatencyMs - snapshotBefore.logitsLatencyMs,
-            checkpointCopyLatencyMs: checkpointCopyLatencyMs
-        )
-    }
 }
 
 public enum TokenSelectionStrategy: Sendable {
@@ -288,22 +87,10 @@ public struct AutoregressiveGenerationTrace: Sendable {
 public struct TwoTokenBranchCommitResult: Sendable, Equatable {
     public let acceptedPrefixLength: Int
     public let committedTokens: [UInt16]
-    public let verifierTrunkLatencyMs: Double
-    public let verifierLogitsLatencyMs: Double
-    public let checkpointCopyLatencyMs: Double
 
-    public init(
-        acceptedPrefixLength: Int,
-        committedTokens: [UInt16],
-        verifierTrunkLatencyMs: Double = 0,
-        verifierLogitsLatencyMs: Double = 0,
-        checkpointCopyLatencyMs: Double = 0
-    ) {
+    public init(acceptedPrefixLength: Int, committedTokens: [UInt16]) {
         self.acceptedPrefixLength = acceptedPrefixLength
         self.committedTokens = committedTokens
-        self.verifierTrunkLatencyMs = verifierTrunkLatencyMs
-        self.verifierLogitsLatencyMs = verifierLogitsLatencyMs
-        self.checkpointCopyLatencyMs = checkpointCopyLatencyMs
     }
 }
 
@@ -311,27 +98,6 @@ public struct TwoTokenBranchCommitTrace: Sendable, Equatable {
     public let promptTokens: [UInt16]
     public let generatedTokens: [UInt16]
     public let acceptedPrefixLengths: [Int]
-    public let proposerLatenciesMs: [Double]
-    public let verifierTrunkLatenciesMs: [Double]
-    public let verifierLogitsLatenciesMs: [Double]
-    public let checkpointCopyLatenciesMs: [Double]
-
-    public var totalLatencyMs: Double {
-        proposerLatenciesMs.reduce(0, +)
-            + verifierTrunkLatenciesMs.reduce(0, +)
-            + verifierLogitsLatenciesMs.reduce(0, +)
-            + checkpointCopyLatenciesMs.reduce(0, +)
-    }
-
-    public var effectiveTokensPerSecond: Double {
-        guard totalLatencyMs > 0 else { return 0 }
-        return Double(generatedTokens.count) * 1000.0 / totalLatencyMs
-    }
-
-    public var acceptedExactTokensPerPass: Double {
-        guard !acceptedPrefixLengths.isEmpty else { return 0 }
-        return Double(acceptedPrefixLengths.reduce(0, +)) / Double(acceptedPrefixLengths.count)
-    }
 }
 
 public protocol TwoTokenDraftingLanguageModel: ~Copyable {
@@ -350,7 +116,6 @@ public protocol TwoTokenBranchVerifyingLanguageModel: ~Copyable {
         promptTokens: [UInt16],
         strategy: TokenSelectionStrategy
     ) throws(GenerationError) -> UInt16
-    mutating func commit(tokens: [UInt16]) throws(GenerationError)
     mutating func verifyAndCommit(
         proposedTokens: [UInt16],
         strategy: TokenSelectionStrategy
@@ -462,44 +227,6 @@ enum GenerationWeightCloner {
         LayerStorage<RWKVStyleRecurrentWeights>(count: source.count) { idx in
             cloneRecurrentLayer(source[idx])
         }
-    }
-}
-
-private struct RecurrentStateSurfaceCheckpoint {
-    let surface: IOSurfaceRef
-    let laneSpatial: Int
-}
-
-private struct RecurrentGenerationCheckpoint {
-    let surfaces: [RecurrentStateSurfaceCheckpoint]
-    let consumedTokens: Int
-}
-
-@inline(__always)
-private func makeRecurrentCheckpointSurface(laneSpatial: Int) throws(GenerationError) -> IOSurfaceRef {
-    guard let surface = ane_interop_create_surface(ModelConfig.dim * laneSpatial * 2) else {
-        throw .runtimeFailure("recurrent checkpoint surface allocation failed")
-    }
-    return surface
-}
-
-@inline(__always)
-private func copyRecurrentCheckpointSurface(
-    from source: IOSurfaceRef,
-    to destination: IOSurfaceRef,
-    laneSpatial: Int
-) throws(GenerationError) {
-    do {
-        try SurfaceIO.copyFP16(
-            dst: destination,
-            dstChannelOffset: 0,
-            src: source,
-            srcChannelOffset: 0,
-            channels: ModelConfig.dim,
-            spatial: laneSpatial
-        )
-    } catch {
-        throw .runtimeFailure("recurrent checkpoint copy failed: \(error)")
     }
 }
 
@@ -708,38 +435,21 @@ public struct TwoTokenBranchCommitGenerationHarness<
 
         var generatedTokens: [UInt16] = [firstToken]
         var acceptedPrefixLengths: [Int] = []
-        var proposerLatenciesMs: [Double] = []
-        var verifierTrunkLatenciesMs: [Double] = []
-        var verifierLogitsLatenciesMs: [Double] = []
-        var checkpointCopyLatenciesMs: [Double] = []
         generatedTokens.reserveCapacity(maxNewTokens)
         acceptedPrefixLengths.reserveCapacity(maxNewTokens)
-        proposerLatenciesMs.reserveCapacity(maxNewTokens)
-        verifierTrunkLatenciesMs.reserveCapacity(maxNewTokens)
-        verifierLogitsLatenciesMs.reserveCapacity(maxNewTokens)
-        checkpointCopyLatenciesMs.reserveCapacity(maxNewTokens)
 
         if maxNewTokens == 1 {
             return TwoTokenBranchCommitTrace(
                 promptTokens: promptTokens,
                 generatedTokens: generatedTokens,
-                acceptedPrefixLengths: acceptedPrefixLengths,
-                proposerLatenciesMs: proposerLatenciesMs,
-                verifierTrunkLatenciesMs: verifierTrunkLatenciesMs,
-                verifierLogitsLatenciesMs: verifierLogitsLatenciesMs,
-                checkpointCopyLatenciesMs: checkpointCopyLatenciesMs
+                acceptedPrefixLengths: acceptedPrefixLengths
             )
         }
 
         try draftModel.commit(tokens: [firstToken])
-        try fullModel.commit(tokens: [firstToken])
 
         while generatedTokens.count < maxNewTokens {
-            let proposalStart = GenerationClock.now()
             let proposedTokens = try draftModel.proposeTwoTokens(strategy: strategy)
-            proposerLatenciesMs.append(
-                GenerationClock.milliseconds(start: proposalStart, end: GenerationClock.now())
-            )
             guard proposedTokens.count == 2 else {
                 throw .runtimeFailure("two-token branch commit requires exactly 2 proposed tokens per round")
             }
@@ -755,9 +465,6 @@ public struct TwoTokenBranchCommitGenerationHarness<
                 throw .runtimeFailure("branch commit must produce at least one committed token")
             }
             acceptedPrefixLengths.append(result.acceptedPrefixLength)
-            verifierTrunkLatenciesMs.append(result.verifierTrunkLatencyMs)
-            verifierLogitsLatenciesMs.append(result.verifierLogitsLatencyMs)
-            checkpointCopyLatenciesMs.append(result.checkpointCopyLatencyMs)
 
             let remaining = maxNewTokens - generatedTokens.count
             let committed = Array(result.committedTokens.prefix(remaining))
@@ -768,11 +475,7 @@ public struct TwoTokenBranchCommitGenerationHarness<
         return TwoTokenBranchCommitTrace(
             promptTokens: promptTokens,
             generatedTokens: generatedTokens,
-            acceptedPrefixLengths: acceptedPrefixLengths,
-            proposerLatenciesMs: proposerLatenciesMs,
-            verifierTrunkLatenciesMs: verifierTrunkLatenciesMs,
-            verifierLogitsLatenciesMs: verifierLogitsLatenciesMs,
-            checkpointCopyLatenciesMs: checkpointCopyLatenciesMs
+            acceptedPrefixLengths: acceptedPrefixLengths
         )
     }
 }
@@ -2300,141 +2003,5 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
 
         logitsLatencyMs += GenerationClock.milliseconds(start: logitsStart, end: GenerationClock.now())
         return token
-    }
-
-    fileprivate func makeCheckpoint() throws(GenerationError) -> RecurrentGenerationCheckpoint {
-        var surfaces: [RecurrentStateSurfaceCheckpoint] = []
-        switch trunkBackend {
-        case .singleLayer:
-            surfaces.reserveCapacity(singleLayerSessions.count)
-            for idx in 0..<singleLayerSessions.count {
-                let laneSpatial = singleLayerSessions[idx].handles.laneSpatial
-                let surface = try makeRecurrentCheckpointSurface(laneSpatial: laneSpatial)
-                try copyRecurrentCheckpointSurface(
-                    from: singleLayerSessions[idx].handles.stateIn,
-                    to: surface,
-                    laneSpatial: laneSpatial
-                )
-                surfaces.append(RecurrentStateSurfaceCheckpoint(surface: surface, laneSpatial: laneSpatial))
-            }
-        case .fusedTwoLayerPairs:
-            surfaces.reserveCapacity(fusedPairSessions.count * 2)
-            for idx in 0..<fusedPairSessions.count {
-                let laneSpatial = fusedPairSessions[idx].handles.laneSpatial
-                let state0 = try makeRecurrentCheckpointSurface(laneSpatial: laneSpatial)
-                let state1 = try makeRecurrentCheckpointSurface(laneSpatial: laneSpatial)
-                try copyRecurrentCheckpointSurface(
-                    from: fusedPairSessions[idx].handles.stateIn0,
-                    to: state0,
-                    laneSpatial: laneSpatial
-                )
-                try copyRecurrentCheckpointSurface(
-                    from: fusedPairSessions[idx].handles.stateIn1,
-                    to: state1,
-                    laneSpatial: laneSpatial
-                )
-                surfaces.append(RecurrentStateSurfaceCheckpoint(surface: state0, laneSpatial: laneSpatial))
-                surfaces.append(RecurrentStateSurfaceCheckpoint(surface: state1, laneSpatial: laneSpatial))
-            }
-        case .fusedThreeLayerTriplets:
-            surfaces.reserveCapacity(fusedTripletSessions.count * 3)
-            for idx in 0..<fusedTripletSessions.count {
-                let laneSpatial = fusedTripletSessions[idx].handles.laneSpatial
-                let state0 = try makeRecurrentCheckpointSurface(laneSpatial: laneSpatial)
-                let state1 = try makeRecurrentCheckpointSurface(laneSpatial: laneSpatial)
-                let state2 = try makeRecurrentCheckpointSurface(laneSpatial: laneSpatial)
-                try copyRecurrentCheckpointSurface(
-                    from: fusedTripletSessions[idx].handles.stateIn0,
-                    to: state0,
-                    laneSpatial: laneSpatial
-                )
-                try copyRecurrentCheckpointSurface(
-                    from: fusedTripletSessions[idx].handles.stateIn1,
-                    to: state1,
-                    laneSpatial: laneSpatial
-                )
-                try copyRecurrentCheckpointSurface(
-                    from: fusedTripletSessions[idx].handles.stateIn2,
-                    to: state2,
-                    laneSpatial: laneSpatial
-                )
-                surfaces.append(RecurrentStateSurfaceCheckpoint(surface: state0, laneSpatial: laneSpatial))
-                surfaces.append(RecurrentStateSurfaceCheckpoint(surface: state1, laneSpatial: laneSpatial))
-                surfaces.append(RecurrentStateSurfaceCheckpoint(surface: state2, laneSpatial: laneSpatial))
-            }
-        }
-
-        return RecurrentGenerationCheckpoint(surfaces: surfaces, consumedTokens: consumedTokens)
-    }
-
-    fileprivate mutating func restore(checkpoint: borrowing RecurrentGenerationCheckpoint) throws(GenerationError) {
-        var surfaceIndex = 0
-        switch trunkBackend {
-        case .singleLayer:
-            guard checkpoint.surfaces.count == singleLayerSessions.count else {
-                throw .runtimeFailure("recurrent checkpoint surface count mismatch")
-            }
-            for idx in 0..<singleLayerSessions.count {
-                let snapshot = checkpoint.surfaces[surfaceIndex]
-                try copyRecurrentCheckpointSurface(
-                    from: snapshot.surface,
-                    to: singleLayerSessions[idx].handles.stateIn,
-                    laneSpatial: snapshot.laneSpatial
-                )
-                surfaceIndex += 1
-            }
-        case .fusedTwoLayerPairs:
-            guard checkpoint.surfaces.count == fusedPairSessions.count * 2 else {
-                throw .runtimeFailure("fused recurrent checkpoint surface count mismatch")
-            }
-            for idx in 0..<fusedPairSessions.count {
-                let snapshot0 = checkpoint.surfaces[surfaceIndex]
-                try copyRecurrentCheckpointSurface(
-                    from: snapshot0.surface,
-                    to: fusedPairSessions[idx].handles.stateIn0,
-                    laneSpatial: snapshot0.laneSpatial
-                )
-                surfaceIndex += 1
-
-                let snapshot1 = checkpoint.surfaces[surfaceIndex]
-                try copyRecurrentCheckpointSurface(
-                    from: snapshot1.surface,
-                    to: fusedPairSessions[idx].handles.stateIn1,
-                    laneSpatial: snapshot1.laneSpatial
-                )
-                surfaceIndex += 1
-            }
-        case .fusedThreeLayerTriplets:
-            guard checkpoint.surfaces.count == fusedTripletSessions.count * 3 else {
-                throw .runtimeFailure("fused three-layer checkpoint surface count mismatch")
-            }
-            for idx in 0..<fusedTripletSessions.count {
-                let snapshot0 = checkpoint.surfaces[surfaceIndex]
-                try copyRecurrentCheckpointSurface(
-                    from: snapshot0.surface,
-                    to: fusedTripletSessions[idx].handles.stateIn0,
-                    laneSpatial: snapshot0.laneSpatial
-                )
-                surfaceIndex += 1
-
-                let snapshot1 = checkpoint.surfaces[surfaceIndex]
-                try copyRecurrentCheckpointSurface(
-                    from: snapshot1.surface,
-                    to: fusedTripletSessions[idx].handles.stateIn1,
-                    laneSpatial: snapshot1.laneSpatial
-                )
-                surfaceIndex += 1
-
-                let snapshot2 = checkpoint.surfaces[surfaceIndex]
-                try copyRecurrentCheckpointSurface(
-                    from: snapshot2.surface,
-                    to: fusedTripletSessions[idx].handles.stateIn2,
-                    laneSpatial: snapshot2.laneSpatial
-                )
-                surfaceIndex += 1
-            }
-        }
-
-        consumedTokens = checkpoint.consumedTokens
     }
 }
