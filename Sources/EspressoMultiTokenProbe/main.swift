@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CoreML
 import ANERuntime
 import ANETypes
 import Espresso
@@ -21,6 +22,11 @@ private struct Options {
     var controlBackend: RecurrentGenerationTrunkBackend = .singleLayer
     var twoStepBackend: RecurrentGenerationTrunkBackend = .singleLayer
     var outputHeadBackend: GenerationOutputHeadBackend = .aneRMSNormClassifier
+    var inputModeRaw: String? = nil
+    var recurrentCheckpointPath: String? = nil
+    var compareCoreML: Bool = false
+    var coreMLModelPath: String? = nil
+    var generationModelPath: String? = nil
 
     static func parse(_ argv: [String]) -> Options {
         var options = Options()
@@ -72,6 +78,32 @@ private struct Options {
                     fatal("Expected --output-head-backend cpu|ane-classifier|ane-rmsnorm-classifier")
                 }
                 options.outputHeadBackend = parseOutputHeadBackend(argv[idx])
+            case "--input":
+                idx += 1
+                guard idx < argv.count else {
+                    fatal("Expected --input echo|recurrent-checkpoint")
+                }
+                options.inputModeRaw = argv[idx]
+            case "--recurrent-checkpoint":
+                idx += 1
+                guard idx < argv.count else {
+                    fatal("Expected --recurrent-checkpoint PATH")
+                }
+                options.recurrentCheckpointPath = argv[idx]
+            case "--compare-coreml":
+                options.compareCoreML = true
+            case "--coreml-model":
+                idx += 1
+                guard idx < argv.count else {
+                    fatal("Expected --coreml-model PATH")
+                }
+                options.coreMLModelPath = argv[idx]
+            case "--generation-model":
+                idx += 1
+                guard idx < argv.count else {
+                    fatal("Expected --generation-model PATH")
+                }
+                options.generationModelPath = argv[idx]
             case "--help":
                 printUsageAndExit()
             default:
@@ -98,31 +130,27 @@ private struct Options {
 
         return options
     }
-}
 
-private struct GenerationBenchmarkSample {
-    let medianTokenMs: Double
-    let medianTokensPerSecond: Double
-    let compileTimeMs: Double
-    let medianTrunkMsPerToken: Double
-    let medianLogitsMsPerToken: Double
-}
+    func validatedProbeConfiguration() throws(MultitokenProbeConfigurationError) -> ValidatedMultitokenProbeConfiguration {
+        let input: MultitokenProbeInput?
+        switch inputModeRaw {
+        case nil:
+            input = nil
+        case "echo":
+            input = .echo
+        case "recurrent-checkpoint":
+            input = .recurrentCheckpoint(path: recurrentCheckpointPath ?? "")
+        case let raw?:
+            fatal("Unknown --input mode: \(raw)")
+        }
 
-private struct ExactTwoTokenBenchmarkSample {
-    let medianTokenMs: Double
-    let medianTokensPerSecond: Double
-    let compileTimeMs: Double
-    let medianCommittedExactTokensPerPass: Double
-    let medianAcceptedFutureTokensPerPass: Double
-    let medianProposerMsPerPass: Double
-    let medianVerifierTrunkMsPerPass: Double
-    let medianVerifierLogitsMsPerPass: Double
-    let medianStateAdvanceMsPerPass: Double
-}
-
-private struct CompileInitBenchmarkSample {
-    let wallInitMs: Double
-    let reportedCompileTimeMs: Double
+        return try MultitokenProbeConfiguration(
+            input: input,
+            compareCoreML: compareCoreML,
+            coreMLModelPath: coreMLModelPath,
+            generationModelPath: generationModelPath
+        ).validated()
+    }
 }
 
 private enum ProbeError: Error {
@@ -189,6 +217,11 @@ private func printUsageAndExit() -> Never {
     let usage = """
     Usage: espresso-multitoken-probe [options]
       --mode compare|compile-init-only
+      --input echo|recurrent-checkpoint
+      --recurrent-checkpoint PATH
+      --compare-coreml
+      --coreml-model PATH
+      --generation-model PATH
       --warmup N
       --iterations N
       --max-new-tokens N
@@ -214,43 +247,6 @@ private func median(_ values: [Double]) -> Double {
     return sorted[mid]
 }
 
-private func fill(_ buffer: borrowing TensorBuffer, value: Float) {
-    buffer.withUnsafeMutableBufferPointer { ptr in
-        for idx in ptr.indices {
-            ptr[idx] = value
-        }
-    }
-}
-
-private func makeEchoRecurrentGenerationWeights(layerCount: Int) -> RecurrentGenerationWeights {
-    let layers = LayerStorage<RWKVStyleRecurrentWeights>(count: layerCount) { _ in
-        let weights = RWKVStyleRecurrentWeights()
-        fill(weights.rms, value: 1)
-        fill(weights.Wx, value: 0)
-        fill(weights.Ws, value: 0)
-        fill(weights.Wd, value: 0)
-        fill(weights.Wo, value: 0)
-        return weights
-    }
-
-    let rmsFinal = TensorBuffer(count: ModelConfig.dim, zeroed: false)
-    fill(rmsFinal, value: 1)
-
-    let embedding = TensorBuffer(count: ModelConfig.vocab * ModelConfig.dim, zeroed: true)
-    embedding.withUnsafeMutablePointer { ptr in
-        for dimIdx in 0..<ModelConfig.dim {
-            ptr[dimIdx] = 1
-        }
-    }
-
-    return RecurrentGenerationWeights(
-        layers: layers,
-        rmsFinal: rmsFinal,
-        embedding: embedding,
-        classifier: TensorBuffer(count: 0, zeroed: true),
-        sharedClassifier: true
-    )
-}
 
 private func benchmarkDirectSelectionHarness<Model>(
     harness: inout DirectTokenSelectionGenerationHarness<Model>,
@@ -347,7 +343,8 @@ where Model: ExactTwoTokenGeneratingLanguageModel & GenerationPerformanceTrackab
 }
 
 private func measureRecurrentControlCompileInitOnly(options: Options) throws -> CompileInitBenchmarkSample {
-    let weights = makeEchoRecurrentGenerationWeights(layerCount: options.layerCount)
+    let plan = try options.validatedProbeConfiguration()
+    let weights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
     let start = mach_absolute_time()
     let model = try ANERecurrentGenerationModel(
         weights: weights,
@@ -366,7 +363,8 @@ private func measureRecurrentControlCompileInitOnly(options: Options) throws -> 
 }
 
 private func measureTwoStepCompileInitOnly(options: Options) throws -> CompileInitBenchmarkSample {
-    let weights = makeEchoRecurrentGenerationWeights(layerCount: options.layerCount)
+    let plan = try options.validatedProbeConfiguration()
+    let weights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
     let start = mach_absolute_time()
     let model = try ANEExactTwoTokenBranchStatePromotionModel(
         weights: weights,
@@ -385,6 +383,7 @@ private func measureTwoStepCompileInitOnly(options: Options) throws -> CompileIn
 }
 
 private func compileOnlyPayload(options: Options) throws -> [String: Any] {
+    let plan = try options.validatedProbeConfiguration()
     printStderr("Resetting compile budget")
     try? CompileBudget.setCount(0)
 
@@ -400,6 +399,7 @@ private func compileOnlyPayload(options: Options) throws -> [String: Any] {
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
         "two_step_backend": describe(options.twoStepBackend),
+        "input_mode": describe(plan.input),
         "layer_count": options.layerCount,
         "output_head_backend": describe(options.outputHeadBackend),
         "max_sequence_tokens": options.maxSequenceTokens,
@@ -415,11 +415,12 @@ private func compileOnlyPayload(options: Options) throws -> [String: Any] {
 }
 
 private func comparePayload(options: Options) throws -> [String: Any] {
+    let plan = try options.validatedProbeConfiguration()
     printStderr("Resetting compile budget")
     try? CompileBudget.setCount(0)
 
     let prompt: [UInt16] = [0]
-    let weights = makeEchoRecurrentGenerationWeights(layerCount: options.layerCount)
+    let weights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
 
     printStderr("Starting control model init")
     let controlInitStart = mach_absolute_time()
@@ -477,10 +478,27 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     )
     printStderr(String(format: "Two-step median %.6f ms/token", twoStep.medianTokenMs))
 
-    return [
+    let coreML: GenerationBenchmarkSample?
+    if let request = plan.coreMLRequest {
+        printStderr("Benchmarking CoreML")
+        coreML = try benchmarkCoreMLGeneration(
+            request: request,
+            promptTokens: prompt,
+            maxNewTokens: options.maxNewTokens,
+            warmup: options.warmup,
+            iterations: options.iterations,
+            maxSequenceTokens: options.maxSequenceTokens
+        )
+        printStderr(String(format: "CoreML median %.6f ms/token", coreML?.medianTokenMs ?? 0))
+    } else {
+        coreML = nil
+    }
+
+    var payload: [String: Any] = [
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
         "two_step_backend": describe(options.twoStepBackend),
+        "input_mode": describe(plan.input),
         "layer_count": options.layerCount,
         "output_head_backend": describe(options.outputHeadBackend),
         "warmup": options.warmup,
@@ -511,6 +529,21 @@ private func comparePayload(options: Options) throws -> [String: Any] {
             "generated_tokens": twoStepParityTrace.generatedTokens.map(Int.init),
         ],
     ]
+    if let request = plan.coreMLRequest, let coreML {
+        payload["coreml"] = [
+            "model_path": request.modelPath,
+            "compute_units": describe(request.computeUnits),
+            "head_weights_source": describe(request.headWeightsSource),
+            "median_ms_per_token": coreML.medianTokenMs,
+            "median_tokens_per_second": coreML.medianTokensPerSecond,
+            "reported_compile_ms": coreML.compileTimeMs,
+            "median_trunk_ms_per_token": coreML.medianTrunkMsPerToken,
+            "median_logits_ms_per_token": coreML.medianLogitsMsPerToken,
+        ]
+        payload["two_step_speedup_vs_coreml"] = coreML.medianTokenMs / twoStep.medianTokenMs
+        payload["control_speedup_vs_coreml"] = coreML.medianTokenMs / control.medianTokenMs
+    }
+    return payload
 }
 
 private func describe(_ backend: RecurrentGenerationTrunkBackend) -> String {
@@ -528,6 +561,39 @@ private func describe(_ backend: GenerationOutputHeadBackend) -> String {
     case .cpuExactClustered: return "cpu-exact-clustered"
     case .aneClassifier: return "ane-classifier"
     case .aneRMSNormClassifier: return "ane-rmsnorm-classifier"
+    }
+}
+
+private func describe(_ input: MultitokenProbeInput) -> String {
+    switch input {
+    case .echo:
+        return "echo"
+    case .recurrentCheckpoint:
+        return "recurrent-checkpoint"
+    }
+}
+
+private func describe(_ computeUnits: MLComputeUnits) -> String {
+    switch computeUnits {
+    case .all:
+        return "all"
+    case .cpuAndGPU:
+        return "cpu-and-gpu"
+    case .cpuAndNeuralEngine:
+        return "cpu-and-neural-engine"
+    case .cpuOnly:
+        return "cpu-only"
+    @unknown default:
+        return "unknown"
+    }
+}
+
+private func describe(_ source: CoreMLHeadWeightsSource) -> String {
+    switch source {
+    case .echo:
+        return "echo"
+    case .generationModel:
+        return "generation-model"
     }
 }
 

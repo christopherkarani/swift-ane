@@ -60,6 +60,7 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [
                 .linkedFramework("Accelerate"),
+                .linkedFramework("CoreML"),
                 .linkedFramework("IOSurface"),
                 .linkedFramework("Metal"),
             ]

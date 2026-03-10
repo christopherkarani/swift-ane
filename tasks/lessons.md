@@ -99,3 +99,8 @@
 - Once exact two-step state reuse is working, check whether the verifier head is still paying one ANE eval per prepared activation; batching those prepared activations through the existing spatial lanes can be a breakthrough-sized win without changing the trunk contract.
 - Measure the pair-eval head path with the same exact release probe before pivoting to student training; the head boundary can still hide more upside than a new proposer.
 - Treat noisy first hardware reruns as potential session outliers, not instant regressions; rerun the identical probe enough times to report repeated medians before killing a route that changed the dominant cost center.
+
+## 2026-03-10 — Public Claim Repro Gate
+- Do not compare a new ANE result to saved CoreML numbers when deciding what is publicly claimable; rerun CoreML in the same session and under the same fresh-process harness first.
+- For probe-style benchmarks, synthetic shortcuts must be explicit in the CLI and in the claim text; never leave an `echo` path as an implicit default when the output may be quoted publicly.
+- A one-command reproduction script should treat `.mlpackage` as a directory artifact, capture raw JSON for every run, and summarize medians from those raw artifacts rather than from copied notes.

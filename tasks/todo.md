@@ -1,26 +1,22 @@
 # TODO
 
-- [x] Preserve `3e6cced` as the exact two-step architecture checkpoint, `2e49cab` as the compile/init gate evidence, and `13c688b` as the student-sidecar artifact checkpoint.
-- [x] Keep `f710d13`, `6188715`, and `2c864c2` as the recoverable release-probe, fused-pair, and fused-triplet exact multi-token breakthroughs.
-- [x] Head-batching hypothesis: add failing tests for pair-slice ANE output-head I/O and exact-two-step batched verifier selection before implementation.
-- [x] Implement one-ANE-eval batched RMSNorm+classifier selection for the prepared activation pair on the fused-triplet exact two-step path.
-- [x] Rebuild and rerun the standalone release probe against the exact fused-triplet control; report compile/init, exact parity, committed exact tokens/pass, accepted future tokens/pass, proposer, verifier trunk, verifier logits, state advance, and effective `ms/token`.
-- [x] Kill the head-batching route immediately if it does not move the exact fused-triplet path clearly toward the `4x` window (`<= 1.761196 ms/token` against the looser CoreML control, `<= 1.645556 ms/token` against the standing baseline).
-- [ ] If more upside is needed beyond the new exact `4x` win, measure follow-on work against the new head-batched control instead of reopening the old pre-batching baselines.
-- [ ] Keep attempt logging exhaustive in `docs/fused-decode-and-next-steps.md`, update review notes below after every major result, write Wax session + durable notes after each confirmed result, hand off at major checkpoints, and flush immediately.
+- [x] Replace the echo-only probe input with a real-checkpoint loading path that uses existing generation weight loaders and keeps the echo path available only as an explicit synthetic mode.
+- [x] Add failing tests for benchmark input selection and matched CoreML decode configuration before implementing the new probe surface.
+- [x] Extract the minimal shared benchmarking helpers needed for the standalone probe to run exact ANE control, exact two-step ANE, and CoreML decode under one binary and one timing contract.
+- [x] Extend `espresso-multitoken-probe` with explicit benchmark input modes, real-checkpoint arguments, and same-session CoreML comparison output.
+- [x] Add a one-command reproduction script that builds the release probe, runs fresh-process repeats, captures raw JSON/log files, and prints the exact ANE/CoreML ratio gate.
+- [x] Re-run focused tests and the release reproduction path; report exact parity, committed exact tokens/pass, accepted future tokens/pass, effective `ms/token`, and the matched CoreML ratio with repeated medians.
+- [x] Update docs, review notes, lessons, and Wax session/durable memory with only the results confirmed in this session; hand off and flush at the checkpoint.
 
 # Review
 
-- Open-ended throughput search resumed from `feat/ane-multitoken` after the student-sidecar checkpoint.
-- The previous hardware gate result remains: both compile/init-only seams failed to reach first output within roughly `45s`, so no honest same-session medians were reported from that bounded pass.
-- The student-route artifact seam is now in place: `TwoStepStudentCheckpoint`, focused tests passed, and `espresso-train --export-two-step-student` writes a recoverable sidecar artifact without changing the base checkpoint format.
-- The new standalone release probe recovered hardware truth outside `xctest`: exact parity held on every measured comparison, `committed_exact_tokens/pass` stayed at `2.0`, and `accepted_future_tokens/pass` stayed at `1.0` on the echo checkpoint family.
-- Compile/init is not a hard deadlock in the fresh probe: one 6-layer compile/init-only run measured control `36625.966 ms` versus two-step `812.478 ms`.
-- Repeated 1-layer matched-control runs all favored exact two-step: control `1.452750`, `1.768331`, `1.788609 ms/token`; two-step `1.354299`, `1.419352`, `1.484302 ms/token`.
-- The deeper scaling boundary is still negative on the current checkpoint family: 2-layer fused-pair was noisy and centered slightly behind control, while 3-layer fused-triplet lost in both repeats and 6-layer fused-triplet lost in the initial run.
-- Fusing the exact two-step trunk into pair sessions materially changed the ceiling: repeated 2-layer fused-pair runs now favored exact two-step (`1.534096`, `1.556641 ms/token`) over the matched fused-pair control (`2.124839`, `1.679589 ms/token`) with exact parity and `2.0` committed exact tokens/pass.
-- The pair-fused win extends through 4 layers: control `2.195484`, `2.334737 ms/token` versus fused-pair two-step `2.149909`, `2.234477 ms/token`.
-- The 6-layer gap narrowed sharply but did not close yet: fused-triplet control `2.146151`, `2.293576 ms/token` versus 6-layer two-step built from fused pairs `2.317794`, `2.529677 ms/token`.
-- Extending the same idea to fused triplets closed that remaining gap: repeated 6-layer exact runs now favored fused-triplet two-step (`2.197565`, `2.176102 ms/token`) over the strong fused-triplet control (`2.616013`, `2.397878 ms/token`) with exact parity and `2.0` committed exact tokens/pass.
-- Batched verifier-head eval is the next exact breakthrough: compile/init-only release probe measured control `811.378125 ms` versus two-step `900.605500 ms`, and repeated 6-layer exact runs measured control `2.786466`, `2.339284`, `2.243776 ms/token` versus batched-head two-step `2.409169`, `1.365719`, `1.564339 ms/token`.
-- Exact parity stayed `match` on all three batched-head runs, `committed_exact_tokens/pass` stayed `2.0`, `accepted_future_tokens/pass` stayed `1.0`, and the three-run medians (`2.339284` control vs `1.564339` two-step) clear `4x` over the standing `6.582224 ms/token` CoreML baseline.
+- The current branch contains a real exact two-step breakthrough, but the strongest `4x` evidence still comes from `espresso-multitoken-probe` on the echo checkpoint family.
+- `espresso-multitoken-probe` hardcodes `makeEchoRecurrentGenerationWeights(...)`, so the current public claim does not yet have real-checkpoint external validity.
+- The branch already has a real generation-weight loader in `GenerationWeights.load(modelPath:)`, so the next step is integration rather than inventing a second checkpoint path.
+- The branch already has CoreML decode benchmarking logic in `GenerationHarnessHardwareTests` and `EspressoBench`; the next step is to reuse that logic inside the standalone probe so ANE and CoreML are measured in one executable and one session.
+- A defensible public claim now needs a one-command reproduction harness, raw result artifacts, and repeated fresh-process medians instead of one favorable run against saved baselines.
+- `RecurrentGenerationWeightStore` now gives the probe a file-based recurrent inference-weight path, and `MultitokenProbeConfiguration` forces the caller to declare whether the run is synthetic `echo` or recurrent-checkpoint based.
+- The new one-command harness (`scripts/reproduce_exact_4x.sh`) built the release probe, regenerated the missing 6-layer CoreML package, and produced five matched same-session ANE/CoreML runs under one executable contract.
+- The reproducible matched same-session result on the explicit `echo` input mode is weaker than the earlier saved-baseline claim: median-of-five exact two-step `1.6341614583333333 ms/token` versus matched CoreML `5.86440625 ms/token`, or about `3.6986413138746621x`.
+- Exactness stayed intact in the reproducibility run: parity matched on all five runs, `committed_exact_tokens/pass` stayed `2`, and `accepted_future_tokens/pass` stayed `1`.
+- The correct public stance from this branch is now narrower: this is a reproducible exact multi-token architectural win on the synthetic echo family, but not yet an honest same-session `4x over CoreML` result.

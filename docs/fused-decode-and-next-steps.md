@@ -754,6 +754,82 @@ Inference:
 - treat this as the current exact single-stream `4x` breakthrough on the branch
 - future-head student work can remain optional follow-on work rather than the forced next step
 
+## 2026-03-10 — One-command same-session reproduction downgrades the public claim to 3.70x on echo
+
+### Hypothesis
+
+The branch needed a tighter publication gate than the original saved-baseline claim: the exact two-step fused-triplet path had to be rerun in the same session against CoreML, under one executable and one timing contract, before the result could be claimed publicly.
+
+### Implementation
+
+Built a reproducibility seam around the existing release probe:
+
+- added `RecurrentGenerationWeightStore` so recurrent inference weights can be loaded from an explicit artifact instead of being hardcoded in the probe
+- added `MultitokenProbeConfiguration` so the probe must declare whether it is running on synthetic `echo` input or a recurrent checkpoint artifact
+- moved the CoreML decode benchmark model into `Espresso` support code so `espresso-multitoken-probe` can benchmark ANE exact control, ANE exact two-step, and CoreML decode from one binary
+- extended `espresso-multitoken-probe` with:
+  - `--input echo|recurrent-checkpoint`
+  - `--recurrent-checkpoint PATH`
+  - `--compare-coreml`
+  - `--coreml-model PATH`
+  - `--generation-model PATH`
+- added `scripts/reproduce_exact_4x.sh` to build the release probe, run fresh-process repeats, capture raw JSON/stderr artifacts, and summarize the ANE/CoreML ratio
+- regenerated the missing CoreML package with `scripts/generate_coreml_model.py --layers 6`
+
+### Verification
+
+- `swift test --filter MultitokenProbeSupportTests`
+- `swift test --filter GenerationHarnessTests`
+- `swift build --product espresso-multitoken-probe`
+- `REPEATS=5 ./scripts/reproduce_exact_4x.sh`
+
+Artifacts:
+
+- results directory: `results/exact-4x-20260310-233438`
+- raw runs: `run-1.json` ... `run-5.json`
+- summary: `results/exact-4x-20260310-233438/summary.txt`
+
+### Measurements
+
+Matched same-session release repro on the explicit `echo` input mode (`warmup=3`, `iterations=20`, `maxNewTokens=8`, `layerCount=6`, fused-triplet control, fused-triplet two-step, ANE RMSNorm+classifier head):
+
+| Run | Control `ms/token` | Two-step `ms/token` | CoreML `ms/token` | Two-step speedup vs CoreML |
+|---|---:|---:|---:|---:|
+| 1 | `2.287279` | `1.735703` | `5.864406` | `3.378692x` |
+| 2 | `2.242737` | `1.805805` | `5.994495` | `3.319570x` |
+| 3 | `2.248893` | `1.493466` | `5.819115` | `3.896382x` |
+| 4 | `2.162018` | `1.431951` | `5.853706` | `4.087925x` |
+| 5 | `2.247073` | `1.634161` | `6.044177` | `3.698641x` |
+
+Median-of-five summary from `scripts/reproduce_exact_4x.sh`:
+
+- exact two-step fused-triplet: `1.6341614583333333 ms/token`
+- exact fused-triplet control: `2.2470729166666668 ms/token`
+- matched CoreML `.cpuAndNeuralEngine`: `5.86440625 ms/token`
+- exact two-step speedup vs matched CoreML: `3.6986413138746621x`
+- committed exact tokens/pass: `2`
+- accepted future tokens/pass: `1`
+- parity status across all runs: `match`
+
+### Interpretation
+
+Measured result:
+
+- the one-command reproduction harness works and produces stable exact same-session results
+- the exact two-step fused-triplet architecture remains clearly faster than the exact one-token recurrent control
+- the public `4x over CoreML` claim does **not** survive the tighter same-session matched rerun on the echo checkpoint family
+
+Inference:
+
+- the earlier `4x` claim was inflated by comparing the probe against saved CoreML baselines rather than a same-session matched rerun
+- the current branch should be described publicly as a reproducible exact multi-token architectural win on the synthetic echo family, with a matched same-session speedup of about `3.70x`, until a stronger real-checkpoint or repeated-`>=4x` result exists
+
+### Decision
+
+- keep the reproducibility harness and the batched verifier-head fast path
+- downgrade the public claim from `4x` to a reproducible exact `3.70x` matched same-session result on the echo family
+- do not publish a broader `4x over CoreML` claim from this branch without new evidence that survives the same-session harness
+
 ## 2026-03-10 — Rejected clustered exact CPU staged head
 
 ### Attempt
