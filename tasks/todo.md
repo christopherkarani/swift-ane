@@ -1,5 +1,6 @@
 # TODO
 
+- [x] Hoist RoPE frequency constants out of the `CPUOps` forward/backward inner loops without changing rotation math or public API.
 - [x] Promote `ebd3c38` from an internal milestone to a public-release surface without changing the measured claim.
 - [x] Rewrite the top-level README so the non-echo exact decode result is the first public benchmark story, with explicit caveats and one-command repro.
 - [x] Add a checked-in benchmark artifact for the non-echo release claim that is stable enough to link publicly.
@@ -32,3 +33,7 @@
   - lead now scopes the performance number to the reproducible non-echo local-artifact benchmark
   - repro notes now state that first-run `coremltools` bootstrap may occur
   - public copy now avoids broader "CoreML in general" wording
+- RoPE CPU hot loop pass:
+  - `Sources/CPUOps/RoPE.swift` now precomputes `freqs` once per `apply()`/`backward()` call
+  - inner loops now iterate `idx in 0..<halfDim` and derive `i = idx * 2`
+  - forward and backward rotation signs remain unchanged
