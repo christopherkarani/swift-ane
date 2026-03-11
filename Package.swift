@@ -73,7 +73,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "EspressoBench",
-            dependencies: ["Espresso", "ANERuntime", "ANETypes", "CPUOps", "MILGenerator"],
+            dependencies: ["Espresso", "ANERuntime", "ANETypes", "CPUOps"],
             path: "Sources/EspressoBench",
             swiftSettings: [.swiftLanguageMode(.v6)],
             linkerSettings: [
