@@ -2362,3 +2362,48 @@ Interpretation:
   - the recurrent ANE kernel/session path itself still collapses to zeros on these non-echo seams
 - The failed debug avenue was reverted from code and kept only as docs/results/memory evidence.
 - Practical implication: the only currently publishable `>=3x` claim on this branch remains the synthetic exact `echo` result until a non-echo hardware path is proven functionally valid.
+
+## 2026-03-11 — Repeated seven-run reruns keep the exact synthetic `echo` claim safely above 3x
+
+What was done:
+- Re-ran the explicit synthetic `echo` harness twice in fresh processes using the same matched ANE/CoreML release script.
+- Kept the public contract strict:
+  - `REPEATS=7`
+  - `WARMUP=3`
+  - `ITERATIONS=20`
+  - `layerCount=6`
+  - fused-triplet one-token control
+  - fused-triplet exact two-step path
+  - ANE fused RMSNorm+classifier head
+  - exact parity required on every run
+
+Measured results:
+- Rerun A (`results/publishable-3x-echo-20260311-042254`):
+  - exact two-step: `1.6220833333333333 ms/token`
+  - exact one-token control: `2.2291848958333333 ms/token`
+  - matched CoreML: `5.805169270833332 ms/token`
+  - speedup vs CoreML: `3.5383781787824304x`
+  - committed exact tokens/pass: `2`
+  - accepted future tokens/pass: `1`
+  - all parity match: `true`
+- Rerun B (`results/publishable-3x-echo-rerun-20260311-042345`):
+  - exact two-step: `1.5657968750000002 ms/token`
+  - exact one-token control: `2.2577682291666665 ms/token`
+  - matched CoreML: `5.730479166666667 ms/token`
+  - speedup vs CoreML: `3.7377633193960738x`
+  - committed exact tokens/pass: `2`
+  - accepted future tokens/pass: `1`
+  - all parity match: `true`
+
+Interpretation:
+- The exact synthetic `echo` claim is now repeated, same-session matched, and safely above the `>=3x` bar on two independent seven-repeat reruns.
+- This is the only publishable `>=3x` scope on the branch right now.
+- Claim text must stay explicit:
+  - synthetic `echo` family
+  - exact parity with the one-token control
+  - matched CoreML rerun in the same harness
+  - not a real checkpoint claim
+
+Reproduction:
+- Use `scripts/reproduce_exact_3x_echo.sh` for the branch’s public `>=3x` repro surface.
+- Keep `scripts/reproduce_exact_4x.sh` as the underlying general matched-harness driver for both `echo` and `recurrent-checkpoint` modes.
