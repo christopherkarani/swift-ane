@@ -199,6 +199,7 @@ control_cv="$(jq -s 'map(.control.median_ms_per_token) | (length) as $n | (add /
 coreml_min_ms="$(jq -s 'map(.coreml.median_ms_per_token) | min' "${valid_runs[@]}")"
 coreml_max_ms="$(jq -s 'map(.coreml.median_ms_per_token) | max' "${valid_runs[@]}")"
 coreml_cv="$(jq -s 'map(.coreml.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "${valid_runs[@]}")"
+speedup_cv="$(jq -s 'map(.two_step_speedup_vs_coreml) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "${valid_runs[@]}")"
 
 {
   echo "results_dir=$RESULTS_DIR"
@@ -324,7 +325,7 @@ if [[ "$all_parity_match" != "true" ]]; then
   gate_warnings="${gate_warnings}PARITY_MISMATCH: not all runs produced matching tokens\n"
 fi
 
-for path_label in two_step control coreml; do
+for path_label in two_step control coreml speedup; do
   cv_var="${path_label}_cv"
   cv_val="${!cv_var}"
   if [[ -n "$cv_val" ]] && jq -e --arg cv "$cv_val" --arg thresh "$CV_THRESHOLD" \
