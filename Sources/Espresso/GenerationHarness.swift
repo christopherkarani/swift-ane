@@ -1057,8 +1057,8 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
                     "futureSidecar layerCount \(futureSidecar.contract.layerCount) does not match requested layerCount \(layerCount)"
                 )
             }
-            futureRMS = GenerationWeightCloner.cloneTensor(futureSidecar.futureRMS)
-            futureClassifier = GenerationWeightCloner.cloneTensor(futureSidecar.futureClassifier)
+            futureRMS = consume futureSidecar.futureRMS
+            futureClassifier = consume futureSidecar.futureClassifier
             hasFutureProposer = true
         } else {
             futureRMS = TensorBuffer(count: ModelConfig.dim, zeroed: true)
