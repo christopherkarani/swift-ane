@@ -218,4 +218,41 @@ jq -s --arg dir "$RESULTS_DIR" '{
   all_parity_match: (all(.[]; .parity_status == "match"))
 }' "$RESULTS_DIR"/run-*.json > "$RESULTS_DIR/summary.json"
 
+# Reproducibility gate: warn on high cross-run variance or parity failure
+CV_THRESHOLD="${CV_THRESHOLD:-0.10}"
+gate_status="pass"
+gate_warnings=""
+
+if [[ "$all_parity_match" != "true" ]]; then
+  gate_status="fail"
+  gate_warnings="${gate_warnings}PARITY_MISMATCH: not all runs produced matching tokens\n"
+fi
+
+for path_label in two_step control coreml; do
+  cv_var="${path_label}_cv"
+  cv_val="${!cv_var}"
+  if [[ -n "$cv_val" ]] && jq -e --arg cv "$cv_val" --arg thresh "$CV_THRESHOLD" \
+    '($cv | tonumber) > ($thresh | tonumber)' <<< 'null' >/dev/null 2>&1; then
+    gate_status="warn"
+    gate_warnings="${gate_warnings}HIGH_CV: ${path_label} CV=${cv_val} exceeds threshold ${CV_THRESHOLD}\n"
+  fi
+done
+
+echo ""
+echo "=== Reproducibility Gate ==="
+echo "status=$gate_status"
+if [[ -n "$gate_warnings" ]]; then
+  printf "%b" "$gate_warnings"
+fi
+echo "cv_threshold=$CV_THRESHOLD"
+echo "==="
+
+{
+  echo "gate_status=$gate_status"
+  echo "cv_threshold=$CV_THRESHOLD"
+  if [[ -n "$gate_warnings" ]]; then
+    printf "%b" "$gate_warnings" | sed 's/^/gate_warning=/'
+  fi
+} >> "$RESULTS_DIR/summary.txt"
+
 echo "Wrote raw JSON, stderr logs, and summary.json to $RESULTS_DIR"
