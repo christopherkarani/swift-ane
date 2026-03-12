@@ -3,6 +3,10 @@
 #include <stdint.h>
 #include <string.h>
 
+#if defined(__aarch64__) || defined(__arm64__)
+#include <arm_neon.h>
+#endif
+
 #include "ane_interop.h"
 
 static bool mul_size_overflow(size_t a, size_t b, size_t *out) {
@@ -517,62 +521,81 @@ bool ane_interop_io_argmax_batch_fp16_spatial(
     {
         const _Float16 *srcF16 = (const _Float16 *)base;
 
+#if defined(__aarch64__) || defined(__arm64__)
+        /*
+         * NEON-vectorized channel-major argmax.
+         * Process 32 spatial lanes as 4 × float16x8_t per channel row.
+         * Branchless: vcgtq_f16 + vbslq for masked conditional update.
+         * Indices tracked as uint16_t (fits vocab ≤ 65535).
+         */
+        if (spatial == 32) {
+            const _Float16 *row0 = srcF16 + (size_t)ch_off * spatialSz;
+
+            float16x8_t bestV0 = vld1q_f16(row0);
+            float16x8_t bestV1 = vld1q_f16(row0 + 8);
+            float16x8_t bestV2 = vld1q_f16(row0 + 16);
+            float16x8_t bestV3 = vld1q_f16(row0 + 24);
+
+            uint16x8_t bestI0 = vdupq_n_u16(0);
+            uint16x8_t bestI1 = vdupq_n_u16(0);
+            uint16x8_t bestI2 = vdupq_n_u16(0);
+            uint16x8_t bestI3 = vdupq_n_u16(0);
+
+            for (int c = 1; c < channels; c++) {
+                const _Float16 *row = srcF16 + (size_t)(ch_off + c) * spatialSz;
+                uint16x8_t cidx = vdupq_n_u16((uint16_t)c);
+
+                float16x8_t v0 = vld1q_f16(row);
+                uint16x8_t gt0 = vcgtq_f16(v0, bestV0);
+                bestV0 = vbslq_f16(gt0, v0, bestV0);
+                bestI0 = vbslq_u16(gt0, cidx, bestI0);
+
+                float16x8_t v1 = vld1q_f16(row + 8);
+                uint16x8_t gt1 = vcgtq_f16(v1, bestV1);
+                bestV1 = vbslq_f16(gt1, v1, bestV1);
+                bestI1 = vbslq_u16(gt1, cidx, bestI1);
+
+                float16x8_t v2 = vld1q_f16(row + 16);
+                uint16x8_t gt2 = vcgtq_f16(v2, bestV2);
+                bestV2 = vbslq_f16(gt2, v2, bestV2);
+                bestI2 = vbslq_u16(gt2, cidx, bestI2);
+
+                float16x8_t v3 = vld1q_f16(row + 24);
+                uint16x8_t gt3 = vcgtq_f16(v3, bestV3);
+                bestV3 = vbslq_f16(gt3, v3, bestV3);
+                bestI3 = vbslq_u16(gt3, cidx, bestI3);
+            }
+
+            /* Store results */
+            _Float16 bvBuf[32];
+            uint16_t biBuf[32];
+            vst1q_f16(bvBuf, bestV0);
+            vst1q_f16(bvBuf + 8, bestV1);
+            vst1q_f16(bvBuf + 16, bestV2);
+            vst1q_f16(bvBuf + 24, bestV3);
+            vst1q_u16(biBuf, bestI0);
+            vst1q_u16(biBuf + 8, bestI1);
+            vst1q_u16(biBuf + 16, bestI2);
+            vst1q_u16(biBuf + 24, bestI3);
+
+            for (int s = 0; s < stream_count; s++) {
+                out_indices[s] = (int)biBuf[s];
+                out_values[s] = (float)bvBuf[s];
+            }
+
+            ok = true;
+            goto cleanup;
+        }
+#endif
+        /* Scalar fallback for non-32 spatial */
         for (int s = 0; s < stream_count; s++) {
             const size_t baseIdx = (size_t)ch_off * spatialSz + (size_t)s;
             const size_t stride = spatialSz;
             int bestIndex = 0;
             _Float16 bestValue = srcF16[baseIdx];
 
-            const _Float16 *cursor = srcF16 + baseIdx + stride;
-            int c = 1;
-
-            /* 8-way unrolled scan per lane */
-            if (channels >= 8) {
-                _Float16 bv0 = srcF16[baseIdx];
-                _Float16 bv1 = srcF16[baseIdx + stride];
-                _Float16 bv2 = srcF16[baseIdx + stride * 2];
-                _Float16 bv3 = srcF16[baseIdx + stride * 3];
-                _Float16 bv4 = srcF16[baseIdx + stride * 4];
-                _Float16 bv5 = srcF16[baseIdx + stride * 5];
-                _Float16 bv6 = srcF16[baseIdx + stride * 6];
-                _Float16 bv7 = srcF16[baseIdx + stride * 7];
-                int bi0 = 0, bi1 = 1, bi2 = 2, bi3 = 3;
-                int bi4 = 4, bi5 = 5, bi6 = 6, bi7 = 7;
-
-                c = 8;
-                cursor = srcF16 + baseIdx + stride * 8;
-                for (; c + 7 < channels; c += 8) {
-                    _Float16 v0 = cursor[0];
-                    _Float16 v1 = cursor[stride];
-                    _Float16 v2 = cursor[stride * 2];
-                    _Float16 v3 = cursor[stride * 3];
-                    _Float16 v4 = cursor[stride * 4];
-                    _Float16 v5 = cursor[stride * 5];
-                    _Float16 v6 = cursor[stride * 6];
-                    _Float16 v7 = cursor[stride * 7];
-                    if (v0 > bv0) { bv0 = v0; bi0 = c; }
-                    if (v1 > bv1) { bv1 = v1; bi1 = c + 1; }
-                    if (v2 > bv2) { bv2 = v2; bi2 = c + 2; }
-                    if (v3 > bv3) { bv3 = v3; bi3 = c + 3; }
-                    if (v4 > bv4) { bv4 = v4; bi4 = c + 4; }
-                    if (v5 > bv5) { bv5 = v5; bi5 = c + 5; }
-                    if (v6 > bv6) { bv6 = v6; bi6 = c + 6; }
-                    if (v7 > bv7) { bv7 = v7; bi7 = c + 7; }
-                    cursor += stride * 8;
-                }
-
-                bestValue = bv0; bestIndex = bi0;
-                if (bv1 > bestValue || (bv1 == bestValue && bi1 < bestIndex)) { bestValue = bv1; bestIndex = bi1; }
-                if (bv2 > bestValue || (bv2 == bestValue && bi2 < bestIndex)) { bestValue = bv2; bestIndex = bi2; }
-                if (bv3 > bestValue || (bv3 == bestValue && bi3 < bestIndex)) { bestValue = bv3; bestIndex = bi3; }
-                if (bv4 > bestValue || (bv4 == bestValue && bi4 < bestIndex)) { bestValue = bv4; bestIndex = bi4; }
-                if (bv5 > bestValue || (bv5 == bestValue && bi5 < bestIndex)) { bestValue = bv5; bestIndex = bi5; }
-                if (bv6 > bestValue || (bv6 == bestValue && bi6 < bestIndex)) { bestValue = bv6; bestIndex = bi6; }
-                if (bv7 > bestValue || (bv7 == bestValue && bi7 < bestIndex)) { bestValue = bv7; bestIndex = bi7; }
-            }
-
-            for (; c < channels; c++, cursor += stride) {
-                _Float16 value = *cursor;
+            for (int c = 1; c < channels; c++) {
+                _Float16 value = srcF16[baseIdx + (size_t)c * stride];
                 if (value > bestValue) { bestValue = value; bestIndex = c; }
             }
 

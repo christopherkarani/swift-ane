@@ -1896,6 +1896,173 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         }
     }
 
+    func test_batched_step_component_timing_on_hardware() throws {
+        try requireGenerationHardware()
+
+        let layerCount = 6
+        let streamCount = 32
+        let dim = ModelConfig.dim
+        let laneSpatial = 32
+        let iterations = 100
+
+        let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount)
+        let tripletCount = layerCount / 3
+
+        var tripletSessions = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+            count: tripletCount,
+            throwingInitializer: { tripletIdx in
+                let base = tripletIdx * 3
+                return try RWKVStyleFusedThreeLayerSession(
+                    weights0: weights.layers[base],
+                    weights1: weights.layers[base + 1],
+                    weights2: weights.layers[base + 2],
+                    laneSpatial: laneSpatial
+                )
+            }
+        )
+
+        let head = try ANEGenerationRMSNormClassifierHead(
+            rmsFinal: weights.rmsFinal,
+            classifierWeights: weights.embedding,
+            vocabSize: weights.vocabSize,
+            laneSpatial: laneSpatial
+        )
+
+        let t0xIn = tripletSessions[0].handles.xIn
+        let t0xOut = tripletSessions[0].handles.xOut
+        let t0sIn0 = tripletSessions[0].handles.stateIn0
+        let t0sIn1 = tripletSessions[0].handles.stateIn1
+        let t0sIn2 = tripletSessions[0].handles.stateIn2
+        let t0sOut0 = tripletSessions[0].handles.stateOut0
+        let t0sOut1 = tripletSessions[0].handles.stateOut1
+        let t0sOut2 = tripletSessions[0].handles.stateOut2
+        let t1xIn = tripletSessions[1].handles.xIn
+        let t1xOut = tripletSessions[1].handles.xOut
+        let t1sIn0 = tripletSessions[1].handles.stateIn0
+        let t1sIn1 = tripletSessions[1].handles.stateIn1
+        let t1sIn2 = tripletSessions[1].handles.stateIn2
+        let t1sOut0 = tripletSessions[1].handles.stateOut0
+        let t1sOut1 = tripletSessions[1].handles.stateOut1
+        let t1sOut2 = tripletSessions[1].handles.stateOut2
+        let headIn = head.inputSurface
+        let headOut = head.outputSurface
+        let vocabSize = weights.vocabSize
+
+        var tokens = Array(repeating: UInt16(0), count: streamCount)
+
+        // Warmup
+        for _ in 0..<5 {
+            try batchedTokenStep(
+                tokens: &tokens, streamCount: streamCount,
+                embedding: weights.embedding, dim: dim, laneSpatial: laneSpatial,
+                tripletCount: tripletCount, tripletSessions: &tripletSessions,
+                t0xIn: t0xIn, t0xOut: t0xOut,
+                t0sIn0: t0sIn0, t0sIn1: t0sIn1, t0sIn2: t0sIn2,
+                t0sOut0: t0sOut0, t0sOut1: t0sOut1, t0sOut2: t0sOut2,
+                t1xIn: t1xIn, t1xOut: t1xOut,
+                t1sIn0: t1sIn0, t1sIn1: t1sIn1, t1sIn2: t1sIn2,
+                t1sOut0: t1sOut0, t1sOut1: t1sOut1, t1sOut2: t1sOut2,
+                headIn: headIn, headOut: headOut,
+                head: head, vocabSize: vocabSize
+            )
+        }
+
+        // Per-component timing
+        var embedUs: [Double] = []
+        var evalT0Us: [Double] = []
+        var stateT0Us: [Double] = []
+        var xferUs: [Double] = []
+        var evalT1Us: [Double] = []
+        var stateT1Us: [Double] = []
+        var headCopyUs: [Double] = []
+        var evalHeadUs: [Double] = []
+        var argmaxUs: [Double] = []
+
+        for _ in 0..<iterations {
+            var t = GenerationClock.now()
+
+            // Embed write
+            try weights.embedding.withUnsafePointer { embPtr in
+                try tokens.withUnsafeBufferPointer { tokenBuf in
+                    try SurfaceIO.writeEmbeddingBatchFP16(
+                        to: t0xIn, channelOffset: 0, spatial: laneSpatial,
+                        embeddingTable: embPtr, dim: dim,
+                        tokenIDs: tokenBuf.baseAddress!, streamCount: streamCount
+                    )
+                }
+            }
+            var t2 = GenerationClock.now(); embedUs.append(machMicroseconds(t2 - t)); t = t2
+
+            // Eval T0
+            try tripletSessions[0].kernels.step.eval()
+            t2 = GenerationClock.now(); evalT0Us.append(machMicroseconds(t2 - t)); t = t2
+
+            // State T0 copies
+            try SurfaceIO.copyFP16(dst: t0sIn0, dstChannelOffset: 0, src: t0sOut0, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            try SurfaceIO.copyFP16(dst: t0sIn1, dstChannelOffset: 0, src: t0sOut1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            try SurfaceIO.copyFP16(dst: t0sIn2, dstChannelOffset: 0, src: t0sOut2, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            t2 = GenerationClock.now(); stateT0Us.append(machMicroseconds(t2 - t)); t = t2
+
+            // Inter-triplet transfer
+            try SurfaceIO.copyFP16(dst: t1xIn, dstChannelOffset: 0, src: t0xOut, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            t2 = GenerationClock.now(); xferUs.append(machMicroseconds(t2 - t)); t = t2
+
+            // Eval T1
+            try tripletSessions[1].kernels.step.eval()
+            t2 = GenerationClock.now(); evalT1Us.append(machMicroseconds(t2 - t)); t = t2
+
+            // State T1 copies
+            try SurfaceIO.copyFP16(dst: t1sIn0, dstChannelOffset: 0, src: t1sOut0, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            try SurfaceIO.copyFP16(dst: t1sIn1, dstChannelOffset: 0, src: t1sOut1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            try SurfaceIO.copyFP16(dst: t1sIn2, dstChannelOffset: 0, src: t1sOut2, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            t2 = GenerationClock.now(); stateT1Us.append(machMicroseconds(t2 - t)); t = t2
+
+            // Head copy
+            try SurfaceIO.copyFP16(dst: headIn, dstChannelOffset: 0, src: t1xOut, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            t2 = GenerationClock.now(); headCopyUs.append(machMicroseconds(t2 - t)); t = t2
+
+            // Eval head
+            try head.kernelSet.rmsNormClassifier.eval()
+            t2 = GenerationClock.now(); evalHeadUs.append(machMicroseconds(t2 - t)); t = t2
+
+            // Argmax
+            let argmaxResults = try SurfaceIO.argmaxBatchFP16Spatial(
+                from: headOut, channelOffset: 0, spatial: laneSpatial,
+                channels: vocabSize, streamCount: streamCount
+            )
+            for i in 0..<streamCount { tokens[i] = UInt16(argmaxResults[i].index) }
+            t2 = GenerationClock.now(); argmaxUs.append(machMicroseconds(t2 - t))
+        }
+
+        func median(_ arr: [Double]) -> Double {
+            let sorted = arr.sorted()
+            let n = sorted.count
+            return n % 2 == 0 ? (sorted[n/2 - 1] + sorted[n/2]) / 2.0 : sorted[n/2]
+        }
+
+        let totalUs = median(embedUs) + median(evalT0Us) + median(stateT0Us) + median(xferUs) +
+            median(evalT1Us) + median(stateT1Us) + median(headCopyUs) + median(evalHeadUs) + median(argmaxUs)
+
+        print("Component timing (median µs, \(streamCount) streams, \(iterations) iterations):")
+        print("  embed_write: \(String(format: "%.1f", median(embedUs))) µs (\(String(format: "%.1f", median(embedUs) / totalUs * 100))%)")
+        print("  eval_T0:     \(String(format: "%.1f", median(evalT0Us))) µs (\(String(format: "%.1f", median(evalT0Us) / totalUs * 100))%)")
+        print("  state_T0:    \(String(format: "%.1f", median(stateT0Us))) µs (\(String(format: "%.1f", median(stateT0Us) / totalUs * 100))%)")
+        print("  xfer_T0T1:   \(String(format: "%.1f", median(xferUs))) µs (\(String(format: "%.1f", median(xferUs) / totalUs * 100))%)")
+        print("  eval_T1:     \(String(format: "%.1f", median(evalT1Us))) µs (\(String(format: "%.1f", median(evalT1Us) / totalUs * 100))%)")
+        print("  state_T1:    \(String(format: "%.1f", median(stateT1Us))) µs (\(String(format: "%.1f", median(stateT1Us) / totalUs * 100))%)")
+        print("  head_copy:   \(String(format: "%.1f", median(headCopyUs))) µs (\(String(format: "%.1f", median(headCopyUs) / totalUs * 100))%)")
+        print("  eval_head:   \(String(format: "%.1f", median(evalHeadUs))) µs (\(String(format: "%.1f", median(evalHeadUs) / totalUs * 100))%)")
+        print("  argmax:      \(String(format: "%.1f", median(argmaxUs))) µs (\(String(format: "%.1f", median(argmaxUs) / totalUs * 100))%)")
+        print("  TOTAL:       \(String(format: "%.1f", totalUs)) µs")
+    }
+
+    private func machMicroseconds(_ deltaTicks: UInt64) -> Double {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        let nanos = Double(deltaTicks) * Double(info.numer) / Double(info.denom)
+        return nanos / 1_000.0
+    }
+
     private func machMilliseconds(_ deltaTicks: UInt64) -> Double {
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
