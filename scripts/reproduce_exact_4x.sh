@@ -130,6 +130,9 @@ trap cleanup_on_interrupt INT TERM
 echo "Building release probe into $SCRATCH_PATH"
 swift build -c release --product espresso-multitoken-probe --scratch-path "$SCRATCH_PATH"
 
+# Record probe binary hash for reproducibility
+echo "probe_sha256=$(shasum -a 256 "$PROBE" | awk '{print $1}')" >> "$RESULTS_DIR/metadata.txt"
+
 # Verify jq is available (required for aggregation)
 if ! command -v jq &>/dev/null; then
   echo "FATAL: jq is required but not found on PATH" >&2
