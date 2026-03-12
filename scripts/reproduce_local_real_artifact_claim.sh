@@ -31,6 +31,12 @@ CONTROL_BACKEND="${CONTROL_BACKEND:-identity-zero-trunk}"
 TWO_STEP_BACKEND="${TWO_STEP_BACKEND:-identity-zero-trunk}"
 
 mkdir -p "$RESULTS_DIR"
+claim_start_epoch=$(date +%s)
+
+echo "=== Espresso Claim Reproduction ==="
+echo "timestamp=$(date -Iseconds)"
+echo "results_dir=$RESULTS_DIR"
+echo ""
 
 echo "Building local text dataset into $DATASET_PATH"
 swift run espresso-train \
@@ -132,4 +138,6 @@ LAYER_COUNT="$LAYER_COUNT" \
       echo "harness_$gate_line"
     fi
   fi
+  claim_elapsed_s=$(( $(date +%s) - claim_start_epoch ))
+  echo "claim_total_elapsed_s=$claim_elapsed_s"
 } | tee "$RESULTS_DIR/claim-summary.txt"
