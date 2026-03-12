@@ -91,6 +91,13 @@ mkdir -p "$RESULTS_DIR"
   if [[ -n "$GENERATION_MODEL" ]]; then
     echo "generation_model_sha256=$(shasum -a 256 "$GENERATION_MODEL" | awk '{print $1}')"
   fi
+  # System environment snapshot for regression diagnosis
+  echo "chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+  echo "hw_model=$(sysctl -n hw.model 2>/dev/null || echo unknown)"
+  echo "physical_memory_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
+  echo "ncpu=$(sysctl -n hw.ncpu 2>/dev/null || echo unknown)"
+  echo "thermal_pressure=$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
+  echo "load_average=$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
 } > "$RESULTS_DIR/metadata.txt"
 
 echo "Building release probe into $SCRATCH_PATH"
