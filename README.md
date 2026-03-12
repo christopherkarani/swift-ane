@@ -2,7 +2,6 @@
   <img src="docs/assets/banner.svg" alt="Espresso Banner" width="800">
 </p>
 
-# Espresso
 
 Backpropagation and exact token generation on Apple's Neural Engine via reverse-engineered private APIs.
 
