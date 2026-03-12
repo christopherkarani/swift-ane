@@ -141,6 +141,10 @@ LAYER_COUNT="$LAYER_COUNT" \
   if [[ -f "$PUBLIC_RESULTS_DIR/summary.json" ]]; then
     echo "harness_gate_status=$(jq -r '.reproducibility.gate_status // "unknown"' "$PUBLIC_RESULTS_DIR/summary.json")"
     echo "harness_outlier_count=$(jq -r '.reproducibility.outlier_count // 0' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_outlier_two_step=$(jq -r '.reproducibility.outlier_detail.two_step.count // 0' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_outlier_control=$(jq -r '.reproducibility.outlier_detail.control.count // 0' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_outlier_coreml=$(jq -r '.reproducibility.outlier_detail.coreml.count // 0' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_outlier_speedup=$(jq -r '.reproducibility.outlier_detail.speedup.count // 0' "$PUBLIC_RESULTS_DIR/summary.json")"
   elif [[ -f "$PUBLIC_RESULTS_DIR/summary.txt" ]]; then
     gate_line="$(grep '^gate_status=' "$PUBLIC_RESULTS_DIR/summary.txt" || true)"
     if [[ -n "$gate_line" ]]; then
