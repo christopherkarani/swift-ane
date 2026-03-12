@@ -456,30 +456,61 @@ echo "==="
   fi
 } >> "$RESULTS_DIR/summary.txt"
 
-# Outlier detection: flag runs outside 1.5x IQR (Tukey fences)
+# Outlier detection: flag runs outside 1.5x IQR (Tukey fences) across all paths
 outlier_count=0
-outlier_runs=""
-if [[ ${#valid_runs[@]} -ge 4 ]]; then
-  outlier_info="$(jq -s '
-    [.[] | {file: input_filename, val: .two_step.median_ms_per_token}] |
+outlier_json="{}"
+
+tukey_detect() {
+  local label="$1" jq_path="$2"
+  jq -s --arg label "$label" "
+    [.[] | {file: input_filename, val: ${jq_path}}] |
+    [.[] | select(.val != null)] |
     sort_by(.val) |
-    (length) as $n |
-    (.[($n / 4 | floor)].val) as $q1 |
-    (.[($n * 3 / 4 | floor)].val) as $q3 |
-    ($q3 - $q1) as $iqr |
-    ($q1 - 1.5 * $iqr) as $lo |
-    ($q3 + 1.5 * $iqr) as $hi |
-    {q1: $q1, q3: $q3, iqr: $iqr, lo_fence: $lo, hi_fence: $hi,
-     outliers: [.[] | select(.val < $lo or .val > $hi)]}
-  ' "${valid_runs[@]}")"
-  outlier_count="$(echo "$outlier_info" | jq '.outliers | length')"
+    if length < 4 then {label: \$label, count: 0, outliers: [], fences: null}
+    else
+      (length) as \$n |
+      (.[\$n / 4 | floor].val) as \$q1 |
+      (.[\$n * 3 / 4 | floor].val) as \$q3 |
+      (\$q3 - \$q1) as \$iqr |
+      (\$q1 - 1.5 * \$iqr) as \$lo |
+      (\$q3 + 1.5 * \$iqr) as \$hi |
+      {label: \$label, count: ([.[] | select(.val < \$lo or .val > \$hi)] | length),
+       outliers: [.[] | select(.val < \$lo or .val > \$hi)],
+       fences: {q1: \$q1, q3: \$q3, iqr: \$iqr, lo: \$lo, hi: \$hi}}
+    end
+  " "${valid_runs[@]}"
+}
+
+if [[ ${#valid_runs[@]} -ge 4 ]]; then
+  two_step_outliers="$(tukey_detect two_step '.two_step.median_ms_per_token')"
+  control_outliers="$(tukey_detect control '.control.median_ms_per_token')"
+  coreml_outliers="$(tukey_detect coreml '.coreml.median_ms_per_token')"
+  speedup_outliers="$(tukey_detect speedup '.two_step_speedup_vs_coreml')"
+
+  outlier_count=0
+  for oj in "$two_step_outliers" "$control_outliers" "$coreml_outliers" "$speedup_outliers"; do
+    c="$(echo "$oj" | jq '.count')"
+    outlier_count=$((outlier_count + c))
+  done
+
+  outlier_json="$(jq -n \
+    --argjson ts "$two_step_outliers" \
+    --argjson ct "$control_outliers" \
+    --argjson cm "$coreml_outliers" \
+    --argjson sp "$speedup_outliers" \
+    '{two_step: $ts, control: $ct, coreml: $cm, speedup: $sp}')"
+
   if [[ $outlier_count -gt 0 ]]; then
-    outlier_runs="$(echo "$outlier_info" | jq -r '.outliers[] | "\(.file): \(.val) ms/token"')"
     echo ""
     echo "=== Outlier Detection ==="
-    echo "outlier_count=$outlier_count"
-    echo "$outlier_runs"
-    echo "fences: $(echo "$outlier_info" | jq -r '"[\(.lo_fence), \(.hi_fence)]"')"
+    echo "total_outlier_count=$outlier_count"
+    for path_name in two_step control coreml speedup; do
+      path_count="$(echo "$outlier_json" | jq --arg p "$path_name" '.[$p].count')"
+      if [[ "$path_count" -gt 0 ]]; then
+        echo "${path_name}_outliers=$path_count"
+        echo "$outlier_json" | jq -r --arg p "$path_name" '.[$p].outliers[] | "  \(.file): \(.val)"'
+      fi
+    done
     echo "==="
   fi
 fi
@@ -495,8 +526,8 @@ gate_json="$(jq -n \
   --argjson outlier_count "$outlier_count" \
   --argjson warnings "$gate_warnings_json" \
   '{gate_status: $status, cv_threshold: ($cv_thresh | tonumber), outlier_count: $outlier_count, warnings: $warnings}')"
-if [[ ${#valid_runs[@]} -ge 4 && -n "$outlier_info" ]]; then
-  gate_json="$(echo "$gate_json" | jq --argjson oi "$outlier_info" '. + {outlier_fences: {lo: $oi.lo_fence, hi: $oi.hi_fence, q1: $oi.q1, q3: $oi.q3, iqr: $oi.iqr}}')"
+if [[ ${#valid_runs[@]} -ge 4 ]]; then
+  gate_json="$(echo "$gate_json" | jq --argjson od "$outlier_json" '. + {outlier_detail: $od}')"
 fi
 jq --argjson gate "$gate_json" '. + {reproducibility: $gate}' "$RESULTS_DIR/summary.json" > "$RESULTS_DIR/summary.json.tmp" \
   && mv "$RESULTS_DIR/summary.json.tmp" "$RESULTS_DIR/summary.json"
