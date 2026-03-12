@@ -129,6 +129,24 @@ final class MultitokenProbeSupportTests: XCTestCase {
         XCTAssertEqual(p50, 5.0, accuracy: 1e-12)
     }
 
+    func test_median_returns_zero_for_empty_array() {
+        XCTAssertEqual(GenerationMetrics.median([]), 0)
+    }
+
+    func test_median_even_count_returns_average_of_two_middle() {
+        // 4 elements: sorted = [2,4,6,8], average of middle two = (4+6)/2 = 5.0
+        let values = [8.0, 2.0, 6.0, 4.0]
+        let med = GenerationMetrics.median(values)
+        XCTAssertEqual(med, 5.0, accuracy: 1e-12)
+    }
+
+    func test_percentile_interpolation_at_25th() {
+        // 5 values: [1,2,3,4,5], rank = 0.25*4 = 1.0 -> exactly index 1 = 2.0
+        let values = [1.0, 2.0, 3.0, 4.0, 5.0]
+        let p25 = GenerationMetrics.percentile(values, at: 25)
+        XCTAssertEqual(p25, 2.0, accuracy: 1e-12)
+    }
+
     // MARK: - Helpers
 
     private func makeTestRecurrentWeights(
