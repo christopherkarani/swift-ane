@@ -249,11 +249,14 @@ jq -s \
   --argjson requested_repeats "$REPEATS" \
   --argjson failed "$failed_runs" \
   --argjson total_elapsed_s "$total_benchmark_elapsed" \
+  --arg hw_model "$(sysctl -n hw.model 2>/dev/null || echo unknown)" \
+  --arg load_avg "$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)" \
 '{
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
   git_branch: $branch,
+  host: {hw_model: $hw_model, load_average: $load_avg},
   benchmark_contract: {
     input_mode: $input_mode,
     control_backend: $control_backend,
