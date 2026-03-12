@@ -1594,6 +1594,289 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         }
     }
 
+    func test_batched_multistream_scaling_reports_aggregate_throughput_on_hardware() throws {
+        try requireGenerationHardware()
+
+        let prompt: [UInt16] = [0]
+        let warmup = 3
+        let iterations = 20
+        let maxNewTokens = 8
+        let streamCounts = [1, 2, 3, 4, 5, 6]
+        let modelPath = "benchmarks/models/transformer_6layer.mlpackage"
+
+        let batched = try benchmarkBatchedRecurrentGeneration(
+            layerCount: 6,
+            promptTokens: prompt,
+            maxNewTokens: maxNewTokens,
+            warmup: warmup,
+            iterations: iterations,
+            streamCounts: streamCounts
+        )
+
+        let concurrent = try benchmarkConcurrentRecurrentEchoGeneration(
+            layerCount: 6,
+            promptTokens: prompt,
+            maxNewTokens: maxNewTokens,
+            warmup: warmup,
+            iterations: iterations,
+            streamCounts: streamCounts,
+            outputHeadBackend: .aneRMSNormClassifier,
+            trunkBackend: .fusedThreeLayerTriplets,
+            useDirectTokenSelection: true
+        )
+
+        let coreml = try benchmarkConcurrentCoreMLGeneration(
+            modelPath: modelPath,
+            promptTokens: prompt,
+            maxNewTokens: maxNewTokens,
+            warmup: warmup,
+            iterations: iterations,
+            streamCounts: streamCounts
+        )
+
+        XCTAssertEqual(batched.samples.map(\.streamCount), streamCounts)
+        XCTAssertTrue(batched.samples.allSatisfy { $0.medianMsPerToken > 0 })
+
+        for idx in 0..<streamCounts.count {
+            let bSample = batched.samples[idx]
+            let aSample = concurrent.samples[idx]
+            let cSample = coreml.samples[idx]
+            print(
+                """
+                batched ane streams=\(bSample.streamCount) median_ms_token=\(bSample.medianMsPerToken) aggregate_tps=\(bSample.aggregateTokensPerSecond) per_stream_tps=\(bSample.perStreamTokensPerSecond) compile=\(bSample.compileTimeMs) round_ms=\(bSample.medianRoundLatencyMs)
+                concurrent ane streams=\(aSample.streamCount) median_ms_token=\(aSample.medianMsPerToken) aggregate_tps=\(aSample.aggregateTokensPerSecond) per_stream_tps=\(aSample.perStreamTokensPerSecond) compile=\(aSample.compileTimeMs) round_ms=\(aSample.medianRoundLatencyMs)
+                concurrent coreml streams=\(cSample.streamCount) median_ms_token=\(cSample.medianMsPerToken) aggregate_tps=\(cSample.aggregateTokensPerSecond) per_stream_tps=\(cSample.perStreamTokensPerSecond) compile=\(cSample.compileTimeMs) round_ms=\(cSample.medianRoundLatencyMs)
+                """
+            )
+        }
+    }
+
+    private func benchmarkBatchedRecurrentGeneration(
+        layerCount: Int,
+        promptTokens: [UInt16],
+        maxNewTokens: Int,
+        warmup: Int,
+        iterations: Int,
+        streamCounts: [Int]
+    ) throws -> ConcurrentGenerationScalingReport {
+        let dim = ModelConfig.dim
+        let laneSpatial = 32
+        var samples: [ConcurrentGenerationScalingSample] = []
+        samples.reserveCapacity(streamCounts.count)
+
+        for streamCount in streamCounts {
+            precondition(streamCount <= laneSpatial)
+
+            let compileStart = GenerationClock.now()
+
+            let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount)
+            let tripletCount = layerCount / 3
+
+            var tripletSessions = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+                count: tripletCount,
+                throwingInitializer: { tripletIdx in
+                    let base = tripletIdx * 3
+                    return try RWKVStyleFusedThreeLayerSession(
+                        weights0: weights.layers[base],
+                        weights1: weights.layers[base + 1],
+                        weights2: weights.layers[base + 2],
+                        laneSpatial: laneSpatial
+                    )
+                }
+            )
+
+            let head = try ANEGenerationRMSNormClassifierHead(
+                rmsFinal: weights.rmsFinal,
+                classifierWeights: weights.embedding,
+                vocabSize: weights.vocabSize,
+                laneSpatial: laneSpatial
+            )
+
+            let vocabSize = weights.vocabSize
+            let activationBuf = TensorBuffer(count: dim, zeroed: true)
+
+            let compileTimeMs = machMilliseconds(GenerationClock.now() - compileStart)
+
+            // Extract surface refs for direct access (IOSurfaceRef is Copyable)
+            let t0xIn = tripletSessions[0].handles.xIn
+            let t0xOut = tripletSessions[0].handles.xOut
+            let t0sIn0 = tripletSessions[0].handles.stateIn0
+            let t0sIn1 = tripletSessions[0].handles.stateIn1
+            let t0sIn2 = tripletSessions[0].handles.stateIn2
+            let t0sOut0 = tripletSessions[0].handles.stateOut0
+            let t0sOut1 = tripletSessions[0].handles.stateOut1
+            let t0sOut2 = tripletSessions[0].handles.stateOut2
+            let t1xIn = tripletCount > 1 ? tripletSessions[1].handles.xIn : t0xIn
+            let t1xOut = tripletCount > 1 ? tripletSessions[1].handles.xOut : t0xOut
+            let t1sIn0 = tripletCount > 1 ? tripletSessions[1].handles.stateIn0 : t0sIn0
+            let t1sIn1 = tripletCount > 1 ? tripletSessions[1].handles.stateIn1 : t0sIn1
+            let t1sIn2 = tripletCount > 1 ? tripletSessions[1].handles.stateIn2 : t0sIn2
+            let t1sOut0 = tripletCount > 1 ? tripletSessions[1].handles.stateOut0 : t0sOut0
+            let t1sOut1 = tripletCount > 1 ? tripletSessions[1].handles.stateOut1 : t0sOut1
+            let t1sOut2 = tripletCount > 1 ? tripletSessions[1].handles.stateOut2 : t0sOut2
+            let headIn = head.inputSurface
+            let headOut = head.outputSurface
+
+            // Warmup
+            for _ in 0..<warmup {
+                for tIdx in 0..<tripletCount { try tripletSessions[tIdx].reset() }
+                var tokens = Array(repeating: promptTokens[0], count: streamCount)
+                for _ in 0..<maxNewTokens {
+                    try batchedTokenStep(
+                        tokens: &tokens,
+                        streamCount: streamCount,
+                        activationBuf: activationBuf,
+                        embedding: weights.embedding,
+                        dim: dim,
+                        laneSpatial: laneSpatial,
+                        tripletCount: tripletCount,
+                        tripletSessions: &tripletSessions,
+                        t0xIn: t0xIn, t0xOut: t0xOut,
+                        t0sIn0: t0sIn0, t0sIn1: t0sIn1, t0sIn2: t0sIn2,
+                        t0sOut0: t0sOut0, t0sOut1: t0sOut1, t0sOut2: t0sOut2,
+                        t1xIn: t1xIn, t1xOut: t1xOut,
+                        t1sIn0: t1sIn0, t1sIn1: t1sIn1, t1sIn2: t1sIn2,
+                        t1sOut0: t1sOut0, t1sOut1: t1sOut1, t1sOut2: t1sOut2,
+                        headIn: headIn, headOut: headOut,
+                        head: head,
+                        vocabSize: vocabSize
+                    )
+                }
+            }
+
+            // Timed iterations
+            var roundLatenciesMs: [Double] = []
+            roundLatenciesMs.reserveCapacity(iterations)
+            for _ in 0..<iterations {
+                for tIdx in 0..<tripletCount { try tripletSessions[tIdx].reset() }
+                var tokens = Array(repeating: promptTokens[0], count: streamCount)
+
+                let start = GenerationClock.now()
+                for _ in 0..<maxNewTokens {
+                    try batchedTokenStep(
+                        tokens: &tokens,
+                        streamCount: streamCount,
+                        activationBuf: activationBuf,
+                        embedding: weights.embedding,
+                        dim: dim,
+                        laneSpatial: laneSpatial,
+                        tripletCount: tripletCount,
+                        tripletSessions: &tripletSessions,
+                        t0xIn: t0xIn, t0xOut: t0xOut,
+                        t0sIn0: t0sIn0, t0sIn1: t0sIn1, t0sIn2: t0sIn2,
+                        t0sOut0: t0sOut0, t0sOut1: t0sOut1, t0sOut2: t0sOut2,
+                        t1xIn: t1xIn, t1xOut: t1xOut,
+                        t1sIn0: t1sIn0, t1sIn1: t1sIn1, t1sIn2: t1sIn2,
+                        t1sOut0: t1sOut0, t1sOut1: t1sOut1, t1sOut2: t1sOut2,
+                        headIn: headIn, headOut: headOut,
+                        head: head,
+                        vocabSize: vocabSize
+                    )
+                }
+                roundLatenciesMs.append(machMilliseconds(GenerationClock.now() - start))
+            }
+
+            samples.append(
+                ConcurrentGenerationScalingSample(
+                    streamCount: streamCount,
+                    tokensPerStream: maxNewTokens,
+                    compileTimeMs: compileTimeMs,
+                    roundLatenciesMs: roundLatenciesMs
+                )
+            )
+        }
+
+        return ConcurrentGenerationScalingReport(
+            label: "ANE Batched Recurrent",
+            promptLength: promptTokens.count,
+            maxNewTokens: maxNewTokens,
+            warmupCount: warmup,
+            iterationCount: iterations,
+            samples: samples
+        )
+    }
+
+    private func batchedTokenStep(
+        tokens: inout [UInt16],
+        streamCount: Int,
+        activationBuf: borrowing TensorBuffer,
+        embedding: borrowing TensorBuffer,
+        dim: Int,
+        laneSpatial: Int,
+        tripletCount: Int,
+        tripletSessions: inout LayerStorage<RWKVStyleFusedThreeLayerSession>,
+        t0xIn: IOSurfaceRef, t0xOut: IOSurfaceRef,
+        t0sIn0: IOSurfaceRef, t0sIn1: IOSurfaceRef, t0sIn2: IOSurfaceRef,
+        t0sOut0: IOSurfaceRef, t0sOut1: IOSurfaceRef, t0sOut2: IOSurfaceRef,
+        t1xIn: IOSurfaceRef, t1xOut: IOSurfaceRef,
+        t1sIn0: IOSurfaceRef, t1sIn1: IOSurfaceRef, t1sIn2: IOSurfaceRef,
+        t1sOut0: IOSurfaceRef, t1sOut1: IOSurfaceRef, t1sOut2: IOSurfaceRef,
+        headIn: IOSurfaceRef, headOut: IOSurfaceRef,
+        head: ANEGenerationRMSNormClassifierHead,
+        vocabSize: Int
+    ) throws {
+        // 1. Write each stream's embedding to its spatial lane in triplet 0's xIn
+        for streamIdx in 0..<streamCount {
+            let token = tokens[streamIdx]
+            activationBuf.withUnsafeMutablePointer { dst in
+                embedding.withUnsafePointer { embPtr in
+                    let base = Int(token) * dim
+                    for d in 0..<dim { dst[d] = embPtr[base + d] }
+                }
+            }
+            try activationBuf.withUnsafeBufferPointer { src in
+                try SurfaceIO.writeFP16SpatialSlice(
+                    to: t0xIn,
+                    channelOffset: 0,
+                    spatialIndex: streamIdx,
+                    spatial: laneSpatial,
+                    data: src,
+                    channels: dim
+                )
+            }
+        }
+
+        // 2. Eval triplet 0 (processes all spatial lanes simultaneously)
+        try tripletSessions[0].kernels.step.eval()
+
+        // 3. Copy state for triplet 0 (all lanes at once)
+        try SurfaceIO.copyFP16(dst: t0sIn0, dstChannelOffset: 0, src: t0sOut0, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        try SurfaceIO.copyFP16(dst: t0sIn1, dstChannelOffset: 0, src: t0sOut1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        try SurfaceIO.copyFP16(dst: t0sIn2, dstChannelOffset: 0, src: t0sOut2, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+
+        // 4. Transfer activations between triplets via surface-to-surface copy
+        if tripletCount > 1 {
+            try SurfaceIO.copyFP16(dst: t1xIn, dstChannelOffset: 0, src: t0xOut, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+
+            // 5. Eval triplet 1
+            try tripletSessions[1].kernels.step.eval()
+
+            // 6. Copy state for triplet 1
+            try SurfaceIO.copyFP16(dst: t1sIn0, dstChannelOffset: 0, src: t1sOut0, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            try SurfaceIO.copyFP16(dst: t1sIn1, dstChannelOffset: 0, src: t1sOut1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+            try SurfaceIO.copyFP16(dst: t1sIn2, dstChannelOffset: 0, src: t1sOut2, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        }
+
+        // 7. Copy last triplet's xOut to head input (all lanes, one copy)
+        let lastXOut = tripletCount > 1 ? t1xOut : t0xOut
+        try SurfaceIO.copyFP16(dst: headIn, dstChannelOffset: 0, src: lastXOut, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+
+        // 8. Eval output head (processes all lanes simultaneously)
+        try head.kernelSet.rmsNormClassifier.eval()
+
+        // 9. Argmax per spatial lane
+        for streamIdx in 0..<streamCount {
+            let result = try SurfaceIO.argmaxFP16SpatialSlice(
+                from: headOut,
+                channelOffset: 0,
+                spatialIndex: streamIdx,
+                spatial: laneSpatial,
+                channels: vocabSize
+            )
+            tokens[streamIdx] = UInt16(result.index)
+        }
+    }
+
     private func machMilliseconds(_ deltaTicks: UInt64) -> Double {
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
