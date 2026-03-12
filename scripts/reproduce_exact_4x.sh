@@ -414,7 +414,9 @@ jq -s \
   accepted_future_tokens_per_pass: (map(.two_step.median_accepted_future_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
   all_parity_match: (all(.[]; .parity_status == "match")),
   per_run_parity: (map(.parity_status)),
-  per_run_timestamps: (map(.probe_timestamp // null))
+  per_run_timestamps: (map(.probe_timestamp // null)),
+  per_run_wall_elapsed_s: (map(.probe_wall_elapsed_s // null)),
+  sum_probe_wall_elapsed_s: (map(.probe_wall_elapsed_s // 0) | add)
 }' "${valid_runs[@]}" > "$RESULTS_DIR/summary.json"
 
 # Reproducibility gate: warn on high cross-run variance or parity failure
