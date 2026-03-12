@@ -181,4 +181,41 @@ coreml_cv="$(jq -s 'map(.coreml.median_ms_per_token) | (length) as $n | (add / $
   echo "all_parity_match=$all_parity_match"
 } | tee "$RESULTS_DIR/summary.txt"
 
-echo "Wrote raw JSON and stderr logs to $RESULTS_DIR"
+# Machine-readable aggregate JSON combining all per-run data with summary stats
+jq -s --arg dir "$RESULTS_DIR" '{
+  results_dir: $dir,
+  repeats: length,
+  two_step: {
+    median_ms_per_token: (map(.two_step.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]),
+    p95_ms_per_token: (map(.two_step.p95_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
+    p99_ms_per_token: (map(.two_step.p99_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
+    min_ms_per_token: (map(.two_step.median_ms_per_token) | min),
+    max_ms_per_token: (map(.two_step.median_ms_per_token) | max),
+    cv: (map(.two_step.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end),
+    per_run_medians_ms: (map(.two_step.median_ms_per_token))
+  },
+  control: {
+    median_ms_per_token: (map(.control.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]),
+    p95_ms_per_token: (map(.control.p95_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
+    p99_ms_per_token: (map(.control.p99_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
+    min_ms_per_token: (map(.control.median_ms_per_token) | min),
+    max_ms_per_token: (map(.control.median_ms_per_token) | max),
+    cv: (map(.control.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end),
+    per_run_medians_ms: (map(.control.median_ms_per_token))
+  },
+  coreml: {
+    median_ms_per_token: (map(.coreml.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]),
+    p95_ms_per_token: (map(.coreml.p95_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
+    p99_ms_per_token: (map(.coreml.p99_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
+    min_ms_per_token: (map(.coreml.median_ms_per_token) | min),
+    max_ms_per_token: (map(.coreml.median_ms_per_token) | max),
+    cv: (map(.coreml.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end),
+    per_run_medians_ms: (map(.coreml.median_ms_per_token))
+  },
+  two_step_speedup_vs_coreml: (map(.two_step_speedup_vs_coreml) | sort | .[((length - 1) / 2 | floor)]),
+  committed_exact_tokens_per_pass: (map(.two_step.median_committed_exact_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
+  accepted_future_tokens_per_pass: (map(.two_step.median_accepted_future_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
+  all_parity_match: (all(.[]; .parity_status == "match"))
+}' "$RESULTS_DIR"/run-*.json > "$RESULTS_DIR/summary.json"
+
+echo "Wrote raw JSON, stderr logs, and summary.json to $RESULTS_DIR"
