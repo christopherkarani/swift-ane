@@ -115,6 +115,7 @@ LAYER_COUNT="$LAYER_COUNT" \
   echo "offline_parity_status=$(jq -r '.parity_status' "$OFFLINE_GATE_JSON")"
   echo "control_backend=$CONTROL_BACKEND"
   echo "two_step_backend=$TWO_STEP_BACKEND"
+  echo "output_head_backend=$OUTPUT_HEAD_BACKEND"
   echo "public_summary=$PUBLIC_RESULTS_DIR/summary.txt"
   echo "public_summary_json=$PUBLIC_RESULTS_DIR/summary.json"
   # Propagate key metrics from inner harness summary if available
