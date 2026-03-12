@@ -336,7 +336,8 @@ jq -s \
   control_speedup_vs_coreml: (map(.control_speedup_vs_coreml // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
   committed_exact_tokens_per_pass: (map(.two_step.median_committed_exact_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
   accepted_future_tokens_per_pass: (map(.two_step.median_accepted_future_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
-  all_parity_match: (all(.[]; .parity_status == "match"))
+  all_parity_match: (all(.[]; .parity_status == "match")),
+  per_run_timestamps: (map(.probe_timestamp // null))
 }' "${valid_runs[@]}" > "$RESULTS_DIR/summary.json"
 
 # Reproducibility gate: warn on high cross-run variance or parity failure
