@@ -121,39 +121,71 @@ if [[ -n "$GENERATION_MODEL" ]]; then
   COMMON_ARGS+=(--generation-model "$GENERATION_MODEL")
 fi
 
+failed_runs=0
 for run in $(seq 1 "$REPEATS"); do
   echo "Run $run/$REPEATS"
+  run_exit=0
   "$PROBE" "${COMMON_ARGS[@]}" \
     > "$RESULTS_DIR/run-$run.json" \
-    2> "$RESULTS_DIR/run-$run.stderr.log"
+    2> "$RESULTS_DIR/run-$run.stderr.log" || run_exit=$?
+  if [[ $run_exit -ne 0 ]]; then
+    echo "WARNING: Run $run exited with code $run_exit" >&2
+    echo "  stderr tail: $(tail -3 "$RESULTS_DIR/run-$run.stderr.log")" >&2
+    failed_runs=$((failed_runs + 1))
+  elif ! jq -e '.two_step.median_ms_per_token' "$RESULTS_DIR/run-$run.json" >/dev/null 2>&1; then
+    echo "WARNING: Run $run produced invalid JSON (missing two_step.median_ms_per_token)" >&2
+    failed_runs=$((failed_runs + 1))
+  fi
 done
 
-two_step_median_ms="$(jq -s 'map(.two_step.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
-control_median_ms="$(jq -s 'map(.control.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
-coreml_median_ms="$(jq -s 'map(.coreml.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
-speedup_median="$(jq -s 'map(.two_step_speedup_vs_coreml) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
-committed_tokens_per_pass="$(jq -s 'map(.two_step.median_committed_exact_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
-accepted_future_tokens_per_pass="$(jq -s 'map(.two_step.median_accepted_future_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
-all_parity_match="$(jq -s 'all(.[]; .parity_status == "match")' "$RESULTS_DIR"/run-*.json)"
+if [[ $failed_runs -eq $REPEATS ]]; then
+  echo "FATAL: All $REPEATS runs failed. See stderr logs in $RESULTS_DIR" >&2
+  exit 1
+fi
+if [[ $failed_runs -gt 0 ]]; then
+  echo "WARNING: $failed_runs/$REPEATS runs failed. Summary will use remaining valid runs." >&2
+fi
+
+# Collect valid run JSONs (skip empty or malformed files from failed runs)
+valid_runs=()
+for f in "$RESULTS_DIR"/run-*.json; do
+  if jq -e '.two_step.median_ms_per_token' "$f" >/dev/null 2>&1; then
+    valid_runs+=("$f")
+  fi
+done
+
+if [[ ${#valid_runs[@]} -eq 0 ]]; then
+  echo "FATAL: No valid run JSONs found in $RESULTS_DIR" >&2
+  exit 1
+fi
+echo "Summarizing ${#valid_runs[@]} valid run(s) out of $REPEATS"
+
+two_step_median_ms="$(jq -s 'map(.two_step.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]' "${valid_runs[@]}")"
+control_median_ms="$(jq -s 'map(.control.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]' "${valid_runs[@]}")"
+coreml_median_ms="$(jq -s 'map(.coreml.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]' "${valid_runs[@]}")"
+speedup_median="$(jq -s 'map(.two_step_speedup_vs_coreml) | sort | .[((length - 1) / 2 | floor)]' "${valid_runs[@]}")"
+committed_tokens_per_pass="$(jq -s 'map(.two_step.median_committed_exact_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]' "${valid_runs[@]}")"
+accepted_future_tokens_per_pass="$(jq -s 'map(.two_step.median_accepted_future_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]' "${valid_runs[@]}")"
+all_parity_match="$(jq -s 'all(.[]; .parity_status == "match")' "${valid_runs[@]}")"
 
 # p95/p99 tail latency (median-of-per-run-percentiles across repeats)
-two_step_p95_ms="$(jq -s 'map(.two_step.p95_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "$RESULTS_DIR"/run-*.json)"
-two_step_p99_ms="$(jq -s 'map(.two_step.p99_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "$RESULTS_DIR"/run-*.json)"
-control_p95_ms="$(jq -s 'map(.control.p95_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "$RESULTS_DIR"/run-*.json)"
-control_p99_ms="$(jq -s 'map(.control.p99_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "$RESULTS_DIR"/run-*.json)"
-coreml_p95_ms="$(jq -s 'map(.coreml.p95_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "$RESULTS_DIR"/run-*.json)"
-coreml_p99_ms="$(jq -s 'map(.coreml.p99_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "$RESULTS_DIR"/run-*.json)"
+two_step_p95_ms="$(jq -s 'map(.two_step.p95_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "${valid_runs[@]}")"
+two_step_p99_ms="$(jq -s 'map(.two_step.p99_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "${valid_runs[@]}")"
+control_p95_ms="$(jq -s 'map(.control.p95_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "${valid_runs[@]}")"
+control_p99_ms="$(jq -s 'map(.control.p99_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "${valid_runs[@]}")"
+coreml_p95_ms="$(jq -s 'map(.coreml.p95_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "${valid_runs[@]}")"
+coreml_p99_ms="$(jq -s 'map(.coreml.p99_ms_per_token // empty) | if length == 0 then "n/a" else sort | .[((length - 1) / 2 | floor)] end' "${valid_runs[@]}")"
 
 # Cross-run spread: min, max, coefficient of variation of per-run medians
-two_step_min_ms="$(jq -s 'map(.two_step.median_ms_per_token) | min' "$RESULTS_DIR"/run-*.json)"
-two_step_max_ms="$(jq -s 'map(.two_step.median_ms_per_token) | max' "$RESULTS_DIR"/run-*.json)"
-two_step_cv="$(jq -s 'map(.two_step.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "$RESULTS_DIR"/run-*.json)"
-control_min_ms="$(jq -s 'map(.control.median_ms_per_token) | min' "$RESULTS_DIR"/run-*.json)"
-control_max_ms="$(jq -s 'map(.control.median_ms_per_token) | max' "$RESULTS_DIR"/run-*.json)"
-control_cv="$(jq -s 'map(.control.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "$RESULTS_DIR"/run-*.json)"
-coreml_min_ms="$(jq -s 'map(.coreml.median_ms_per_token) | min' "$RESULTS_DIR"/run-*.json)"
-coreml_max_ms="$(jq -s 'map(.coreml.median_ms_per_token) | max' "$RESULTS_DIR"/run-*.json)"
-coreml_cv="$(jq -s 'map(.coreml.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "$RESULTS_DIR"/run-*.json)"
+two_step_min_ms="$(jq -s 'map(.two_step.median_ms_per_token) | min' "${valid_runs[@]}")"
+two_step_max_ms="$(jq -s 'map(.two_step.median_ms_per_token) | max' "${valid_runs[@]}")"
+two_step_cv="$(jq -s 'map(.two_step.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "${valid_runs[@]}")"
+control_min_ms="$(jq -s 'map(.control.median_ms_per_token) | min' "${valid_runs[@]}")"
+control_max_ms="$(jq -s 'map(.control.median_ms_per_token) | max' "${valid_runs[@]}")"
+control_cv="$(jq -s 'map(.control.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "${valid_runs[@]}")"
+coreml_min_ms="$(jq -s 'map(.coreml.median_ms_per_token) | min' "${valid_runs[@]}")"
+coreml_max_ms="$(jq -s 'map(.coreml.median_ms_per_token) | max' "${valid_runs[@]}")"
+coreml_cv="$(jq -s 'map(.coreml.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "${valid_runs[@]}")"
 
 {
   echo "results_dir=$RESULTS_DIR"
@@ -216,7 +248,7 @@ jq -s --arg dir "$RESULTS_DIR" '{
   committed_exact_tokens_per_pass: (map(.two_step.median_committed_exact_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
   accepted_future_tokens_per_pass: (map(.two_step.median_accepted_future_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
   all_parity_match: (all(.[]; .parity_status == "match"))
-}' "$RESULTS_DIR"/run-*.json > "$RESULTS_DIR/summary.json"
+}' "${valid_runs[@]}" > "$RESULTS_DIR/summary.json"
 
 # Reproducibility gate: warn on high cross-run variance or parity failure
 CV_THRESHOLD="${CV_THRESHOLD:-0.10}"
