@@ -291,6 +291,10 @@ jq -s \
   valid_runs: (length),
   failed_runs: $failed,
   total_elapsed_s: $total_elapsed_s,
+  init_times: {
+    control_init_wall_ms: (map(.control.init_wall_ms // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
+    two_step_init_wall_ms: (map(.two_step.init_wall_ms // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end)
+  },
   two_step: {
     median_ms_per_token: (map(.two_step.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]),
     p95_ms_per_token: (map(.two_step.p95_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
