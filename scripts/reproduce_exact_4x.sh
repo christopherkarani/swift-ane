@@ -43,6 +43,16 @@ if [[ "$LAYER_COUNT" -lt 1 ]]; then
   exit 1
 fi
 
+if [[ "$MAX_NEW_TOKENS" -lt 1 ]]; then
+  echo "MAX_NEW_TOKENS must be >= 1" >&2
+  exit 1
+fi
+
+if [[ "$MAX_SEQUENCE_TOKENS" -lt 1 ]]; then
+  echo "MAX_SEQUENCE_TOKENS must be >= 1" >&2
+  exit 1
+fi
+
 if [[ ! -e "$COREML_MODEL" ]]; then
   echo "CoreML model not found at $COREML_MODEL" >&2
   exit 1
