@@ -29,6 +29,7 @@ private struct Options {
     var coreMLModelPath: String? = nil
     var generationModelPath: String? = nil
     var promptToken: UInt16 = 0
+    var shareWeights: Bool = false
 
     static func parse(_ argv: [String]) -> Options {
         var options = Options()
@@ -118,6 +119,8 @@ private struct Options {
                     fatal("Expected --prompt-token UINT16")
                 }
                 options.promptToken = promptToken
+            case "--share-weights":
+                options.shareWeights = true
             case "--help":
                 printUsageAndExit()
             default:
@@ -250,6 +253,7 @@ private func printUsageAndExit() -> Never {
       --output-head-backend cpu|ane-classifier|ane-rmsnorm-classifier
       --trunk-lane-spatial N
       --output-head-lane-spatial N
+      --share-weights            Use non-owning weight views (skip cloning)
     """
     print(usage)
     exit(0)
@@ -379,7 +383,8 @@ private func measureRecurrentControlCompileInitOnly(options: Options) throws -> 
         outputHeadBackend: options.outputHeadBackend,
         trunkBackend: options.controlBackend,
         trunkLaneSpatial: options.trunkLaneSpatial,
-        outputHeadLaneSpatial: options.outputHeadLaneSpatial
+        outputHeadLaneSpatial: options.outputHeadLaneSpatial,
+        shareReadOnlyWeights: options.shareWeights
     )
     let wallInitMs = machMilliseconds(mach_absolute_time() - start)
     return CompileInitBenchmarkSample(
@@ -403,7 +408,8 @@ private func measureTwoStepCompileInitOnly(options: Options) throws -> CompileIn
             outputHeadBackend: options.outputHeadBackend,
             trunkBackend: options.twoStepBackend,
             trunkLaneSpatial: options.trunkLaneSpatial,
-            outputHeadLaneSpatial: options.outputHeadLaneSpatial
+            outputHeadLaneSpatial: options.outputHeadLaneSpatial,
+            shareReadOnlyWeights: options.shareWeights
         )
     } else {
         model = try ANEExactTwoTokenBranchStatePromotionModel(
@@ -413,7 +419,8 @@ private func measureTwoStepCompileInitOnly(options: Options) throws -> CompileIn
             outputHeadBackend: options.outputHeadBackend,
             trunkBackend: options.twoStepBackend,
             trunkLaneSpatial: options.trunkLaneSpatial,
-            outputHeadLaneSpatial: options.outputHeadLaneSpatial
+            outputHeadLaneSpatial: options.outputHeadLaneSpatial,
+            shareReadOnlyWeights: options.shareWeights
         )
     }
     let wallInitMs = machMilliseconds(mach_absolute_time() - start)
@@ -463,7 +470,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     let prompt: [UInt16] = [options.promptToken]
     let weights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
 
-    printStderr("Starting control model init")
+    printStderr("Starting control model init\(options.shareWeights ? " (shared weights)" : "")")
     let controlInitStart = mach_absolute_time()
     let controlModel = try ANERecurrentGenerationModel(
         weights: weights,
@@ -472,13 +479,14 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         outputHeadBackend: options.outputHeadBackend,
         trunkBackend: options.controlBackend,
         trunkLaneSpatial: options.trunkLaneSpatial,
-        outputHeadLaneSpatial: options.outputHeadLaneSpatial
+        outputHeadLaneSpatial: options.outputHeadLaneSpatial,
+        shareReadOnlyWeights: options.shareWeights
     )
     let controlInitMs = machMilliseconds(mach_absolute_time() - controlInitStart)
     printStderr(String(format: "Control model init done in %.3f ms", controlInitMs))
     var controlHarness = DirectTokenSelectionGenerationHarness(model: controlModel, strategy: .argmax)
 
-    printStderr("Starting two-step model init")
+    printStderr("Starting two-step model init\(options.shareWeights ? " (shared weights)" : "")")
     let twoStepInitStart = mach_absolute_time()
     let twoStepModel: ANEExactTwoTokenBranchStatePromotionModel
     if let futureSidecarPath = options.futureSidecarPath {
@@ -491,7 +499,8 @@ private func comparePayload(options: Options) throws -> [String: Any] {
             outputHeadBackend: options.outputHeadBackend,
             trunkBackend: options.twoStepBackend,
             trunkLaneSpatial: options.trunkLaneSpatial,
-            outputHeadLaneSpatial: options.outputHeadLaneSpatial
+            outputHeadLaneSpatial: options.outputHeadLaneSpatial,
+            shareReadOnlyWeights: options.shareWeights
         )
     } else {
         twoStepModel = try ANEExactTwoTokenBranchStatePromotionModel(
@@ -501,7 +510,8 @@ private func comparePayload(options: Options) throws -> [String: Any] {
             outputHeadBackend: options.outputHeadBackend,
             trunkBackend: options.twoStepBackend,
             trunkLaneSpatial: options.trunkLaneSpatial,
-            outputHeadLaneSpatial: options.outputHeadLaneSpatial
+            outputHeadLaneSpatial: options.outputHeadLaneSpatial,
+            shareReadOnlyWeights: options.shareWeights
         )
     }
     let twoStepInitMs = machMilliseconds(mach_absolute_time() - twoStepInitStart)
