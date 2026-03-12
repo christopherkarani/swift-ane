@@ -273,6 +273,8 @@ jq -s \
     p99_ms_per_token: (map(.two_step.p99_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
     min_ms_per_token: (map(.two_step.median_ms_per_token) | min),
     max_ms_per_token: (map(.two_step.median_ms_per_token) | max),
+    mean_ms_per_token: (map(.two_step.median_ms_per_token) | add / length),
+    stddev_ms_per_token: (map(.two_step.median_ms_per_token) | (length) as $n | (add / $n) as $mean | (map(. - $mean | . * .) | add / $n | sqrt)),
     cv: (map(.two_step.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end),
     per_run_medians_ms: (map(.two_step.median_ms_per_token)),
     iqr_ms: (map(.two_step.median_ms_per_token) | sort | if length < 4 then (last - first) else (.[((length * 3 / 4) | floor)] - .[((length / 4) | floor)]) end)
@@ -283,6 +285,8 @@ jq -s \
     p99_ms_per_token: (map(.control.p99_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
     min_ms_per_token: (map(.control.median_ms_per_token) | min),
     max_ms_per_token: (map(.control.median_ms_per_token) | max),
+    mean_ms_per_token: (map(.control.median_ms_per_token) | add / length),
+    stddev_ms_per_token: (map(.control.median_ms_per_token) | (length) as $n | (add / $n) as $mean | (map(. - $mean | . * .) | add / $n | sqrt)),
     cv: (map(.control.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end),
     per_run_medians_ms: (map(.control.median_ms_per_token)),
     iqr_ms: (map(.control.median_ms_per_token) | sort | if length < 4 then (last - first) else (.[((length * 3 / 4) | floor)] - .[((length / 4) | floor)]) end)
@@ -293,6 +297,8 @@ jq -s \
     p99_ms_per_token: (map(.coreml.p99_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
     min_ms_per_token: (map(.coreml.median_ms_per_token) | min),
     max_ms_per_token: (map(.coreml.median_ms_per_token) | max),
+    mean_ms_per_token: (map(.coreml.median_ms_per_token) | add / length),
+    stddev_ms_per_token: (map(.coreml.median_ms_per_token) | (length) as $n | (add / $n) as $mean | (map(. - $mean | . * .) | add / $n | sqrt)),
     cv: (map(.coreml.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end),
     per_run_medians_ms: (map(.coreml.median_ms_per_token)),
     iqr_ms: (map(.coreml.median_ms_per_token) | sort | if length < 4 then (last - first) else (.[((length * 3 / 4) | floor)] - .[((length / 4) | floor)]) end)
