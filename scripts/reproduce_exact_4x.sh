@@ -372,6 +372,7 @@ jq -s \
   two_step_speedup_mean: (map(.two_step_speedup_vs_coreml) | add / length),
   two_step_speedup_stddev: (map(.two_step_speedup_vs_coreml) | (length) as $n | (add / $n) as $mean | (map(. - $mean | . * .) | add / $n | sqrt)),
   two_step_speedup_cv: (map(.two_step_speedup_vs_coreml) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end),
+  per_run_speedups: (map(.two_step_speedup_vs_coreml)),
   control_speedup_vs_coreml: (map(.control_speedup_vs_coreml // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
   token_accounting: {
     committed_exact_tokens_per_pass: (map(.two_step.median_committed_exact_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
