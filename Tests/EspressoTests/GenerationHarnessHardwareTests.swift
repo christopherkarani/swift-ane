@@ -1660,12 +1660,15 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         streamCounts: [Int]
     ) throws -> ConcurrentGenerationScalingReport {
         let dim = ModelConfig.dim
-        let laneSpatial = 32
         var samples: [ConcurrentGenerationScalingSample] = []
         samples.reserveCapacity(streamCounts.count)
 
         for streamCount in streamCounts {
-            precondition(streamCount <= laneSpatial)
+            // laneSpatial must be a power of 2 >= 32 (ANE constraint)
+            let laneSpatial: Int
+            if streamCount <= 32 { laneSpatial = 32 }
+            else if streamCount <= 64 { laneSpatial = 64 }
+            else { laneSpatial = 128 }
 
             let compileStart = GenerationClock.now()
 
@@ -1873,7 +1876,7 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         let warmup = 3
         let iterations = 20
         let maxNewTokens = 8
-        let streamCounts = [1, 4, 8, 12, 16, 24, 32]
+        let streamCounts = [1, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128]
 
         let batched = try benchmarkBatchedRecurrentGeneration(
             layerCount: 6,

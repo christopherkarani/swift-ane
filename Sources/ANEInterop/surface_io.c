@@ -524,59 +524,40 @@ bool ane_interop_io_argmax_batch_fp16_spatial(
 #if defined(__aarch64__) || defined(__arm64__)
         /*
          * NEON-vectorized channel-major argmax.
-         * Process 32 spatial lanes as 4 × float16x8_t per channel row.
+         * Process spatial lanes as N × float16x8_t per channel row.
          * Branchless: vcgtq_f16 + vbslq for masked conditional update.
          * Indices tracked as uint16_t (fits vocab ≤ 65535).
+         * Supports any spatial that is a multiple of 8, up to 128.
          */
-        if (spatial == 32) {
+        if (spatial > 0 && spatial <= 128 && (spatial % 8) == 0) {
+            const int nvecs = spatial / 8;
+            float16x8_t bestV[16];
+            uint16x8_t bestI[16];
+
             const _Float16 *row0 = srcF16 + (size_t)ch_off * spatialSz;
-
-            float16x8_t bestV0 = vld1q_f16(row0);
-            float16x8_t bestV1 = vld1q_f16(row0 + 8);
-            float16x8_t bestV2 = vld1q_f16(row0 + 16);
-            float16x8_t bestV3 = vld1q_f16(row0 + 24);
-
-            uint16x8_t bestI0 = vdupq_n_u16(0);
-            uint16x8_t bestI1 = vdupq_n_u16(0);
-            uint16x8_t bestI2 = vdupq_n_u16(0);
-            uint16x8_t bestI3 = vdupq_n_u16(0);
+            for (int v = 0; v < nvecs; v++) {
+                bestV[v] = vld1q_f16(row0 + v * 8);
+                bestI[v] = vdupq_n_u16(0);
+            }
 
             for (int c = 1; c < channels; c++) {
                 const _Float16 *row = srcF16 + (size_t)(ch_off + c) * spatialSz;
                 uint16x8_t cidx = vdupq_n_u16((uint16_t)c);
-
-                float16x8_t v0 = vld1q_f16(row);
-                uint16x8_t gt0 = vcgtq_f16(v0, bestV0);
-                bestV0 = vbslq_f16(gt0, v0, bestV0);
-                bestI0 = vbslq_u16(gt0, cidx, bestI0);
-
-                float16x8_t v1 = vld1q_f16(row + 8);
-                uint16x8_t gt1 = vcgtq_f16(v1, bestV1);
-                bestV1 = vbslq_f16(gt1, v1, bestV1);
-                bestI1 = vbslq_u16(gt1, cidx, bestI1);
-
-                float16x8_t v2 = vld1q_f16(row + 16);
-                uint16x8_t gt2 = vcgtq_f16(v2, bestV2);
-                bestV2 = vbslq_f16(gt2, v2, bestV2);
-                bestI2 = vbslq_u16(gt2, cidx, bestI2);
-
-                float16x8_t v3 = vld1q_f16(row + 24);
-                uint16x8_t gt3 = vcgtq_f16(v3, bestV3);
-                bestV3 = vbslq_f16(gt3, v3, bestV3);
-                bestI3 = vbslq_u16(gt3, cidx, bestI3);
+                for (int v = 0; v < nvecs; v++) {
+                    float16x8_t vals = vld1q_f16(row + v * 8);
+                    uint16x8_t gt = vcgtq_f16(vals, bestV[v]);
+                    bestV[v] = vbslq_f16(gt, vals, bestV[v]);
+                    bestI[v] = vbslq_u16(gt, cidx, bestI[v]);
+                }
             }
 
             /* Store results */
-            _Float16 bvBuf[32];
-            uint16_t biBuf[32];
-            vst1q_f16(bvBuf, bestV0);
-            vst1q_f16(bvBuf + 8, bestV1);
-            vst1q_f16(bvBuf + 16, bestV2);
-            vst1q_f16(bvBuf + 24, bestV3);
-            vst1q_u16(biBuf, bestI0);
-            vst1q_u16(biBuf + 8, bestI1);
-            vst1q_u16(biBuf + 16, bestI2);
-            vst1q_u16(biBuf + 24, bestI3);
+            _Float16 bvBuf[128];
+            uint16_t biBuf[128];
+            for (int v = 0; v < nvecs; v++) {
+                vst1q_f16(bvBuf + v * 8, bestV[v]);
+                vst1q_u16(biBuf + v * 8, bestI[v]);
+            }
 
             for (int s = 0; s < stream_count; s++) {
                 out_indices[s] = (int)biBuf[s];
