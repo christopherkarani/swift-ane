@@ -367,6 +367,7 @@ jq -s \
   --arg macos_build "$(sw_vers -buildVersion 2>/dev/null || echo unknown)" \
   --arg power_source "$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)" \
   --argjson outer_elapsed "$(printf '%s\n' "${valid_outer_elapsed[@]}" | jq -s '.')" \
+  --argjson prompt_token "${PROMPT_TOKEN:-null}" \
   --argjson run_files "$(printf '%s\n' "${valid_runs[@]}" | while read -r f; do basename "$f"; done | jq -nR '[inputs | select(length > 0)]')" \
 '{
   probe_version: (map(.probe_version // null) | .[0]),
@@ -384,7 +385,8 @@ jq -s \
     iterations: $iterations,
     max_new_tokens: $max_new_tokens,
     max_sequence_tokens: $max_seq,
-    layer_count: $layers
+    layer_count: $layers,
+    prompt_token: $prompt_token
   },
   requested_repeats: $requested_repeats,
   valid_runs: (length),
