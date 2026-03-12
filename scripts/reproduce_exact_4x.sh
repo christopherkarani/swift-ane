@@ -483,11 +483,16 @@ if [[ ${#valid_runs[@]} -ge 4 ]]; then
 fi
 
 # Merge gate status and outlier info into summary.json
+gate_warnings_json="[]"
+if [[ -n "$gate_warnings" ]]; then
+  gate_warnings_json="$(printf '%b' "$gate_warnings" | sed '/^$/d' | jq -R -s 'split("\n") | map(select(. != ""))')"
+fi
 gate_json="$(jq -n \
   --arg status "$gate_status" \
   --arg cv_thresh "$CV_THRESHOLD" \
   --argjson outlier_count "$outlier_count" \
-  '{gate_status: $status, cv_threshold: ($cv_thresh | tonumber), outlier_count: $outlier_count}')"
+  --argjson warnings "$gate_warnings_json" \
+  '{gate_status: $status, cv_threshold: ($cv_thresh | tonumber), outlier_count: $outlier_count, warnings: $warnings}')"
 if [[ ${#valid_runs[@]} -ge 4 && -n "$outlier_info" ]]; then
   gate_json="$(echo "$gate_json" | jq --argjson oi "$outlier_info" '. + {outlier_fences: {lo: $oi.lo_fence, hi: $oi.hi_fence, q1: $oi.q1, q3: $oi.q3, iqr: $oi.iqr}}')"
 fi
