@@ -326,13 +326,16 @@ jq -s \
   --argjson total_elapsed_s "$total_benchmark_elapsed" \
   --arg hw_model "$(sysctl -n hw.model 2>/dev/null || echo unknown)" \
   --arg load_avg "$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)" \
+  --arg macos_version "$(sw_vers -productVersion 2>/dev/null || echo unknown)" \
+  --arg macos_build "$(sw_vers -buildVersion 2>/dev/null || echo unknown)" \
+  --arg power_source "$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)" \
   --argjson outer_elapsed "$(printf '%s\n' "${valid_outer_elapsed[@]}" | jq -s '.')" \
 '{
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
   git_branch: $branch,
-  host: {hw_model: $hw_model, load_average: $load_avg},
+  host: {hw_model: $hw_model, load_average: $load_avg, macos_version: $macos_version, macos_build: $macos_build, power_source: $power_source},
   benchmark_contract: {
     input_mode: $input_mode,
     control_backend: $control_backend,
