@@ -100,4 +100,24 @@ LAYER_COUNT="$LAYER_COUNT" \
   echo "control_backend=$CONTROL_BACKEND"
   echo "two_step_backend=$TWO_STEP_BACKEND"
   echo "public_summary=$PUBLIC_RESULTS_DIR/summary.txt"
+  echo "public_summary_json=$PUBLIC_RESULTS_DIR/summary.json"
+  # Propagate key metrics from inner harness summary if available
+  if [[ -f "$PUBLIC_RESULTS_DIR/summary.json" ]]; then
+    echo "harness_two_step_median_ms=$(jq -r '.two_step.median_ms_per_token' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_two_step_p95_ms=$(jq -r '.two_step.p95_ms_per_token // "n/a"' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_two_step_p99_ms=$(jq -r '.two_step.p99_ms_per_token // "n/a"' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_coreml_median_ms=$(jq -r '.coreml.median_ms_per_token' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_speedup_median=$(jq -r '.two_step_speedup_vs_coreml' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_speedup_min=$(jq -r '.two_step_speedup_min' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_speedup_max=$(jq -r '.two_step_speedup_max' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_all_parity=$(jq -r '.all_parity_match' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_two_step_cv=$(jq -r '.two_step.cv' "$PUBLIC_RESULTS_DIR/summary.json")"
+  fi
+  # Propagate gate status from inner harness
+  if [[ -f "$PUBLIC_RESULTS_DIR/summary.txt" ]]; then
+    gate_line="$(grep '^gate_status=' "$PUBLIC_RESULTS_DIR/summary.txt" || true)"
+    if [[ -n "$gate_line" ]]; then
+      echo "harness_$gate_line"
+    fi
+  fi
 } | tee "$RESULTS_DIR/claim-summary.txt"
