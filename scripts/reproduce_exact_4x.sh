@@ -303,7 +303,13 @@ jq -s \
     per_run_medians_ms: (map(.two_step.median_ms_per_token)),
     per_run_p95s_ms: (map(.two_step.p95_ms_per_token // null)),
     per_run_p99s_ms: (map(.two_step.p99_ms_per_token // null)),
-    iqr_ms: (map(.two_step.median_ms_per_token) | sort | if length < 4 then (last - first) else (.[((length * 3 / 4) | floor)] - .[((length / 4) | floor)]) end)
+    iqr_ms: (map(.two_step.median_ms_per_token) | sort | if length < 4 then (last - first) else (.[((length * 3 / 4) | floor)] - .[((length / 4) | floor)]) end),
+    breakdown: {
+      proposer_ms_per_pass: (map(.two_step.median_proposer_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
+      verifier_trunk_ms_per_pass: (map(.two_step.median_verifier_trunk_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
+      verifier_logits_ms_per_pass: (map(.two_step.median_verifier_logits_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
+      state_advance_ms_per_pass: (map(.two_step.median_state_advance_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end)
+    }
   },
   control: {
     median_ms_per_token: (map(.control.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]),
