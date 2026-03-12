@@ -85,6 +85,14 @@ esac
 
 mkdir -p "$RESULTS_DIR"
 
+# Signal trap: mark results as interrupted for regression diagnosis
+cleanup_on_interrupt() {
+  echo ""
+  echo "INTERRUPTED at $(date -Iseconds) (signal received)" | tee "$RESULTS_DIR/INTERRUPTED"
+  exit 130
+}
+trap cleanup_on_interrupt INT TERM
+
 {
   echo "timestamp=$(date -Iseconds)"
   echo "git_commit=$(git -C "$ROOT" rev-parse HEAD)"
