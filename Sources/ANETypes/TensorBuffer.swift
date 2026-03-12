@@ -6,6 +6,7 @@ public struct TensorBuffer: ~Copyable {
     public let count: Int
     private let rawStorage: UnsafeMutableRawPointer
     private let baseAddress: UnsafeMutablePointer<Float>
+    private let ownsMemory: Bool
 
     @inline(__always)
     private static func byteCount(for elementCount: Int) -> Int {
@@ -17,6 +18,7 @@ public struct TensorBuffer: ~Copyable {
     public init(count: Int, zeroed: Bool) {
         precondition(count >= 0)
         self.count = count
+        self.ownsMemory = true
 
         let requestedBytes = Self.byteCount(for: count)
         let allocatedBytes = max(requestedBytes, 1)
@@ -31,8 +33,20 @@ public struct TensorBuffer: ~Copyable {
         }
     }
 
+    /// Creates a non-owning view into an existing buffer's memory.
+    /// The caller must guarantee the source buffer outlives this view.
+    @inline(__always)
+    public init(nonOwningViewOf source: borrowing TensorBuffer) {
+        self.count = source.count
+        self.rawStorage = source.rawStorage
+        self.baseAddress = source.baseAddress
+        self.ownsMemory = false
+    }
+
     deinit {
-        rawStorage.deallocate()
+        if ownsMemory {
+            rawStorage.deallocate()
+        }
     }
 
     @inline(__always)

@@ -358,6 +358,11 @@ enum GenerationWeightCloner {
     }
 
     @inline(__always)
+    static func shareTensor(_ source: borrowing TensorBuffer) -> TensorBuffer {
+        TensorBuffer(nonOwningViewOf: source)
+    }
+
+    @inline(__always)
     private static func copyTensor(_ source: borrowing TensorBuffer, into destination: borrowing TensorBuffer) {
         precondition(source.count == destination.count)
         source.withUnsafePointer { src in
@@ -901,7 +906,8 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         outputHeadBackend: GenerationOutputHeadBackend = .aneRMSNormClassifier,
         trunkBackend: RecurrentGenerationTrunkBackend = .singleLayer,
         trunkLaneSpatial: Int = RWKVStyleTwoStepRecurrentKernelSet.defaultLaneSpatial,
-        outputHeadLaneSpatial: Int = 32
+        outputHeadLaneSpatial: Int = 32,
+        shareReadOnlyWeights: Bool = false
     ) throws(GenerationError) {
         guard layerCount > 0 else {
             throw .invalidArguments("layerCount must be > 0")
@@ -1022,11 +1028,17 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
             throw .invalidArguments("vocabSize must be > 0")
         }
 
-        let rmsFinal = GenerationWeightCloner.cloneTensor(weights.rmsFinal)
-        let embedding = GenerationWeightCloner.cloneTensor(weights.embedding)
+        let rmsFinal = shareReadOnlyWeights
+            ? GenerationWeightCloner.shareTensor(weights.rmsFinal)
+            : GenerationWeightCloner.cloneTensor(weights.rmsFinal)
+        let embedding = shareReadOnlyWeights
+            ? GenerationWeightCloner.shareTensor(weights.embedding)
+            : GenerationWeightCloner.cloneTensor(weights.embedding)
         let classifier = sharedClassifier
             ? TensorBuffer(count: 0, zeroed: true)
-            : GenerationWeightCloner.cloneTensor(weights.classifier)
+            : (shareReadOnlyWeights
+                ? GenerationWeightCloner.shareTensor(weights.classifier)
+                : GenerationWeightCloner.cloneTensor(weights.classifier))
         let futureRMS: TensorBuffer
         let futureClassifier: TensorBuffer
         let hasFutureProposer: Bool
@@ -2697,7 +2709,8 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
         outputHeadBackend: GenerationOutputHeadBackend = .cpu,
         trunkBackend: RecurrentGenerationTrunkBackend = .singleLayer,
         trunkLaneSpatial: Int = RWKVStyleRecurrentKernelSet.defaultLaneSpatial,
-        outputHeadLaneSpatial: Int = 32
+        outputHeadLaneSpatial: Int = 32,
+        shareReadOnlyWeights: Bool = false
     ) throws(GenerationError) {
         guard layerCount > 0 else {
             throw .invalidArguments("layerCount must be > 0")
@@ -2749,11 +2762,17 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
             trunkBackend: trunkBackend,
             laneSpatial: trunkLaneSpatial
         )
-        let rmsFinal = GenerationWeightCloner.cloneTensor(weights.rmsFinal)
-        let embedding = GenerationWeightCloner.cloneTensor(weights.embedding)
+        let rmsFinal = shareReadOnlyWeights
+            ? GenerationWeightCloner.shareTensor(weights.rmsFinal)
+            : GenerationWeightCloner.cloneTensor(weights.rmsFinal)
+        let embedding = shareReadOnlyWeights
+            ? GenerationWeightCloner.shareTensor(weights.embedding)
+            : GenerationWeightCloner.cloneTensor(weights.embedding)
         let classifier = sharedClassifier
             ? TensorBuffer(count: 0, zeroed: true)
-            : GenerationWeightCloner.cloneTensor(weights.classifier)
+            : (shareReadOnlyWeights
+                ? GenerationWeightCloner.shareTensor(weights.classifier)
+                : GenerationWeightCloner.cloneTensor(weights.classifier))
         let aneClassifierHead = try Self.makeANEClassifierHead(
             outputHeadBackend: outputHeadBackend,
             vocabSize: vocabSize,

@@ -21,6 +21,7 @@ RECURRENT_CHECKPOINT="${RECURRENT_CHECKPOINT:-}"
 FUTURE_SIDECAR="${FUTURE_SIDECAR:-}"
 GENERATION_MODEL="${GENERATION_MODEL:-}"
 PROMPT_TOKEN="${PROMPT_TOKEN:-0}"
+SHARE_WEIGHTS="${SHARE_WEIGHTS:-}"
 
 if [[ "$REPEATS" -lt 3 || $((REPEATS % 2)) -ne 1 ]]; then
   echo "REPEATS must be an odd integer >= 3" >&2
@@ -119,6 +120,10 @@ fi
 
 if [[ -n "$GENERATION_MODEL" ]]; then
   COMMON_ARGS+=(--generation-model "$GENERATION_MODEL")
+fi
+
+if [[ -n "$SHARE_WEIGHTS" ]]; then
+  COMMON_ARGS+=(--share-weights)
 fi
 
 for run in $(seq 1 "$REPEATS"); do
