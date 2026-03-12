@@ -33,6 +33,14 @@ TWO_STEP_BACKEND="${TWO_STEP_BACKEND:-identity-zero-trunk}"
 mkdir -p "$RESULTS_DIR"
 claim_start_epoch=$(date +%s)
 
+# Signal trap: mark results as interrupted for regression diagnosis
+cleanup_on_interrupt() {
+  echo ""
+  echo "INTERRUPTED at $(date -Iseconds) (signal received)" | tee "$RESULTS_DIR/INTERRUPTED"
+  exit 130
+}
+trap cleanup_on_interrupt INT TERM
+
 echo "=== Espresso Claim Reproduction ==="
 echo "timestamp=$(date -Iseconds)"
 echo "results_dir=$RESULTS_DIR"
