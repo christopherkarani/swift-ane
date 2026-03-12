@@ -112,6 +112,15 @@ LAYER_COUNT="$LAYER_COUNT" \
     echo "harness_speedup_max=$(jq -r '.two_step_speedup_max' "$PUBLIC_RESULTS_DIR/summary.json")"
     echo "harness_all_parity=$(jq -r '.all_parity_match' "$PUBLIC_RESULTS_DIR/summary.json")"
     echo "harness_two_step_cv=$(jq -r '.two_step.cv' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_control_cv=$(jq -r '.control.cv' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_coreml_cv=$(jq -r '.coreml.cv' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_speedup_cv=$(jq -r '.two_step_speedup_cv // "n/a"' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_two_step_stddev_ms=$(jq -r '.two_step.stddev_ms_per_token // "n/a"' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_two_step_iqr_ms=$(jq -r '.two_step.iqr_ms // "n/a"' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_total_elapsed_s=$(jq -r '.total_elapsed_s // "n/a"' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_requested_repeats=$(jq -r '.requested_repeats // "n/a"' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_valid_runs=$(jq -r '.valid_runs' "$PUBLIC_RESULTS_DIR/summary.json")"
+    echo "harness_failed_runs=$(jq -r '.failed_runs // 0' "$PUBLIC_RESULTS_DIR/summary.json")"
   fi
   # Propagate gate status from inner harness
   if [[ -f "$PUBLIC_RESULTS_DIR/summary.txt" ]]; then
