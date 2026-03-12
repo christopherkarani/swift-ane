@@ -135,6 +135,12 @@ speedup_median="$(jq -s 'map(.two_step_speedup_vs_coreml) | sort | .[((length - 
 committed_tokens_per_pass="$(jq -s 'map(.two_step.median_committed_exact_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
 accepted_future_tokens_per_pass="$(jq -s 'map(.two_step.median_accepted_future_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
 all_parity_match="$(jq -s 'all(.[]; .parity_status == "match")' "$RESULTS_DIR"/run-*.json)"
+two_step_ttft_ms="$(jq -s 'map(.two_step.ttft_ms // 0) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
+control_ttft_ms="$(jq -s 'map(.control.ttft_ms // 0) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
+coreml_ttft_ms="$(jq -s 'map(.coreml.ttft_ms // 0) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
+two_step_ttft_cold_ms="$(jq -s 'map(.two_step.ttft_cold_ms // 0) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
+control_ttft_cold_ms="$(jq -s 'map(.control.ttft_cold_ms // 0) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
+coreml_ttft_cold_ms="$(jq -s 'map(.coreml.ttft_cold_ms // 0) | sort | .[((length - 1) / 2 | floor)]' "$RESULTS_DIR"/run-*.json)"
 
 {
   echo "results_dir=$RESULTS_DIR"
@@ -145,6 +151,12 @@ all_parity_match="$(jq -s 'all(.[]; .parity_status == "match")' "$RESULTS_DIR"/r
   echo "committed_exact_tokens_per_pass=$committed_tokens_per_pass"
   echo "accepted_future_tokens_per_pass=$accepted_future_tokens_per_pass"
   echo "all_parity_match=$all_parity_match"
+  echo "two_step_ttft_ms=$two_step_ttft_ms"
+  echo "control_ttft_ms=$control_ttft_ms"
+  echo "coreml_ttft_ms=$coreml_ttft_ms"
+  echo "two_step_ttft_cold_ms=$two_step_ttft_cold_ms"
+  echo "control_ttft_cold_ms=$control_ttft_cold_ms"
+  echo "coreml_ttft_cold_ms=$coreml_ttft_cold_ms"
 } | tee "$RESULTS_DIR/summary.txt"
 
 echo "Wrote raw JSON and stderr logs to $RESULTS_DIR"
