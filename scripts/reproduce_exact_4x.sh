@@ -21,6 +21,7 @@ RECURRENT_CHECKPOINT="${RECURRENT_CHECKPOINT:-}"
 FUTURE_SIDECAR="${FUTURE_SIDECAR:-}"
 GENERATION_MODEL="${GENERATION_MODEL:-}"
 PROMPT_TOKEN="${PROMPT_TOKEN:-0}"
+DRY_RUN="${DRY_RUN:-0}"
 
 if [[ "$REPEATS" -lt 3 || $((REPEATS % 2)) -ne 1 ]]; then
   echo "REPEATS must be an odd integer >= 3" >&2
@@ -102,6 +103,23 @@ mkdir -p "$RESULTS_DIR"
 
 echo "Building release probe into $SCRATCH_PATH"
 swift build -c release --product espresso-multitoken-probe --scratch-path "$SCRATCH_PATH"
+
+# Verify jq is available (required for aggregation)
+if ! command -v jq &>/dev/null; then
+  echo "FATAL: jq is required but not found on PATH" >&2
+  exit 1
+fi
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  echo "=== Dry Run: All prerequisites validated ==="
+  echo "probe=$PROBE"
+  echo "coreml_model=$COREML_MODEL"
+  echo "jq=$(command -v jq)"
+  echo "input_mode=$INPUT_MODE"
+  echo "repeats=$REPEATS warmup=$WARMUP iterations=$ITERATIONS"
+  echo "layer_count=$LAYER_COUNT max_new_tokens=$MAX_NEW_TOKENS"
+  exit 0
+fi
 
 COMMON_ARGS=(
   --mode compare
