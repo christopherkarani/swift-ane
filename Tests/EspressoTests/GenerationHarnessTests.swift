@@ -858,6 +858,36 @@ final class GenerationHarnessTests: XCTestCase {
         XCTAssertEqual(trace.acceptedFutureTokensPerPass, 1, accuracy: 0.0001)
     }
 
+    func test_exact_two_token_identity_zero_trunk_lookup_owned_weight_init_matches_local_bigram_exact_contract() throws {
+        let recurrentWeights = try LocalBigramArtifactBuilder.buildRecurrentWeights(
+            tokens: [35, 105, 110, 116, 32, 105, 110, 116, 32],
+            layerCount: 1,
+            vocabSize: ModelConfig.vocab
+        )
+        let futureSidecar = try LocalBigramArtifactBuilder.buildFutureSidecar(
+            tokens: [35, 105, 110, 116, 32, 105, 110, 116, 32],
+            layerCount: 1,
+            vocabSize: ModelConfig.vocab
+        )
+        let model = try ANEExactTwoTokenBranchStatePromotionModel(
+            owningLookupWeights: recurrentWeights,
+            futureSidecar: futureSidecar,
+            layerCount: 1,
+            maxSequenceTokens: 32,
+            outputHeadBackend: .aneRMSNormClassifier,
+            trunkBackend: .identityZeroTrunkLookup
+        )
+        var harness = ExactTwoTokenGenerationHarness(model: model, strategy: .argmax)
+
+        let trace = try harness.generate(promptTokens: [35], maxNewTokens: 4)
+
+        XCTAssertEqual(trace.generatedTokens, [105, 110, 116, 32])
+        XCTAssertEqual(trace.committedExactTokenCounts, [2, 2])
+        XCTAssertEqual(trace.acceptedFutureTokenCounts, [1, 1])
+        XCTAssertEqual(trace.committedExactTokensPerPass, 2, accuracy: 0.0001)
+        XCTAssertEqual(trace.acceptedFutureTokensPerPass, 1, accuracy: 0.0001)
+    }
+
     func test_exact_two_token_identity_zero_trunk_lookup_backend_requires_future_sidecar() throws {
         let recurrentWeights = try LocalBigramArtifactBuilder.buildRecurrentWeights(
             tokens: [35, 105, 110, 116, 32, 105, 110, 116, 32],

@@ -1201,6 +1201,116 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         self.futureTokenLookupCache = [:]
     }
 
+    public init(
+        owningLookupWeights weights: consuming RecurrentGenerationWeights,
+        futureSidecar: consuming TwoStepStudentSidecar,
+        layerCount: Int,
+        maxSequenceTokens: Int = ModelConfig.seqLen,
+        outputHeadBackend: GenerationOutputHeadBackend = .aneRMSNormClassifier,
+        trunkBackend: RecurrentGenerationTrunkBackend = .identityZeroTrunkLookup,
+        trunkLaneSpatial: Int = RWKVStyleTwoStepRecurrentKernelSet.defaultLaneSpatial,
+        outputHeadLaneSpatial: Int = 32
+    ) throws(GenerationError) {
+        guard layerCount > 0 else {
+            throw .invalidArguments("layerCount must be > 0")
+        }
+        guard layerCount <= weights.layers.count else {
+            throw .invalidArguments("layerCount \(layerCount) exceeds available recurrent layers \(weights.layers.count)")
+        }
+        guard maxSequenceTokens > 0 else {
+            throw .invalidArguments("maxSequenceTokens must be > 0")
+        }
+        guard trunkLaneSpatial > 0 else {
+            throw .invalidArguments("two-step recurrent trunk laneSpatial must be > 0")
+        }
+        guard outputHeadLaneSpatial > 0 else {
+            throw .invalidArguments("generation output-head laneSpatial must be > 0")
+        }
+        guard trunkBackend == .identityZeroTrunkLookup else {
+            throw .invalidArguments(
+                "owning lookup initializer requires identity-zero-trunk-lookup backend"
+            )
+        }
+        if outputHeadBackend == .cpuExactStaged || outputHeadBackend == .cpuExactClustered {
+            throw .invalidArguments("two-step branch-state promotion model does not support staged CPU output heads")
+        }
+        guard recurrentWeightsUseIdentityZeroTrunk(weights, layerCount: layerCount) else {
+            throw .invalidArguments("identity zero-trunk backend requires all recurrent Wx/Ws/Wd/Wo weights to be zero")
+        }
+
+        let vocabSize = weights.vocabSize
+        let sharedClassifier = weights.sharedClassifier
+        guard vocabSize > 0 else {
+            throw .invalidArguments("vocabSize must be > 0")
+        }
+        guard futureSidecar.contract.dim == ModelConfig.dim else {
+            throw .invalidArguments(
+                "futureSidecar dim \(futureSidecar.contract.dim) does not match ModelConfig.dim \(ModelConfig.dim)"
+            )
+        }
+        guard futureSidecar.contract.vocabSize == vocabSize else {
+            throw .invalidArguments(
+                "futureSidecar vocab \(futureSidecar.contract.vocabSize) does not match recurrent vocab \(vocabSize)"
+            )
+        }
+        guard futureSidecar.contract.layerCount == layerCount else {
+            throw .invalidArguments(
+                "futureSidecar layerCount \(futureSidecar.contract.layerCount) does not match requested layerCount \(layerCount)"
+            )
+        }
+
+        let compileStart = GenerationClock.now()
+
+        self.vocabSize = vocabSize
+        self.layerCount = layerCount
+        self.maxSequenceTokens = maxSequenceTokens
+        self.rmsFinal = consume weights.rmsFinal
+        self.embedding = consume weights.embedding
+        self.classifier = sharedClassifier ? TensorBuffer(count: 0, zeroed: true) : consume weights.classifier
+        self.sharedClassifier = sharedClassifier
+        self.futureRMS = consume futureSidecar.futureRMS
+        self.futureClassifier = consume futureSidecar.futureClassifier
+        self.hasFutureProposer = true
+        self.stepNorm = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.stepLogits = TensorBuffer(count: vocabSize, zeroed: true)
+        self.futureNorm = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.futureLogits = TensorBuffer(count: vocabSize, zeroed: true)
+        self.zeroActivation = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.pair0ActivationA = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.pair1ActivationA = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.pair0ActivationB = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.pair1ActivationB = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.currentProposalActivation = TensorBuffer(count: ModelConfig.dim, zeroed: true)
+        self.stepRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
+        self.futureRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
+        self.outputHeadBackend = outputHeadBackend
+        self.futureOutputHeadBackend = .cpu
+        self.trunkBackend = trunkBackend
+        self.aneClassifierHead = nil
+        self.aneRMSNormClassifierHead = nil
+        self.futureANEClassifierHead = nil
+        self.futureANERMSNormClassifierHead = nil
+        self.twoStepSessions = LayerStorage<RWKVStyleTwoStepRecurrentSession>(count: 0) { _ in
+            fatalError("unreachable")
+        }
+        self.fusedPairTwoStepSessions = LayerStorage<RWKVStyleFusedTwoLayerTwoStepSession>(count: 0) { _ in
+            fatalError("unreachable")
+        }
+        self.fusedTripletTwoStepSessions = LayerStorage<RWKVStyleFusedThreeLayerTwoStepSession>(count: 0) { _ in
+            fatalError("unreachable")
+        }
+        self.consumedTokens = 0
+        self.compileTimeMs = GenerationClock.milliseconds(start: compileStart, end: GenerationClock.now())
+        self.trunkLatencyMs = 0
+        self.logitsLatencyMs = 0
+        self.lastSingleTokenTrunkLatencyMs = 0
+        self.lastSingleTokenLogitsLatencyMs = 0
+        self.hasCurrentProposalActivation = false
+        self.currentProposalLookupToken = nil
+        self.exactNextTokenLookupCache = [:]
+        self.futureTokenLookupCache = [:]
+    }
+
     public mutating func reset() throws(GenerationError) {
         switch trunkBackend {
         case .singleLayer:

@@ -389,16 +389,29 @@ private func measureTwoStepCompileInitOnly(options: Options) throws -> CompileIn
     let model: ANEExactTwoTokenBranchStatePromotionModel
     if let futureSidecarPath = options.futureSidecarPath {
         let futureSidecar = try TwoStepStudentCheckpoint.load(path: futureSidecarPath)
-        model = try ANEExactTwoTokenBranchStatePromotionModel(
-            weights: weights,
-            futureSidecar: futureSidecar,
-            layerCount: options.layerCount,
-            maxSequenceTokens: options.maxSequenceTokens,
-            outputHeadBackend: options.outputHeadBackend,
-            trunkBackend: options.twoStepBackend,
-            trunkLaneSpatial: options.trunkLaneSpatial,
-            outputHeadLaneSpatial: options.outputHeadLaneSpatial
-        )
+        if options.twoStepBackend == .identityZeroTrunkLookup {
+            model = try ANEExactTwoTokenBranchStatePromotionModel(
+                owningLookupWeights: weights,
+                futureSidecar: futureSidecar,
+                layerCount: options.layerCount,
+                maxSequenceTokens: options.maxSequenceTokens,
+                outputHeadBackend: options.outputHeadBackend,
+                trunkBackend: options.twoStepBackend,
+                trunkLaneSpatial: options.trunkLaneSpatial,
+                outputHeadLaneSpatial: options.outputHeadLaneSpatial
+            )
+        } else {
+            model = try ANEExactTwoTokenBranchStatePromotionModel(
+                weights: weights,
+                futureSidecar: futureSidecar,
+                layerCount: options.layerCount,
+                maxSequenceTokens: options.maxSequenceTokens,
+                outputHeadBackend: options.outputHeadBackend,
+                trunkBackend: options.twoStepBackend,
+                trunkLaneSpatial: options.trunkLaneSpatial,
+                outputHeadLaneSpatial: options.outputHeadLaneSpatial
+            )
+        }
     } else {
         model = try ANEExactTwoTokenBranchStatePromotionModel(
             weights: weights,
@@ -455,12 +468,12 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     try? CompileBudget.setCount(0)
 
     let prompt: [UInt16] = [options.promptToken]
-    let weights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
+    let controlWeights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
 
     printStderr("Starting control model init")
     let controlInitStart = mach_absolute_time()
     let controlModel = try ANERecurrentGenerationModel(
-        weights: weights,
+        weights: controlWeights,
         layerCount: options.layerCount,
         maxSequenceTokens: options.maxSequenceTokens,
         outputHeadBackend: options.outputHeadBackend,
@@ -473,23 +486,37 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     var controlHarness = DirectTokenSelectionGenerationHarness(model: controlModel, strategy: .argmax)
 
     printStderr("Starting two-step model init")
+    let twoStepWeights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
     let twoStepInitStart = mach_absolute_time()
     let twoStepModel: ANEExactTwoTokenBranchStatePromotionModel
     if let futureSidecarPath = options.futureSidecarPath {
         let futureSidecar = try TwoStepStudentCheckpoint.load(path: futureSidecarPath)
-        twoStepModel = try ANEExactTwoTokenBranchStatePromotionModel(
-            weights: weights,
-            futureSidecar: futureSidecar,
-            layerCount: options.layerCount,
-            maxSequenceTokens: options.maxSequenceTokens,
-            outputHeadBackend: options.outputHeadBackend,
-            trunkBackend: options.twoStepBackend,
-            trunkLaneSpatial: options.trunkLaneSpatial,
-            outputHeadLaneSpatial: options.outputHeadLaneSpatial
-        )
+        if options.twoStepBackend == .identityZeroTrunkLookup {
+            twoStepModel = try ANEExactTwoTokenBranchStatePromotionModel(
+                owningLookupWeights: twoStepWeights,
+                futureSidecar: futureSidecar,
+                layerCount: options.layerCount,
+                maxSequenceTokens: options.maxSequenceTokens,
+                outputHeadBackend: options.outputHeadBackend,
+                trunkBackend: options.twoStepBackend,
+                trunkLaneSpatial: options.trunkLaneSpatial,
+                outputHeadLaneSpatial: options.outputHeadLaneSpatial
+            )
+        } else {
+            twoStepModel = try ANEExactTwoTokenBranchStatePromotionModel(
+                weights: twoStepWeights,
+                futureSidecar: futureSidecar,
+                layerCount: options.layerCount,
+                maxSequenceTokens: options.maxSequenceTokens,
+                outputHeadBackend: options.outputHeadBackend,
+                trunkBackend: options.twoStepBackend,
+                trunkLaneSpatial: options.trunkLaneSpatial,
+                outputHeadLaneSpatial: options.outputHeadLaneSpatial
+            )
+        }
     } else {
         twoStepModel = try ANEExactTwoTokenBranchStatePromotionModel(
-            weights: weights,
+            weights: twoStepWeights,
             layerCount: options.layerCount,
             maxSequenceTokens: options.maxSequenceTokens,
             outputHeadBackend: options.outputHeadBackend,
