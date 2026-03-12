@@ -233,6 +233,8 @@ coreml_min_ms="$(jq -s 'map(.coreml.median_ms_per_token) | min' "${valid_runs[@]
 coreml_max_ms="$(jq -s 'map(.coreml.median_ms_per_token) | max' "${valid_runs[@]}")"
 coreml_cv="$(jq -s 'map(.coreml.median_ms_per_token) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "${valid_runs[@]}")"
 speedup_cv="$(jq -s 'map(.two_step_speedup_vs_coreml) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "${valid_runs[@]}")"
+speedup_min="$(jq -s 'map(.two_step_speedup_vs_coreml) | min' "${valid_runs[@]}")"
+speedup_max="$(jq -s 'map(.two_step_speedup_vs_coreml) | max' "${valid_runs[@]}")"
 
 {
   echo "results_dir=$RESULTS_DIR"
@@ -258,8 +260,8 @@ speedup_cv="$(jq -s 'map(.two_step_speedup_vs_coreml) | (length) as $n | (add / 
   echo "coreml_max_ms_per_token=$coreml_max_ms"
   echo "coreml_cv=$coreml_cv"
   echo "two_step_speedup_vs_coreml=$speedup_median"
-  echo "two_step_speedup_min=$(jq -s 'map(.two_step_speedup_vs_coreml) | min' "${valid_runs[@]}")"
-  echo "two_step_speedup_max=$(jq -s 'map(.two_step_speedup_vs_coreml) | max' "${valid_runs[@]}")"
+  echo "two_step_speedup_min=$speedup_min"
+  echo "two_step_speedup_max=$speedup_max"
   echo "two_step_speedup_cv=$speedup_cv"
   echo "control_speedup_vs_coreml=$(jq -s 'map(.control_speedup_vs_coreml // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else "n/a" end' "${valid_runs[@]}")"
   echo "total_elapsed_s=$total_benchmark_elapsed"
