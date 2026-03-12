@@ -1704,38 +1704,67 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                 bottleneck: 128,
                 laneSpatial: laneSpatial
             )
-            let headInputSurface = try factoredHead.rmsNormClassifier.inputSurface(at: 0)
             let headOutputSurface = try factoredHead.rmsNormClassifier.outputSurface(at: 0)
 
             let vocabSize = weights.vocabSize
-            let compileTimeMs = machMilliseconds(GenerationClock.now() - compileStart)
 
-            // Extract surface refs for direct access (IOSurfaceRef is Copyable)
-            let t0xIn = tripletSessions[0].handles.xIn
-            let t0xOut = tripletSessions[0].handles.xOut
-            let t0sIn0 = tripletSessions[0].handles.stateIn0
-            let t0sIn1 = tripletSessions[0].handles.stateIn1
-            let t0sIn2 = tripletSessions[0].handles.stateIn2
+            // === ZERO-COPY REBINDING ===
+            // Rebind T0 state inputs → T0 state outputs (in-place state)
             let t0sOut0 = tripletSessions[0].handles.stateOut0
             let t0sOut1 = tripletSessions[0].handles.stateOut1
             let t0sOut2 = tripletSessions[0].handles.stateOut2
-            let t1xIn = tripletCount > 1 ? tripletSessions[1].handles.xIn : t0xIn
-            let t1xOut = tripletCount > 1 ? tripletSessions[1].handles.xOut : t0xOut
-            let t1sIn0 = tripletCount > 1 ? tripletSessions[1].handles.stateIn0 : t0sIn0
-            let t1sIn1 = tripletCount > 1 ? tripletSessions[1].handles.stateIn1 : t0sIn1
-            let t1sIn2 = tripletCount > 1 ? tripletSessions[1].handles.stateIn2 : t0sIn2
-            let t1sOut0 = tripletCount > 1 ? tripletSessions[1].handles.stateOut0 : t0sOut0
-            let t1sOut1 = tripletCount > 1 ? tripletSessions[1].handles.stateOut1 : t0sOut1
-            let t1sOut2 = tripletCount > 1 ? tripletSessions[1].handles.stateOut2 : t0sOut2
-            let headIn = headInputSurface
+            try tripletSessions[0].kernels.step.rebindInput(at: 1, to: t0sOut0)
+            try tripletSessions[0].kernels.step.rebindInput(at: 2, to: t0sOut1)
+            try tripletSessions[0].kernels.step.rebindInput(at: 3, to: t0sOut2)
+
+            if tripletCount > 1 {
+                // Rebind T1 xIn → T0 xOut (zero-copy transfer)
+                let t0xOut = tripletSessions[0].handles.xOut
+                try tripletSessions[1].kernels.step.rebindInput(at: 0, to: t0xOut)
+
+                // Rebind T1 state inputs → T1 state outputs (in-place state)
+                let t1sOut0 = tripletSessions[1].handles.stateOut0
+                let t1sOut1 = tripletSessions[1].handles.stateOut1
+                let t1sOut2 = tripletSessions[1].handles.stateOut2
+                try tripletSessions[1].kernels.step.rebindInput(at: 1, to: t1sOut0)
+                try tripletSessions[1].kernels.step.rebindInput(at: 2, to: t1sOut1)
+                try tripletSessions[1].kernels.step.rebindInput(at: 3, to: t1sOut2)
+
+                // Rebind head input → T1 xOut (zero-copy transfer)
+                let t1xOut = tripletSessions[1].handles.xOut
+                try factoredHead.rmsNormClassifier.rebindInput(at: 0, to: t1xOut)
+            } else {
+                let t0xOut = tripletSessions[0].handles.xOut
+                try factoredHead.rmsNormClassifier.rebindInput(at: 0, to: t0xOut)
+            }
+
+            let t0xIn = tripletSessions[0].handles.xIn
             let headOut = headOutputSurface
+            let compileTimeMs = machMilliseconds(GenerationClock.now() - compileStart)
+
+            // Zero-copy reset: zero the shared state surfaces directly
+            func resetZeroCopy() throws {
+                let zeroLane = tripletSessions[0].handles.zeroLane
+                try SurfaceIO.copyFP16(dst: t0sOut0, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                try SurfaceIO.copyFP16(dst: t0sOut1, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                try SurfaceIO.copyFP16(dst: t0sOut2, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                if tripletCount > 1 {
+                    let zl1 = tripletSessions[1].handles.zeroLane
+                    let s10 = tripletSessions[1].handles.stateOut0
+                    let s11 = tripletSessions[1].handles.stateOut1
+                    let s12 = tripletSessions[1].handles.stateOut2
+                    try SurfaceIO.copyFP16(dst: s10, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                    try SurfaceIO.copyFP16(dst: s11, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                    try SurfaceIO.copyFP16(dst: s12, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                }
+            }
 
             // Warmup
             for _ in 0..<warmup {
-                for tIdx in 0..<tripletCount { try tripletSessions[tIdx].reset() }
+                try resetZeroCopy()
                 var tokens = Array(repeating: promptTokens[0], count: streamCount)
                 for _ in 0..<maxNewTokens {
-                    try batchedTokenStepWithEval(
+                    try batchedTokenStepZeroCopy(
                         tokens: &tokens,
                         streamCount: streamCount,
                         embedding: weights.embedding,
@@ -1743,13 +1772,8 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                         laneSpatial: laneSpatial,
                         tripletCount: tripletCount,
                         tripletSessions: &tripletSessions,
-                        t0xIn: t0xIn, t0xOut: t0xOut,
-                        t0sIn0: t0sIn0, t0sIn1: t0sIn1, t0sIn2: t0sIn2,
-                        t0sOut0: t0sOut0, t0sOut1: t0sOut1, t0sOut2: t0sOut2,
-                        t1xIn: t1xIn, t1xOut: t1xOut,
-                        t1sIn0: t1sIn0, t1sIn1: t1sIn1, t1sIn2: t1sIn2,
-                        t1sOut0: t1sOut0, t1sOut1: t1sOut1, t1sOut2: t1sOut2,
-                        headIn: headIn, headOut: headOut,
+                        t0xIn: t0xIn,
+                        headOut: headOut,
                         headEval: { try factoredHead.rmsNormClassifier.eval() },
                         vocabSize: vocabSize
                     )
@@ -1760,12 +1784,12 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             var roundLatenciesMs: [Double] = []
             roundLatenciesMs.reserveCapacity(iterations)
             for _ in 0..<iterations {
-                for tIdx in 0..<tripletCount { try tripletSessions[tIdx].reset() }
+                try resetZeroCopy()
                 var tokens = Array(repeating: promptTokens[0], count: streamCount)
 
                 let start = GenerationClock.now()
                 for _ in 0..<maxNewTokens {
-                    try batchedTokenStepWithEval(
+                    try batchedTokenStepZeroCopy(
                         tokens: &tokens,
                         streamCount: streamCount,
                         embedding: weights.embedding,
@@ -1773,13 +1797,8 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                         laneSpatial: laneSpatial,
                         tripletCount: tripletCount,
                         tripletSessions: &tripletSessions,
-                        t0xIn: t0xIn, t0xOut: t0xOut,
-                        t0sIn0: t0sIn0, t0sIn1: t0sIn1, t0sIn2: t0sIn2,
-                        t0sOut0: t0sOut0, t0sOut1: t0sOut1, t0sOut2: t0sOut2,
-                        t1xIn: t1xIn, t1xOut: t1xOut,
-                        t1sIn0: t1sIn0, t1sIn1: t1sIn1, t1sIn2: t1sIn2,
-                        t1sOut0: t1sOut0, t1sOut1: t1sOut1, t1sOut2: t1sOut2,
-                        headIn: headIn, headOut: headOut,
+                        t0xIn: t0xIn,
+                        headOut: headOut,
                         headEval: { try factoredHead.rmsNormClassifier.eval() },
                         vocabSize: vocabSize
                     )
@@ -2341,6 +2360,317 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                 batched ane streams=\(sample.streamCount) median_ms_token=\(sample.medianMsPerToken) aggregate_tps=\(sample.aggregateTokensPerSecond) per_stream_tps=\(sample.perStreamTokensPerSecond) compile=\(sample.compileTimeMs) round_ms=\(sample.medianRoundLatencyMs)
                 """
             )
+        }
+    }
+
+    /// Zero-copy step: no state copies, no xfer copy, no head copy.
+    /// Requires surfaces to be pre-rebound so inputs alias outputs.
+    private func batchedTokenStepZeroCopy(
+        tokens: inout [UInt16],
+        streamCount: Int,
+        embedding: borrowing TensorBuffer,
+        dim: Int,
+        laneSpatial: Int,
+        tripletCount: Int,
+        tripletSessions: inout LayerStorage<RWKVStyleFusedThreeLayerSession>,
+        t0xIn: IOSurfaceRef,
+        headOut: IOSurfaceRef,
+        headEval: () throws -> Void,
+        vocabSize: Int
+    ) throws {
+        try embedding.withUnsafePointer { embPtr in
+            try tokens.withUnsafeBufferPointer { tokenBuf in
+                try SurfaceIO.writeEmbeddingBatchFP16(
+                    to: t0xIn, channelOffset: 0, spatial: laneSpatial,
+                    embeddingTable: embPtr, dim: dim,
+                    tokenIDs: tokenBuf.baseAddress!, streamCount: streamCount
+                )
+            }
+        }
+
+        try tripletSessions[0].kernels.step.eval()
+
+        if tripletCount > 1 {
+            // T1.xIn is already rebound to T0.xOut — no copy needed
+            try tripletSessions[1].kernels.step.eval()
+        }
+
+        // headIn is already rebound to lastXOut — no copy needed
+        try headEval()
+
+        let argmaxResults = try SurfaceIO.argmaxBatchFP16SpatialParallel(
+            from: headOut, channelOffset: 0, spatial: laneSpatial,
+            channels: vocabSize, streamCount: streamCount, nBlocks: 8
+        )
+        for streamIdx in 0..<streamCount {
+            tokens[streamIdx] = UInt16(argmaxResults[streamIdx].index)
+        }
+    }
+
+    // MARK: - Zero-copy correctness check
+
+    func test_zerocopy_correctness_on_hardware() throws {
+        try requireGenerationHardware()
+
+        let laneSpatial = 512
+        let dim = ModelConfig.dim
+        let layerCount = 6
+        let streamCount = 512
+        let maxNewTokens = 8
+
+        let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount)
+        let tripletCount = layerCount / 3
+
+        // === BASELINE: normal copies ===
+        var baselineSessions = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+            count: tripletCount,
+            throwingInitializer: { tripletIdx in
+                let base = tripletIdx * 3
+                return try RWKVStyleFusedThreeLayerSession(
+                    weights0: weights.layers[base],
+                    weights1: weights.layers[base + 1],
+                    weights2: weights.layers[base + 2],
+                    laneSpatial: laneSpatial
+                )
+            }
+        )
+        let baselineHead = try FactoredGenerationRMSNormClassifierKernelSet(
+            rmsFinal: weights.rmsFinal,
+            classifierProjection: TensorBuffer(count: 128 * dim, zeroed: true),
+            classifierExpansion: TensorBuffer(count: weights.vocabSize * 128, zeroed: true),
+            vocabSize: weights.vocabSize, bottleneck: 128, laneSpatial: laneSpatial
+        )
+        var baselineTokens = Array(repeating: UInt16(0), count: streamCount)
+        for tIdx in 0..<tripletCount { try baselineSessions[tIdx].reset() }
+        for _ in 0..<maxNewTokens {
+            try batchedTokenStepWithEval(
+                tokens: &baselineTokens, streamCount: streamCount,
+                embedding: weights.embedding, dim: dim, laneSpatial: laneSpatial,
+                tripletCount: tripletCount, tripletSessions: &baselineSessions,
+                t0xIn: baselineSessions[0].handles.xIn, t0xOut: baselineSessions[0].handles.xOut,
+                t0sIn0: baselineSessions[0].handles.stateIn0, t0sIn1: baselineSessions[0].handles.stateIn1, t0sIn2: baselineSessions[0].handles.stateIn2,
+                t0sOut0: baselineSessions[0].handles.stateOut0, t0sOut1: baselineSessions[0].handles.stateOut1, t0sOut2: baselineSessions[0].handles.stateOut2,
+                t1xIn: baselineSessions[1].handles.xIn, t1xOut: baselineSessions[1].handles.xOut,
+                t1sIn0: baselineSessions[1].handles.stateIn0, t1sIn1: baselineSessions[1].handles.stateIn1, t1sIn2: baselineSessions[1].handles.stateIn2,
+                t1sOut0: baselineSessions[1].handles.stateOut0, t1sOut1: baselineSessions[1].handles.stateOut1, t1sOut2: baselineSessions[1].handles.stateOut2,
+                headIn: try baselineHead.rmsNormClassifier.inputSurface(at: 0),
+                headOut: try baselineHead.rmsNormClassifier.outputSurface(at: 0),
+                headEval: { try baselineHead.rmsNormClassifier.eval() },
+                vocabSize: weights.vocabSize
+            )
+        }
+
+        // === ZERO-COPY: in-place rebind ===
+        var zcSessions = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+            count: tripletCount,
+            throwingInitializer: { tripletIdx in
+                let base = tripletIdx * 3
+                return try RWKVStyleFusedThreeLayerSession(
+                    weights0: weights.layers[base],
+                    weights1: weights.layers[base + 1],
+                    weights2: weights.layers[base + 2],
+                    laneSpatial: laneSpatial
+                )
+            }
+        )
+        let zcHead = try FactoredGenerationRMSNormClassifierKernelSet(
+            rmsFinal: weights.rmsFinal,
+            classifierProjection: TensorBuffer(count: 128 * dim, zeroed: true),
+            classifierExpansion: TensorBuffer(count: weights.vocabSize * 128, zeroed: true),
+            vocabSize: weights.vocabSize, bottleneck: 128, laneSpatial: laneSpatial
+        )
+
+        // Rebind for zero-copy
+        let t0sOut0 = zcSessions[0].handles.stateOut0
+        let t0sOut1 = zcSessions[0].handles.stateOut1
+        let t0sOut2 = zcSessions[0].handles.stateOut2
+        try zcSessions[0].kernels.step.rebindInput(at: 1, to: t0sOut0)
+        try zcSessions[0].kernels.step.rebindInput(at: 2, to: t0sOut1)
+        try zcSessions[0].kernels.step.rebindInput(at: 3, to: t0sOut2)
+        let t0xOut = zcSessions[0].handles.xOut
+        try zcSessions[1].kernels.step.rebindInput(at: 0, to: t0xOut)
+        let t1sOut0 = zcSessions[1].handles.stateOut0
+        let t1sOut1 = zcSessions[1].handles.stateOut1
+        let t1sOut2 = zcSessions[1].handles.stateOut2
+        try zcSessions[1].kernels.step.rebindInput(at: 1, to: t1sOut0)
+        try zcSessions[1].kernels.step.rebindInput(at: 2, to: t1sOut1)
+        try zcSessions[1].kernels.step.rebindInput(at: 3, to: t1sOut2)
+        let t1xOut = zcSessions[1].handles.xOut
+        try zcHead.rmsNormClassifier.rebindInput(at: 0, to: t1xOut)
+
+        // Zero the shared state surfaces
+        let zl = zcSessions[0].handles.zeroLane
+        try SurfaceIO.copyFP16(dst: t0sOut0, dstChannelOffset: 0, src: zl, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        try SurfaceIO.copyFP16(dst: t0sOut1, dstChannelOffset: 0, src: zl, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        try SurfaceIO.copyFP16(dst: t0sOut2, dstChannelOffset: 0, src: zl, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        let zl1 = zcSessions[1].handles.zeroLane
+        try SurfaceIO.copyFP16(dst: t1sOut0, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        try SurfaceIO.copyFP16(dst: t1sOut1, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        try SurfaceIO.copyFP16(dst: t1sOut2, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+
+        var zcTokens = Array(repeating: UInt16(0), count: streamCount)
+        let zcXIn = zcSessions[0].handles.xIn
+        let zcHeadOut = try zcHead.rmsNormClassifier.outputSurface(at: 0)
+        for _ in 0..<maxNewTokens {
+            try batchedTokenStepZeroCopy(
+                tokens: &zcTokens, streamCount: streamCount,
+                embedding: weights.embedding, dim: dim, laneSpatial: laneSpatial,
+                tripletCount: tripletCount, tripletSessions: &zcSessions,
+                t0xIn: zcXIn, headOut: zcHeadOut,
+                headEval: { try zcHead.rmsNormClassifier.eval() },
+                vocabSize: weights.vocabSize
+            )
+        }
+
+        // Compare tokens
+        var mismatches = 0
+        for i in 0..<streamCount {
+            if baselineTokens[i] != zcTokens[i] { mismatches += 1 }
+        }
+        print("zerocopy_correctness: \(mismatches)/\(streamCount) mismatches")
+        XCTAssertEqual(mismatches, 0, "Zero-copy tokens must match baseline tokens")
+    }
+
+    // MARK: - Zero-copy surface rebind benchmark
+
+    func test_zerocopy_rebind_benchmark_on_hardware() throws {
+        try requireGenerationHardware()
+
+        let dim = ModelConfig.dim
+        let layerCount = 6
+        let warmup = 3
+        let iterations = 20
+        let maxNewTokens = 8
+        let streamCounts = [32, 64, 128, 256, 512]
+        let prompt: [UInt16] = [0]
+
+        for streamCount in streamCounts {
+            let laneSpatial: Int
+            if streamCount <= 32 { laneSpatial = 32 }
+            else if streamCount <= 64 { laneSpatial = 64 }
+            else if streamCount <= 128 { laneSpatial = 128 }
+            else if streamCount <= 256 { laneSpatial = 256 }
+            else { laneSpatial = 512 }
+
+            let compileStart = GenerationClock.now()
+            let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount)
+            let tripletCount = layerCount / 3
+
+            var tripletSessions = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+                count: tripletCount,
+                throwingInitializer: { tripletIdx in
+                    let base = tripletIdx * 3
+                    return try RWKVStyleFusedThreeLayerSession(
+                        weights0: weights.layers[base],
+                        weights1: weights.layers[base + 1],
+                        weights2: weights.layers[base + 2],
+                        laneSpatial: laneSpatial
+                    )
+                }
+            )
+
+            let factoredHead = try FactoredGenerationRMSNormClassifierKernelSet(
+                rmsFinal: weights.rmsFinal,
+                classifierProjection: TensorBuffer(count: 128 * ModelConfig.dim, zeroed: true),
+                classifierExpansion: TensorBuffer(count: weights.vocabSize * 128, zeroed: true),
+                vocabSize: weights.vocabSize,
+                bottleneck: 128,
+                laneSpatial: laneSpatial
+            )
+            let headOut = try factoredHead.rmsNormClassifier.outputSurface(at: 0)
+            let vocabSize = weights.vocabSize
+
+            // === ZERO-COPY REBINDING ===
+            // 1. Rebind T0 state inputs → T0 state outputs (in-place state)
+            let t0sOut0 = tripletSessions[0].handles.stateOut0
+            let t0sOut1 = tripletSessions[0].handles.stateOut1
+            let t0sOut2 = tripletSessions[0].handles.stateOut2
+            try tripletSessions[0].kernels.step.rebindInput(at: 1, to: t0sOut0)
+            try tripletSessions[0].kernels.step.rebindInput(at: 2, to: t0sOut1)
+            try tripletSessions[0].kernels.step.rebindInput(at: 3, to: t0sOut2)
+
+            if tripletCount > 1 {
+                // 2. Rebind T1 xIn → T0 xOut (zero-copy transfer)
+                let t0xOut = tripletSessions[0].handles.xOut
+                try tripletSessions[1].kernels.step.rebindInput(at: 0, to: t0xOut)
+
+                // 3. Rebind T1 state inputs → T1 state outputs (in-place state)
+                let t1sOut0 = tripletSessions[1].handles.stateOut0
+                let t1sOut1 = tripletSessions[1].handles.stateOut1
+                let t1sOut2 = tripletSessions[1].handles.stateOut2
+                try tripletSessions[1].kernels.step.rebindInput(at: 1, to: t1sOut0)
+                try tripletSessions[1].kernels.step.rebindInput(at: 2, to: t1sOut1)
+                try tripletSessions[1].kernels.step.rebindInput(at: 3, to: t1sOut2)
+
+                // 4. Rebind head input → T1 xOut (zero-copy transfer)
+                let t1xOut = tripletSessions[1].handles.xOut
+                try factoredHead.rmsNormClassifier.rebindInput(at: 0, to: t1xOut)
+            } else {
+                let t0xOut = tripletSessions[0].handles.xOut
+                try factoredHead.rmsNormClassifier.rebindInput(at: 0, to: t0xOut)
+            }
+
+            let t0xIn = tripletSessions[0].handles.xIn
+            let compileTimeMs = machMilliseconds(GenerationClock.now() - compileStart)
+
+            // Zero surfaces for reset (state surfaces are now the output surfaces)
+            func resetZeroCopy() throws {
+                let zeroLane = tripletSessions[0].handles.zeroLane
+                try SurfaceIO.copyFP16(dst: t0sOut0, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                try SurfaceIO.copyFP16(dst: t0sOut1, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                try SurfaceIO.copyFP16(dst: t0sOut2, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                if tripletCount > 1 {
+                    let zl1 = tripletSessions[1].handles.zeroLane
+                    let s10 = tripletSessions[1].handles.stateOut0
+                    let s11 = tripletSessions[1].handles.stateOut1
+                    let s12 = tripletSessions[1].handles.stateOut2
+                    try SurfaceIO.copyFP16(dst: s10, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                    try SurfaceIO.copyFP16(dst: s11, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                    try SurfaceIO.copyFP16(dst: s12, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+                }
+            }
+
+            // Warmup
+            for _ in 0..<warmup {
+                try resetZeroCopy()
+                var tokens = Array(repeating: prompt[0], count: streamCount)
+                for _ in 0..<maxNewTokens {
+                    try batchedTokenStepZeroCopy(
+                        tokens: &tokens, streamCount: streamCount,
+                        embedding: weights.embedding, dim: dim, laneSpatial: laneSpatial,
+                        tripletCount: tripletCount, tripletSessions: &tripletSessions,
+                        t0xIn: t0xIn, headOut: headOut,
+                        headEval: { try factoredHead.rmsNormClassifier.eval() },
+                        vocabSize: vocabSize
+                    )
+                }
+            }
+
+            // Timed iterations
+            var roundLatenciesMs: [Double] = []
+            roundLatenciesMs.reserveCapacity(iterations)
+            for _ in 0..<iterations {
+                try resetZeroCopy()
+                var tokens = Array(repeating: prompt[0], count: streamCount)
+                let start = GenerationClock.now()
+                for _ in 0..<maxNewTokens {
+                    try batchedTokenStepZeroCopy(
+                        tokens: &tokens, streamCount: streamCount,
+                        embedding: weights.embedding, dim: dim, laneSpatial: laneSpatial,
+                        tripletCount: tripletCount, tripletSessions: &tripletSessions,
+                        t0xIn: t0xIn, headOut: headOut,
+                        headEval: { try factoredHead.rmsNormClassifier.eval() },
+                        vocabSize: vocabSize
+                    )
+                }
+                let elapsed = machMilliseconds(GenerationClock.now() - start)
+                roundLatenciesMs.append(elapsed / Double(maxNewTokens))
+            }
+            roundLatenciesMs.sort()
+            let medianRound = roundLatenciesMs[roundLatenciesMs.count / 2]
+            let medianPerToken = medianRound / Double(streamCount)
+            let aggTps = Double(streamCount) / (medianRound / 1000.0)
+            print("zerocopy ane streams=\(streamCount) median_ms_token=\(medianPerToken) aggregate_tps=\(aggTps) compile=\(compileTimeMs) round_ms=\(medianRound)")
         }
     }
 

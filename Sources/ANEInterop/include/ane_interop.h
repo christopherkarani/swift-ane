@@ -42,6 +42,11 @@ int ane_interop_live_handle_count(void);
 uint64_t ane_interop_last_hw_execution_time_ns(ANEHandle *handle);
 bool ane_interop_has_perf_stats(ANEHandle *handle);
 
+/// Replace an input surface and rebuild the ANE request.
+/// Returns true on success (request rebuilt). False if index is out of range
+/// or the request rebuild fails.
+bool ane_interop_rebind_input(ANEHandle *handle, int index, IOSurfaceRef newSurface);
+
 #define ANE_INTEROP_CHAINING_PROBE_UNAVAILABLE 0
 #define ANE_INTEROP_CHAINING_PROBE_REQUEST_BUILD_FAILED 1
 #define ANE_INTEROP_CHAINING_PROBE_PREPARE_FAILED 2

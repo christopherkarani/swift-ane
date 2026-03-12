@@ -1310,6 +1310,64 @@ bool ane_interop_has_perf_stats(ANEHandle *handle) {
     return handle->perfStatsRequested && handle->perfStats != NULL;
 }
 
+bool ane_interop_rebind_input(ANEHandle *handle, int index, IOSurfaceRef newSurface) {
+    @autoreleasepool {
+        if (!handle || !newSurface) return false;
+        if (index < 0 || index >= handle->nInputs) return false;
+
+        ane_interop_init();
+        if (!g_ANEReq || !g_ANEIO) return false;
+
+        // Replace the surface (retain new, release old if different)
+        IOSurfaceRef old = handle->ioInputs[index];
+        if (old != newSurface) {
+            CFRetain(newSurface);
+            handle->ioInputs[index] = newSurface;
+            if (old) CFRelease(old);
+        }
+
+        // Rebuild the _ANERequest with updated surface bindings
+        NSMutableArray *wIns = [NSMutableArray arrayWithCapacity:(NSUInteger)handle->nInputs];
+        NSMutableArray *iIdx = [NSMutableArray arrayWithCapacity:(NSUInteger)handle->nInputs];
+        for (int i = 0; i < handle->nInputs; i++) {
+            id obj = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(
+                g_ANEIO, @selector(objectWithIOSurface:), handle->ioInputs[i]);
+            if (!obj) return false;
+            [wIns addObject:obj];
+            [iIdx addObject:@(i)];
+        }
+        NSMutableArray *wOuts = [NSMutableArray arrayWithCapacity:(NSUInteger)handle->nOutputs];
+        NSMutableArray *oIdx = [NSMutableArray arrayWithCapacity:(NSUInteger)handle->nOutputs];
+        for (int i = 0; i < handle->nOutputs; i++) {
+            id obj = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(
+                g_ANEIO, @selector(objectWithIOSurface:), handle->ioOutputs[i]);
+            if (!obj) return false;
+            [wOuts addObject:obj];
+            [oIdx addObject:@(i)];
+        }
+
+        id perfStats = handle->perfStats ? (__bridge id)handle->perfStats : nil;
+        id newReq = nil;
+        if (perfStats) {
+            newReq = ((id(*)(Class,SEL,id,id,id,id,id,id))objc_msgSend)(
+                g_ANEReq, @selector(requestWithInputs:inputIndices:outputs:outputIndices:perfStats:procedureIndex:),
+                wIns, iIdx, wOuts, oIdx, perfStats, @0);
+        } else {
+            newReq = ((id(*)(Class,SEL,id,id,id,id,id))objc_msgSend)(
+                g_ANEReq, @selector(requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:),
+                wIns, iIdx, wOuts, oIdx, @0);
+        }
+        if (!newReq) return false;
+
+        // Swap requests
+        void *oldReq = handle->request;
+        handle->request = (void *)CFBridgingRetain(newReq);
+        if (oldReq) CFRelease(oldReq);
+
+        return true;
+    }
+}
+
 // --- VirtualClient eval path probe ---
 
 bool ane_interop_runtime_has_virtual_client(void) {
