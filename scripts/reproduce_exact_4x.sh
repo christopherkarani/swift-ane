@@ -129,12 +129,17 @@ if [[ -n "$GENERATION_MODEL" ]]; then
 fi
 
 failed_runs=0
+benchmark_start_epoch=$(date +%s)
 for run in $(seq 1 "$REPEATS"); do
   echo "Run $run/$REPEATS"
+  run_start=$(date +%s)
   run_exit=0
   "$PROBE" "${COMMON_ARGS[@]}" \
     > "$RESULTS_DIR/run-$run.json" \
     2> "$RESULTS_DIR/run-$run.stderr.log" || run_exit=$?
+  run_elapsed=$(( $(date +%s) - run_start ))
+  echo "  elapsed: ${run_elapsed}s (exit=$run_exit)"
+  echo "$run_elapsed" > "$RESULTS_DIR/run-$run.elapsed_s"
   if [[ $run_exit -ne 0 ]]; then
     echo "WARNING: Run $run exited with code $run_exit" >&2
     echo "  stderr tail: $(tail -3 "$RESULTS_DIR/run-$run.stderr.log")" >&2
@@ -144,6 +149,7 @@ for run in $(seq 1 "$REPEATS"); do
     failed_runs=$((failed_runs + 1))
   fi
 done
+total_benchmark_elapsed=$(( $(date +%s) - benchmark_start_epoch ))
 
 if [[ $failed_runs -eq $REPEATS ]]; then
   echo "FATAL: All $REPEATS runs failed. See stderr logs in $RESULTS_DIR" >&2
@@ -241,6 +247,7 @@ jq -s \
   --arg two_step_backend "$TWO_STEP_BACKEND" \
   --argjson requested_repeats "$REPEATS" \
   --argjson failed "$failed_runs" \
+  --argjson total_elapsed_s "$total_benchmark_elapsed" \
 '{
   results_dir: $dir,
   timestamp: $ts,
@@ -259,6 +266,7 @@ jq -s \
   requested_repeats: $requested_repeats,
   valid_runs: (length),
   failed_runs: $failed,
+  total_elapsed_s: $total_elapsed_s,
   two_step: {
     median_ms_per_token: (map(.two_step.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]),
     p95_ms_per_token: (map(.two_step.p95_ms_per_token // empty) | if length == 0 then null else sort | .[((length - 1) / 2 | floor)] end),
