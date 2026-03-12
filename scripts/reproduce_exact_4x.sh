@@ -390,7 +390,11 @@ jq -s \
       proposer_ms_per_pass: (map(.two_step.median_proposer_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
       verifier_trunk_ms_per_pass: (map(.two_step.median_verifier_trunk_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
       verifier_logits_ms_per_pass: (map(.two_step.median_verifier_logits_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
-      state_advance_ms_per_pass: (map(.two_step.median_state_advance_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end)
+      state_advance_ms_per_pass: (map(.two_step.median_state_advance_ms_per_pass // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else null end),
+      per_run_proposer_ms: (map(.two_step.median_proposer_ms_per_pass // null)),
+      per_run_verifier_trunk_ms: (map(.two_step.median_verifier_trunk_ms_per_pass // null)),
+      per_run_verifier_logits_ms: (map(.two_step.median_verifier_logits_ms_per_pass // null)),
+      per_run_state_advance_ms: (map(.two_step.median_state_advance_ms_per_pass // null))
     }
   },
   control: {
