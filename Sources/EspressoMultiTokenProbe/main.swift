@@ -448,7 +448,11 @@ private func compileOnlyPayload(options: Options) throws -> [String: Any] {
     let twoStep = try measureTwoStepCompileInitOnly(options: options)
     printStderr(String(format: "Two-step compile/init done in %.3f ms", twoStep.wallInitMs))
 
+    let isoFormatter = ISO8601DateFormatter()
+    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
     return [
+        "probe_timestamp": isoFormatter.string(from: Date()),
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
         "two_step_backend": describe(options.twoStepBackend),
