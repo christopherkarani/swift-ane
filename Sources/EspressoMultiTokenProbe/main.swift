@@ -563,7 +563,12 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         coreMLRawLatencies = nil
     }
 
+    let isoFormatter = ISO8601DateFormatter()
+    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let probeTimestamp = isoFormatter.string(from: Date())
+
     var payload: [String: Any] = [
+        "probe_timestamp": probeTimestamp,
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
         "two_step_backend": describe(options.twoStepBackend),
