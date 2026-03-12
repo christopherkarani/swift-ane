@@ -332,9 +332,9 @@ public struct SpeculativeGenerationTrace: Sendable {
     }
 }
 
-enum GenerationMetrics {
+public enum GenerationMetrics {
     @inline(__always)
-    static func median(_ values: [Double]) -> Double {
+    public static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
         let sorted = values.sorted()
         let mid = sorted.count / 2
@@ -347,7 +347,7 @@ enum GenerationMetrics {
     /// Linear-interpolation percentile (0–100 scale). Returns the value at the
     /// given rank using the same method as NumPy's `percentile(..., method='linear')`.
     @inline(__always)
-    static func percentile(_ values: [Double], at p: Double) -> Double {
+    public static func percentile(_ values: [Double], at p: Double) -> Double {
         guard !values.isEmpty else { return 0 }
         let sorted = values.sorted()
         guard sorted.count > 1 else { return sorted[0] }
