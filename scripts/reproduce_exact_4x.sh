@@ -235,6 +235,7 @@ coreml_cv="$(jq -s 'map(.coreml.median_ms_per_token) | (length) as $n | (add / $
 speedup_cv="$(jq -s 'map(.two_step_speedup_vs_coreml) | (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end' "${valid_runs[@]}")"
 speedup_min="$(jq -s 'map(.two_step_speedup_vs_coreml) | min' "${valid_runs[@]}")"
 speedup_max="$(jq -s 'map(.two_step_speedup_vs_coreml) | max' "${valid_runs[@]}")"
+control_speedup="$(jq -s 'map(.control_speedup_vs_coreml // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else "n/a" end' "${valid_runs[@]}")"
 
 {
   echo "results_dir=$RESULTS_DIR"
@@ -263,7 +264,7 @@ speedup_max="$(jq -s 'map(.two_step_speedup_vs_coreml) | max' "${valid_runs[@]}"
   echo "two_step_speedup_min=$speedup_min"
   echo "two_step_speedup_max=$speedup_max"
   echo "two_step_speedup_cv=$speedup_cv"
-  echo "control_speedup_vs_coreml=$(jq -s 'map(.control_speedup_vs_coreml // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else "n/a" end' "${valid_runs[@]}")"
+  echo "control_speedup_vs_coreml=$control_speedup"
   echo "total_elapsed_s=$total_benchmark_elapsed"
   echo "committed_exact_tokens_per_pass=$committed_tokens_per_pass"
   echo "accepted_future_tokens_per_pass=$accepted_future_tokens_per_pass"
