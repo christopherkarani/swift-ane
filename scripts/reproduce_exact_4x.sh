@@ -189,6 +189,9 @@ coreml_cv="$(jq -s 'map(.coreml.median_ms_per_token) | (length) as $n | (add / $
 
 {
   echo "results_dir=$RESULTS_DIR"
+  echo "requested_repeats=$REPEATS"
+  echo "valid_runs=${#valid_runs[@]}"
+  echo "failed_runs=$failed_runs"
   echo "two_step_median_ms_per_token=$two_step_median_ms"
   echo "two_step_p95_ms_per_token=$two_step_p95_ms"
   echo "two_step_p99_ms_per_token=$two_step_p99_ms"
