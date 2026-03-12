@@ -5,6 +5,9 @@ import ANERuntime
 import ANETypes
 import Espresso
 
+/// Bump this when the probe JSON output contract changes (new fields, renamed keys, etc.).
+private let probeVersion: Int = 2
+
 private enum RunMode: String {
     case compare
     case compileInitOnly = "compile-init-only"
@@ -446,6 +449,7 @@ private func compileOnlyPayload(options: Options) throws -> [String: Any] {
     let probeElapsedS = machMilliseconds(mach_absolute_time() - probeStartTick) / 1000.0
 
     return [
+        "probe_version": probeVersion,
         "probe_timestamp": isoFormatter.string(from: Date()),
         "probe_wall_elapsed_s": probeElapsedS,
         "mode": options.mode.rawValue,
@@ -572,6 +576,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     let probeElapsedS = machMilliseconds(mach_absolute_time() - probeStartTick) / 1000.0
 
     var payload: [String: Any] = [
+        "probe_version": probeVersion,
         "probe_timestamp": probeTimestamp,
         "probe_wall_elapsed_s": probeElapsedS,
         "mode": options.mode.rawValue,
