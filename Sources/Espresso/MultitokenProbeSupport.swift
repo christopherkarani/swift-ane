@@ -60,6 +60,40 @@ public struct ExactTwoTokenBenchmarkSample: Sendable, Equatable {
     }
 }
 
+public struct ExactThreeTokenBenchmarkSample: Sendable, Equatable {
+    public let medianTokenMs: Double
+    public let medianTokensPerSecond: Double
+    public let compileTimeMs: Double
+    public let medianCommittedExactTokensPerPass: Double
+    public let medianAcceptedFutureTokensPerPass: Double
+    public let medianProposerMsPerPass: Double
+    public let medianVerifierTrunkMsPerPass: Double
+    public let medianVerifierLogitsMsPerPass: Double
+    public let medianStateAdvanceMsPerPass: Double
+
+    public init(
+        medianTokenMs: Double,
+        medianTokensPerSecond: Double,
+        compileTimeMs: Double,
+        medianCommittedExactTokensPerPass: Double,
+        medianAcceptedFutureTokensPerPass: Double,
+        medianProposerMsPerPass: Double,
+        medianVerifierTrunkMsPerPass: Double,
+        medianVerifierLogitsMsPerPass: Double,
+        medianStateAdvanceMsPerPass: Double
+    ) {
+        self.medianTokenMs = medianTokenMs
+        self.medianTokensPerSecond = medianTokensPerSecond
+        self.compileTimeMs = compileTimeMs
+        self.medianCommittedExactTokensPerPass = medianCommittedExactTokensPerPass
+        self.medianAcceptedFutureTokensPerPass = medianAcceptedFutureTokensPerPass
+        self.medianProposerMsPerPass = medianProposerMsPerPass
+        self.medianVerifierTrunkMsPerPass = medianVerifierTrunkMsPerPass
+        self.medianVerifierLogitsMsPerPass = medianVerifierLogitsMsPerPass
+        self.medianStateAdvanceMsPerPass = medianStateAdvanceMsPerPass
+    }
+}
+
 public struct CompileInitBenchmarkSample: Sendable, Equatable {
     public let wallInitMs: Double
     public let reportedCompileTimeMs: Double

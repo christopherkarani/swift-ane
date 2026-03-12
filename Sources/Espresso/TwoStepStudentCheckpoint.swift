@@ -39,8 +39,8 @@ public struct TwoStepStudentContract: Sendable, Equatable {
         guard layerCount > 0 else {
             throw .argumentOutOfRange("layerCount must be > 0")
         }
-        guard horizon == 2 else {
-            throw .argumentOutOfRange("two-step student contract requires horizon == 2")
+        guard (2...3).contains(horizon) else {
+            throw .argumentOutOfRange("two-step student contract requires horizon in 2...3")
         }
         guard exactPrefixOnly else {
             throw .argumentOutOfRange("two-step student contract requires exactPrefixOnly == true")
@@ -63,11 +63,29 @@ public struct TwoStepStudentSidecar: ~Copyable {
     public let contract: TwoStepStudentContract
     public let futureRMS: TensorBuffer
     public let futureClassifier: TensorBuffer
+    public let secondFutureRMS: TensorBuffer
+    public let secondFutureClassifier: TensorBuffer
 
     public init(
         contract: TwoStepStudentContract,
         futureRMS: consuming TensorBuffer,
         futureClassifier: consuming TensorBuffer
+    ) throws(TwoStepStudentCheckpointError) {
+        try self.init(
+            contract: contract,
+            futureRMS: futureRMS,
+            futureClassifier: futureClassifier,
+            secondFutureRMS: TensorBuffer(count: 0, zeroed: true),
+            secondFutureClassifier: TensorBuffer(count: 0, zeroed: true)
+        )
+    }
+
+    public init(
+        contract: TwoStepStudentContract,
+        futureRMS: consuming TensorBuffer,
+        futureClassifier: consuming TensorBuffer,
+        secondFutureRMS: consuming TensorBuffer,
+        secondFutureClassifier: consuming TensorBuffer
     ) throws(TwoStepStudentCheckpointError) {
         guard futureRMS.count == contract.dim else {
             throw .configMismatch(
@@ -82,16 +100,50 @@ public struct TwoStepStudentSidecar: ~Copyable {
                 got: "futureClassifier.count=\(futureClassifier.count)"
             )
         }
+        if contract.horizon == 2 {
+            guard secondFutureRMS.count == 0 else {
+                throw .configMismatch(
+                    expected: "secondFutureRMS.count=0 for horizon=2",
+                    got: "secondFutureRMS.count=\(secondFutureRMS.count)"
+                )
+            }
+            guard secondFutureClassifier.count == 0 else {
+                throw .configMismatch(
+                    expected: "secondFutureClassifier.count=0 for horizon=2",
+                    got: "secondFutureClassifier.count=\(secondFutureClassifier.count)"
+                )
+            }
+        } else {
+            guard secondFutureRMS.count == contract.dim else {
+                throw .configMismatch(
+                    expected: "secondFutureRMS.count=\(contract.dim)",
+                    got: "secondFutureRMS.count=\(secondFutureRMS.count)"
+                )
+            }
+            guard secondFutureClassifier.count == expectedClassifierCount else {
+                throw .configMismatch(
+                    expected: "secondFutureClassifier.count=\(expectedClassifierCount)",
+                    got: "secondFutureClassifier.count=\(secondFutureClassifier.count)"
+                )
+            }
+        }
 
         self.contract = contract
         self.futureRMS = futureRMS
         self.futureClassifier = futureClassifier
+        self.secondFutureRMS = secondFutureRMS
+        self.secondFutureClassifier = secondFutureClassifier
+    }
+
+    public var hasUpfrontSecondFutureHead: Bool {
+        contract.horizon >= 3
     }
 }
 
 public enum TwoStepStudentCheckpoint {
     private static let expectedMagic: Int32 = 0x32535446 // "FTS2"
-    private static let expectedVersion: Int32 = 1
+    private static let legacyVersion: Int32 = 1
+    private static let latestVersion: Int32 = 2
     private static let flagExactPrefixOnly: UInt32 = 1 << 0
     private static let flagPromotesPreparedState: UInt32 = 1 << 1
     private static let flagTeacherClassifierWasShared: UInt32 = 1 << 2
@@ -182,6 +234,10 @@ public enum TwoStepStudentCheckpoint {
         try writeHeader(file, header: &header)
         try writeBuffer(file, buffer: sidecar.futureRMS, segmentName: "futureRMS")
         try writeBuffer(file, buffer: sidecar.futureClassifier, segmentName: "futureClassifier")
+        if sidecar.hasUpfrontSecondFutureHead {
+            try writeBuffer(file, buffer: sidecar.secondFutureRMS, segmentName: "secondFutureRMS")
+            try writeBuffer(file, buffer: sidecar.secondFutureClassifier, segmentName: "secondFutureClassifier")
+        }
     }
 
     public static func load(
@@ -194,6 +250,7 @@ public enum TwoStepStudentCheckpoint {
         defer { fclose(file) }
 
         let header = try readAndValidateHeader(file)
+        let version = Int32(littleEndian: header.version)
         let contract = try contract(from: header)
         if let expectedContract, expectedContract != contract {
             throw .configMismatch(
@@ -206,11 +263,32 @@ public enum TwoStepStudentCheckpoint {
         let futureClassifier = TensorBuffer(count: contract.dim * contract.vocabSize, zeroed: false)
         try readBuffer(file, into: futureRMS, segmentName: "futureRMS")
         try readBuffer(file, into: futureClassifier, segmentName: "futureClassifier")
+        if version == legacyVersion {
+            return try TwoStepStudentSidecar(
+                contract: contract,
+                futureRMS: futureRMS,
+                futureClassifier: futureClassifier
+            )
+        }
+
+        let secondFutureRMS: TensorBuffer
+        let secondFutureClassifier: TensorBuffer
+        if contract.horizon >= 3 {
+            secondFutureRMS = TensorBuffer(count: contract.dim, zeroed: false)
+            secondFutureClassifier = TensorBuffer(count: contract.dim * contract.vocabSize, zeroed: false)
+            try readBuffer(file, into: secondFutureRMS, segmentName: "secondFutureRMS")
+            try readBuffer(file, into: secondFutureClassifier, segmentName: "secondFutureClassifier")
+        } else {
+            secondFutureRMS = TensorBuffer(count: 0, zeroed: true)
+            secondFutureClassifier = TensorBuffer(count: 0, zeroed: true)
+        }
 
         return try TwoStepStudentSidecar(
             contract: contract,
             futureRMS: futureRMS,
-            futureClassifier: futureClassifier
+            futureClassifier: futureClassifier,
+            secondFutureRMS: secondFutureRMS,
+            secondFutureClassifier: secondFutureClassifier
         )
     }
 
@@ -233,6 +311,11 @@ public enum TwoStepStudentCheckpoint {
         return Int32(value)
     }
 
+    @inline(__always)
+    private static func formatVersion(for contract: TwoStepStudentContract) -> Int32 {
+        contract.horizon >= 3 ? latestVersion : legacyVersion
+    }
+
     private static func makeHeader(
         contract: TwoStepStudentContract
     ) throws(TwoStepStudentCheckpointError) -> Header {
@@ -249,7 +332,7 @@ public enum TwoStepStudentCheckpoint {
 
         return Header(
             magic: expectedMagic.littleEndian,
-            version: expectedVersion.littleEndian,
+            version: formatVersion(for: contract).littleEndian,
             dim: try checkedInt32(contract.dim, field: "dim").littleEndian,
             vocabSize: try checkedInt32(contract.vocabSize, field: "vocabSize").littleEndian,
             layerCount: try checkedInt32(contract.layerCount, field: "layerCount").littleEndian,
@@ -321,7 +404,7 @@ public enum TwoStepStudentCheckpoint {
             throw .invalidMagic(magic)
         }
         let version = Int32(littleEndian: header.version)
-        guard version == expectedVersion else {
+        guard version == legacyVersion || version == latestVersion else {
             throw .unsupportedVersion(version)
         }
         return header

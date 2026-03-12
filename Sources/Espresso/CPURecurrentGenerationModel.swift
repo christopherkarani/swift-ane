@@ -14,9 +14,13 @@ public struct CPURecurrentGenerationModel: ~Copyable, FutureTokenProposingLangua
     private let sharedClassifier: Bool
     private let futureRMS: [Float]
     private let futureClassifier: [Float]
+    private let secondFutureRMS: [Float]
+    private let secondFutureClassifier: [Float]
     private let hasFutureHead: Bool
+    private let hasSecondFutureHead: Bool
     private let stepRMSWorkspace: RMSNorm.Workspace
     private let futureRMSWorkspace: RMSNorm.Workspace
+    private let secondFutureRMSWorkspace: RMSNorm.Workspace
     private var states: [[Float]]
     private var currentActivation: [Float]
     private var hasCurrentActivation: Bool
@@ -47,7 +51,10 @@ public struct CPURecurrentGenerationModel: ~Copyable, FutureTokenProposingLangua
         let futureHead = CPUFutureHead(
             rms: copyArray(from: futureSidecar.futureRMS),
             classifier: copyArray(from: futureSidecar.futureClassifier),
-            hasHead: true
+            secondFutureRMS: copyArray(from: futureSidecar.secondFutureRMS),
+            secondFutureClassifier: copyArray(from: futureSidecar.secondFutureClassifier),
+            hasHead: true,
+            hasSecondHead: futureSidecar.hasUpfrontSecondFutureHead
         )
         try self.init(weights: weights, layerCount: layerCount, futureHead: futureHead)
     }
@@ -90,9 +97,13 @@ public struct CPURecurrentGenerationModel: ~Copyable, FutureTokenProposingLangua
         self.sharedClassifier = weights.sharedClassifier
         self.futureRMS = futureHead.rms
         self.futureClassifier = futureHead.classifier
+        self.secondFutureRMS = futureHead.secondFutureRMS
+        self.secondFutureClassifier = futureHead.secondFutureClassifier
         self.hasFutureHead = futureHead.hasHead
+        self.hasSecondFutureHead = futureHead.hasSecondHead
         self.stepRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
         self.futureRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
+        self.secondFutureRMSWorkspace = RMSNorm.Workspace(seqLen: 1)
         self.states = Array(repeating: Array(repeating: 0, count: ModelConfig.dim), count: layerCount)
         self.currentActivation = Array(repeating: 0, count: ModelConfig.dim)
         self.hasCurrentActivation = false
@@ -180,6 +191,31 @@ public struct CPURecurrentGenerationModel: ~Copyable, FutureTokenProposingLangua
             workspace: futureRMSWorkspace
         )
         return try selectToken(from: logits, strategy: strategy)
+    }
+
+    public mutating func proposeSecondFutureToken(
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        guard hasSecondFutureHead else {
+            throw .runtimeFailure("upfront second future proposer requested without an upfront second future head")
+        }
+        guard hasCurrentActivation else {
+            throw .runtimeFailure("upfront second future proposer requested before any committed activation exists")
+        }
+        let logits = scoreHead(
+            activation: currentActivation,
+            rmsWeights: secondFutureRMS,
+            classifierWeights: secondFutureClassifier,
+            vocabSize: vocabSize,
+            workspace: secondFutureRMSWorkspace
+        )
+        return try selectToken(from: logits, strategy: strategy)
+    }
+
+    public mutating func proposeUpfrontSecondFutureToken(
+        strategy: TokenSelectionStrategy
+    ) throws(GenerationError) -> UInt16 {
+        try proposeSecondFutureToken(strategy: strategy)
     }
 
     private mutating func runStep(token: UInt16) throws(GenerationError) -> [Float] {
@@ -350,10 +386,20 @@ private struct CPULayerWeights {
 private struct CPUFutureHead {
     let rms: [Float]
     let classifier: [Float]
+    let secondFutureRMS: [Float]
+    let secondFutureClassifier: [Float]
     let hasHead: Bool
+    let hasSecondHead: Bool
 
     static func none(vocabSize: Int) -> CPUFutureHead {
-        CPUFutureHead(rms: [], classifier: Array(repeating: 0, count: vocabSize * ModelConfig.dim), hasHead: false)
+        CPUFutureHead(
+            rms: [],
+            classifier: Array(repeating: 0, count: vocabSize * ModelConfig.dim),
+            secondFutureRMS: [],
+            secondFutureClassifier: Array(repeating: 0, count: vocabSize * ModelConfig.dim),
+            hasHead: false,
+            hasSecondHead: false
+        )
     }
 }
 
