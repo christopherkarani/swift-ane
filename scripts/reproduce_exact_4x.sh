@@ -521,8 +521,11 @@ outlier_json="{}"
 
 tukey_detect() {
   local label="$1" jq_path="$2"
-  jq -s --arg label "$label" "
-    [.[] | {file: input_filename, val: ${jq_path}}] |
+  # Inject source filename into each JSON before slurping (input_filename is broken in -s mode)
+  local tagged_input
+  tagged_input="$(for f in "${valid_runs[@]}"; do jq --arg src "$(basename "$f")" '. + {_src: $src}' "$f"; done)"
+  echo "$tagged_input" | jq -s --arg label "$label" "
+    [.[] | {file: ._src, val: ${jq_path}}] |
     [.[] | select(.val != null)] |
     sort_by(.val) |
     if length < 4 then {label: \$label, count: 0, outliers: [], fences: null}
@@ -537,7 +540,7 @@ tukey_detect() {
        outliers: [.[] | select(.val < \$lo or .val > \$hi)],
        fences: {q1: \$q1, q3: \$q3, iqr: \$iqr, lo: \$lo, hi: \$hi}}
     end
-  " "${valid_runs[@]}"
+  "
 }
 
 if [[ ${#valid_runs[@]} -ge 4 ]]; then
