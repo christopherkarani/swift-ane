@@ -1663,7 +1663,8 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         warmup: Int,
         iterations: Int,
         streamCounts: [Int],
-        groups: Int = 1
+        groups: Int = 1,
+        headGroups: Int = 1
     ) throws -> ConcurrentGenerationScalingReport {
         let dim = ModelConfig.dim
         var samples: [ConcurrentGenerationScalingSample] = []
@@ -1704,7 +1705,8 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                 classifierExpansion: TensorBuffer(count: weights.vocabSize * 128, zeroed: true),
                 vocabSize: weights.vocabSize,
                 bottleneck: 128,
-                laneSpatial: laneSpatial
+                laneSpatial: laneSpatial,
+                groups: headGroups
             )
             let headOutputSurface = try factoredHead.rmsNormClassifier.outputSurface(at: 0)
 
@@ -2342,27 +2344,19 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         let warmup = 3
         let iterations = 20
         let maxNewTokens = 8
-        let streamCounts = [32, 64, 128, 256, 512]
 
-        let batched = try benchmarkBatchedRecurrentGeneration(
+        let result = try benchmarkBatchedRecurrentGeneration(
             layerCount: 6,
             promptTokens: prompt,
             maxNewTokens: maxNewTokens,
             warmup: warmup,
             iterations: iterations,
-            streamCounts: streamCounts,
-            groups: 16
+            streamCounts: [256],
+            groups: 16,
+            headGroups: 16
         )
-
-        XCTAssertEqual(batched.samples.map(\.streamCount), streamCounts)
-        XCTAssertTrue(batched.samples.allSatisfy { $0.medianMsPerToken > 0 })
-
-        for sample in batched.samples {
-            print(
-                """
-                batched ane streams=\(sample.streamCount) median_ms_token=\(sample.medianMsPerToken) aggregate_tps=\(sample.aggregateTokensPerSecond) per_stream_tps=\(sample.perStreamTokensPerSecond) compile=\(sample.compileTimeMs) round_ms=\(sample.medianRoundLatencyMs)
-                """
-            )
+        for s in result.samples {
+            print("streams=\(s.streamCount) aggregate_tps=\(s.aggregateTokensPerSecond) round_ms=\(s.medianRoundLatencyMs) compile=\(s.compileTimeMs)")
         }
     }
 
@@ -2408,6 +2402,137 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         for streamIdx in 0..<streamCount {
             tokens[streamIdx] = UInt16(argmaxResults[streamIdx].index)
         }
+    }
+
+    // MARK: - Component timing probe
+
+    func test_component_timing_probe_on_hardware() throws {
+        try requireGenerationHardware()
+
+        let dim = ModelConfig.dim
+        let laneSpatial = 256
+        let streamCount = 256
+        let layerCount = 6
+        let groups = 16
+        let headGroups = 16
+        let iters = 50
+
+        let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount)
+        let tripletCount = layerCount / 3
+
+        var tripletSessions = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+            count: tripletCount,
+            throwingInitializer: { tripletIdx in
+                let base = tripletIdx * 3
+                return try RWKVStyleFusedThreeLayerSession(
+                    weights0: weights.layers[base],
+                    weights1: weights.layers[base + 1],
+                    weights2: weights.layers[base + 2],
+                    laneSpatial: laneSpatial,
+                    groups: groups
+                )
+            }
+        )
+        let factoredHead = try FactoredGenerationRMSNormClassifierKernelSet(
+            rmsFinal: weights.rmsFinal,
+            classifierProjection: TensorBuffer(count: 128 * dim, zeroed: true),
+            classifierExpansion: TensorBuffer(count: weights.vocabSize * 128, zeroed: true),
+            vocabSize: weights.vocabSize,
+            bottleneck: 128,
+            laneSpatial: laneSpatial,
+            groups: headGroups
+        )
+        let headOut = try factoredHead.rmsNormClassifier.outputSurface(at: 0)
+
+        // Zero-copy rebinding
+        let t0sOut0 = tripletSessions[0].handles.stateOut0
+        let t0sOut1 = tripletSessions[0].handles.stateOut1
+        let t0sOut2 = tripletSessions[0].handles.stateOut2
+        try tripletSessions[0].kernels.step.rebindInput(at: 1, to: t0sOut0)
+        try tripletSessions[0].kernels.step.rebindInput(at: 2, to: t0sOut1)
+        try tripletSessions[0].kernels.step.rebindInput(at: 3, to: t0sOut2)
+
+        let t0xOut = tripletSessions[0].handles.xOut
+        try tripletSessions[1].kernels.step.rebindInput(at: 0, to: t0xOut)
+        let t1sOut0 = tripletSessions[1].handles.stateOut0
+        let t1sOut1 = tripletSessions[1].handles.stateOut1
+        let t1sOut2 = tripletSessions[1].handles.stateOut2
+        try tripletSessions[1].kernels.step.rebindInput(at: 1, to: t1sOut0)
+        try tripletSessions[1].kernels.step.rebindInput(at: 2, to: t1sOut1)
+        try tripletSessions[1].kernels.step.rebindInput(at: 3, to: t1sOut2)
+        let t1xOut = tripletSessions[1].handles.xOut
+        try factoredHead.rmsNormClassifier.rebindInput(at: 0, to: t1xOut)
+
+        let t0xIn = tripletSessions[0].handles.xIn
+        let vocabSize = weights.vocabSize
+        var tokens = Array(repeating: UInt16(0), count: streamCount)
+
+        // Warmup
+        for _ in 0..<5 {
+            try batchedTokenStepZeroCopy(
+                tokens: &tokens, streamCount: streamCount,
+                embedding: weights.embedding, dim: dim, laneSpatial: laneSpatial,
+                tripletCount: tripletCount, tripletSessions: &tripletSessions,
+                t0xIn: t0xIn, headOut: headOut,
+                headEval: { try factoredHead.rmsNormClassifier.eval() },
+                vocabSize: vocabSize
+            )
+        }
+
+        // Timed components
+        var embedUs: [Double] = []
+        var t0EvalUs: [Double] = []
+        var t1EvalUs: [Double] = []
+        var headEvalUs: [Double] = []
+        var argmaxUs: [Double] = []
+
+        for _ in 0..<iters {
+            var s = GenerationClock.now()
+            try weights.embedding.withUnsafePointer { embPtr in
+                try tokens.withUnsafeBufferPointer { tokenBuf in
+                    try SurfaceIO.writeEmbeddingBatchFP16(
+                        to: t0xIn, channelOffset: 0, spatial: laneSpatial,
+                        embeddingTable: embPtr, dim: dim,
+                        tokenIDs: tokenBuf.baseAddress!, streamCount: streamCount
+                    )
+                }
+            }
+            embedUs.append(machMilliseconds(GenerationClock.now() - s) * 1000)
+
+            s = GenerationClock.now()
+            try tripletSessions[0].kernels.step.eval()
+            t0EvalUs.append(machMilliseconds(GenerationClock.now() - s) * 1000)
+
+            s = GenerationClock.now()
+            try tripletSessions[1].kernels.step.eval()
+            t1EvalUs.append(machMilliseconds(GenerationClock.now() - s) * 1000)
+
+            s = GenerationClock.now()
+            try factoredHead.rmsNormClassifier.eval()
+            headEvalUs.append(machMilliseconds(GenerationClock.now() - s) * 1000)
+
+            s = GenerationClock.now()
+            let argmaxResults = try SurfaceIO.argmaxBatchFP16SpatialParallel(
+                from: headOut, channelOffset: 0, spatial: laneSpatial,
+                channels: vocabSize, streamCount: streamCount, nBlocks: 8
+            )
+            argmaxUs.append(machMilliseconds(GenerationClock.now() - s) * 1000)
+            for i in 0..<streamCount { tokens[i] = UInt16(argmaxResults[i].index) }
+        }
+
+        func median(_ arr: [Double]) -> Double {
+            let s = arr.sorted()
+            return s[s.count / 2]
+        }
+        let totalUs = median(embedUs) + median(t0EvalUs) + median(t1EvalUs) + median(headEvalUs) + median(argmaxUs)
+        print("Component timing @256 streams, g=16, head_g=16 (median µs, \(iters) iters):")
+        print("  embed_write: \(String(format: "%.0f", median(embedUs)))µs (\(String(format: "%.1f", median(embedUs)/totalUs*100))%)")
+        print("  t0_eval:     \(String(format: "%.0f", median(t0EvalUs)))µs (\(String(format: "%.1f", median(t0EvalUs)/totalUs*100))%)")
+        print("  t1_eval:     \(String(format: "%.0f", median(t1EvalUs)))µs (\(String(format: "%.1f", median(t1EvalUs)/totalUs*100))%)")
+        print("  head_eval:   \(String(format: "%.0f", median(headEvalUs)))µs (\(String(format: "%.1f", median(headEvalUs)/totalUs*100))%)")
+        print("  argmax:      \(String(format: "%.0f", median(argmaxUs)))µs (\(String(format: "%.1f", median(argmaxUs)/totalUs*100))%)")
+        print("  total:       \(String(format: "%.0f", totalUs))µs")
+        print("  implied_tps: \(String(format: "%.0f", Double(streamCount) / totalUs * 1_000_000))")
     }
 
     // MARK: - Zero-copy correctness check

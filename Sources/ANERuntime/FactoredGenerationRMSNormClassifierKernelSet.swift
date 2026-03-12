@@ -7,6 +7,7 @@ public struct FactoredGenerationRMSNormClassifierKernelSet: ~Copyable {
     public let vocabSize: Int
     public let bottleneck: Int
     public let laneSpatial: Int
+    public let groups: Int
 
     public init(
         rmsFinal: borrowing TensorBuffer,
@@ -14,7 +15,8 @@ public struct FactoredGenerationRMSNormClassifierKernelSet: ~Copyable {
         classifierExpansion: borrowing TensorBuffer,
         vocabSize: Int,
         bottleneck: Int = 128,
-        laneSpatial: Int = 32
+        laneSpatial: Int = 32,
+        groups: Int = 1
     ) throws(ANEError) {
         guard vocabSize > 0 else {
             throw .invalidArguments("vocabSize must be > 0")
@@ -25,34 +27,54 @@ public struct FactoredGenerationRMSNormClassifierKernelSet: ~Copyable {
         guard laneSpatial > 0 else {
             throw .invalidArguments("laneSpatial must be > 0")
         }
+        guard groups > 0 else {
+            throw .invalidArguments("groups must be > 0")
+        }
         guard rmsFinal.count == ModelConfig.dim else {
             throw .invalidArguments("rmsFinal count \(rmsFinal.count) must equal dim \(ModelConfig.dim)")
         }
-        guard classifierProjection.count == bottleneck * ModelConfig.dim else {
+
+        let dim = ModelConfig.dim
+        let projColsPerGroup = dim / groups
+        let expColsPerGroup = bottleneck / groups
+
+        // classifierProjection: full weight or grouped slice
+        let projExpectedCount = bottleneck * projColsPerGroup
+        guard classifierProjection.count >= projExpectedCount else {
             throw .invalidArguments(
-                "classifierProjection count \(classifierProjection.count) does not match bottleneck \(bottleneck) * dim \(ModelConfig.dim)"
+                "classifierProjection count \(classifierProjection.count) too small for bottleneck \(bottleneck) * (dim/groups) \(projColsPerGroup)"
             )
         }
-        guard classifierExpansion.count == vocabSize * bottleneck else {
+        let expExpectedCount = vocabSize * expColsPerGroup
+        guard classifierExpansion.count >= expExpectedCount else {
             throw .invalidArguments(
-                "classifierExpansion count \(classifierExpansion.count) does not match vocabSize \(vocabSize) * bottleneck \(bottleneck)"
+                "classifierExpansion count \(classifierExpansion.count) too small for vocabSize \(vocabSize) * (bottleneck/groups) \(expColsPerGroup)"
             )
         }
 
         let generator = FactoredGenerationRMSNormClassifierGenerator(
             vocabSize: vocabSize,
             bottleneck: bottleneck,
-            laneSpatial: laneSpatial
+            laneSpatial: laneSpatial,
+            groups: groups
         )
 
         let rmsBlob = rmsFinal.withUnsafeBufferPointer { ptr in
-            WeightBlob.build(from: ptr, rows: 1, cols: ModelConfig.dim)
+            WeightBlob.build(from: ptr, rows: 1, cols: dim)
         }
         let projBlob = classifierProjection.withUnsafeBufferPointer { ptr in
-            WeightBlob.build(from: ptr, rows: bottleneck, cols: ModelConfig.dim)
+            if ptr.count == bottleneck * projColsPerGroup {
+                return WeightBlob.build(from: ptr, rows: bottleneck, cols: projColsPerGroup)
+            }
+            let sliced = UnsafeBufferPointer(start: ptr.baseAddress, count: bottleneck * projColsPerGroup)
+            return WeightBlob.build(from: sliced, rows: bottleneck, cols: projColsPerGroup)
         }
         let expBlob = classifierExpansion.withUnsafeBufferPointer { ptr in
-            WeightBlob.build(from: ptr, rows: vocabSize, cols: bottleneck)
+            if ptr.count == vocabSize * expColsPerGroup {
+                return WeightBlob.build(from: ptr, rows: vocabSize, cols: expColsPerGroup)
+            }
+            let sliced = UnsafeBufferPointer(start: ptr.baseAddress, count: vocabSize * expColsPerGroup)
+            return WeightBlob.build(from: sliced, rows: vocabSize, cols: expColsPerGroup)
         }
 
         self.rmsNormClassifier = try ANEKernel(
@@ -68,5 +90,6 @@ public struct FactoredGenerationRMSNormClassifierKernelSet: ~Copyable {
         self.vocabSize = vocabSize
         self.bottleneck = bottleneck
         self.laneSpatial = laneSpatial
+        self.groups = groups
     }
 }
