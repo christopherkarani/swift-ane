@@ -200,7 +200,8 @@ for run in $(seq 1 "$REPEATS"); do
     > "$RESULTS_DIR/run-$run.json" \
     2> "$RESULTS_DIR/run-$run.stderr.log" || run_exit=$?
   run_elapsed=$(( $(date +%s) - run_start ))
-  echo "  elapsed: ${run_elapsed}s (exit=$run_exit)"
+  stderr_lines=$(wc -l < "$RESULTS_DIR/run-$run.stderr.log" | tr -d ' ')
+  echo "  elapsed: ${run_elapsed}s (exit=$run_exit, stderr=$stderr_lines lines)"
   echo "$run_elapsed" > "$RESULTS_DIR/run-$run.elapsed_s"
   if [[ $run_exit -ne 0 ]]; then
     echo "WARNING: Run $run exited with code $run_exit" >&2
