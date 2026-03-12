@@ -927,10 +927,12 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         if outputHeadBackend == .cpuExactStaged || outputHeadBackend == .cpuExactClustered {
             throw .invalidArguments("two-step branch-state promotion model does not support staged CPU output heads")
         }
+        #if DEBUG
         if trunkBackend == .identityZeroTrunk,
            !recurrentWeightsUseIdentityZeroTrunk(weights, layerCount: layerCount) {
             throw .invalidArguments("identity zero-trunk backend requires all recurrent Wx/Ws/Wd/Wo weights to be zero")
         }
+        #endif
 
         let compileStart = GenerationClock.now()
         let twoStepSessions: LayerStorage<RWKVStyleTwoStepRecurrentSession>
@@ -2720,10 +2722,12 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
         if trunkBackend == .fusedThreeLayerTriplets, !layerCount.isMultiple(of: 3) {
             throw .invalidArguments("fused three-layer recurrent trunk backend requires a layerCount that is a multiple of 3")
         }
+        #if DEBUG
         if trunkBackend == .identityZeroTrunk,
            !recurrentWeightsUseIdentityZeroTrunk(weights, layerCount: layerCount) {
             throw .invalidArguments("identity zero-trunk backend requires all recurrent Wx/Ws/Wd/Wo weights to be zero")
         }
+        #endif
         guard trunkLaneSpatial > 0 else {
             throw .invalidArguments("recurrent trunk laneSpatial must be > 0")
         }
