@@ -427,6 +427,7 @@ private func measureTwoStepCompileInitOnly(options: Options) throws -> CompileIn
 }
 
 private func compileOnlyPayload(options: Options) throws -> [String: Any] {
+    let probeStartTick = mach_absolute_time()
     let plan = try options.validatedProbeConfiguration()
     printStderr("Resetting compile budget")
     try? CompileBudget.setCount(0)
@@ -442,8 +443,11 @@ private func compileOnlyPayload(options: Options) throws -> [String: Any] {
     let isoFormatter = ISO8601DateFormatter()
     isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
+    let probeElapsedS = machMilliseconds(mach_absolute_time() - probeStartTick) / 1000.0
+
     return [
         "probe_timestamp": isoFormatter.string(from: Date()),
+        "probe_wall_elapsed_s": probeElapsedS,
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
         "two_step_backend": describe(options.twoStepBackend),
@@ -463,6 +467,7 @@ private func compileOnlyPayload(options: Options) throws -> [String: Any] {
 }
 
 private func comparePayload(options: Options) throws -> [String: Any] {
+    let probeStartTick = mach_absolute_time()
     let plan = try options.validatedProbeConfiguration()
     printStderr("Resetting compile budget")
     try? CompileBudget.setCount(0)
@@ -564,9 +569,11 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     let isoFormatter = ISO8601DateFormatter()
     isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     let probeTimestamp = isoFormatter.string(from: Date())
+    let probeElapsedS = machMilliseconds(mach_absolute_time() - probeStartTick) / 1000.0
 
     var payload: [String: Any] = [
         "probe_timestamp": probeTimestamp,
+        "probe_wall_elapsed_s": probeElapsedS,
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
         "two_step_backend": describe(options.twoStepBackend),
