@@ -285,7 +285,7 @@ public func benchmarkCoreMLGeneration(
     warmup: Int,
     iterations: Int,
     maxSequenceTokens: Int = ModelConfig.seqLen
-) throws(GenerationError) -> GenerationBenchmarkSample {
+) throws(GenerationError) -> (sample: GenerationBenchmarkSample, rawTokenLatenciesMs: [Double]) {
     let headWeights = try loadGenerationWeightsForCoreML(source: request.headWeightsSource)
     let model = try CoreMLGenerationBenchmarkModel(
         request: request,
@@ -308,7 +308,7 @@ private func benchmarkAutoregressiveHarness<Model>(
     maxNewTokens: Int,
     warmup: Int,
     iterations: Int
-) throws(GenerationError) -> GenerationBenchmarkSample
+) throws(GenerationError) -> (sample: GenerationBenchmarkSample, rawTokenLatenciesMs: [Double])
 where Model: AutoregressiveLanguageModel & GenerationPerformanceTrackable, Model: ~Copyable {
     var tokenLatencies: [Double] = []
     var throughput: [Double] = []
@@ -332,7 +332,7 @@ where Model: AutoregressiveLanguageModel & GenerationPerformanceTrackable, Model
         }
     }
 
-    return GenerationBenchmarkSample(
+    let sample = GenerationBenchmarkSample(
         medianTokenMs: GenerationMetrics.median(tokenLatencies),
         medianTokensPerSecond: GenerationMetrics.median(throughput),
         compileTimeMs: compileTimeMs,
@@ -341,6 +341,7 @@ where Model: AutoregressiveLanguageModel & GenerationPerformanceTrackable, Model
         p95TokenMs: GenerationMetrics.percentile(tokenLatencies, at: 95),
         p99TokenMs: GenerationMetrics.percentile(tokenLatencies, at: 99)
     )
+    return (sample, tokenLatencies)
 }
 
 private struct CoreMLGenerationBenchmarkModel: ~Copyable, AutoregressiveLanguageModel, GenerationPerformanceTrackable {

@@ -544,9 +544,10 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     printStderr(String(format: "Two-step median %.6f ms/token", twoStep.medianTokenMs))
 
     let coreML: GenerationBenchmarkSample?
+    let coreMLRawLatencies: [Double]?
     if let request = plan.coreMLRequest {
         printStderr("Benchmarking CoreML")
-        coreML = try benchmarkCoreMLGeneration(
+        let (coreMLSample, rawLatencies) = try benchmarkCoreMLGeneration(
             request: request,
             promptTokens: prompt,
             maxNewTokens: options.maxNewTokens,
@@ -554,9 +555,12 @@ private func comparePayload(options: Options) throws -> [String: Any] {
             iterations: options.iterations,
             maxSequenceTokens: options.maxSequenceTokens
         )
-        printStderr(String(format: "CoreML median %.6f ms/token", coreML?.medianTokenMs ?? 0))
+        coreML = coreMLSample
+        coreMLRawLatencies = rawLatencies
+        printStderr(String(format: "CoreML median %.6f ms/token", coreMLSample.medianTokenMs))
     } else {
         coreML = nil
+        coreMLRawLatencies = nil
     }
 
     var payload: [String: Any] = [
@@ -602,7 +606,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         ],
     ]
     if let request = plan.coreMLRequest, let coreML {
-        payload["coreml"] = [
+        var coreMLDict: [String: Any] = [
             "model_path": request.modelPath,
             "compute_units": describe(request.computeUnits),
             "head_weights_source": describe(request.headWeightsSource),
@@ -614,6 +618,10 @@ private func comparePayload(options: Options) throws -> [String: Any] {
             "p95_ms_per_token": coreML.p95TokenMs,
             "p99_ms_per_token": coreML.p99TokenMs,
         ]
+        if let coreMLRawLatencies {
+            coreMLDict["raw_token_latencies_ms"] = coreMLRawLatencies
+        }
+        payload["coreml"] = coreMLDict
         payload["two_step_speedup_vs_coreml"] = coreML.medianTokenMs / twoStep.medianTokenMs
         payload["control_speedup_vs_coreml"] = coreML.medianTokenMs / control.medianTokenMs
     }
