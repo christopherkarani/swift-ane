@@ -110,6 +110,7 @@ LAYER_COUNT="$LAYER_COUNT" \
   echo "claim_version=$CLAIM_VERSION"
   echo "results_dir=$RESULTS_DIR"
   echo "dataset=$DATASET_PATH"
+  echo "dataset_sha256=$(shasum -a 256 "$DATASET_PATH" | awk '{print $1}')"
   echo "artifact_prefix=$ARTIFACT_PREFIX"
   echo "offline_gate_json=$OFFLINE_GATE_JSON"
   echo "coreml_model=$COREML_MODEL"
