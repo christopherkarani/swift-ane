@@ -131,7 +131,8 @@ echo "swift_version=$(swift --version 2>/dev/null | head -1 || echo unknown)"
 echo "hostname=$(hostname 2>/dev/null || echo unknown)"
 echo "macos_version=$(sw_vers -productVersion 2>/dev/null || echo unknown)"
 echo "claim_pid=$$"
-echo "memory_free_pct_start=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
+memory_free_pct_start="$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
+echo "memory_free_pct_start=$memory_free_pct_start"
 echo "thermal_pressure_start=$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
 echo "load_average_start=$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
 power_source_start="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
@@ -752,6 +753,12 @@ fi
   mem_end="$(sysctl -n kern.memorystatus_level 2>/dev/null || echo 100)"
   if [[ "$mem_end" -lt 20 ]] 2>/dev/null; then
     echo "CLAIM_WARNING: LOW_MEMORY — memory_free_pct=$mem_end at claim end"
+  fi
+  if [[ "$memory_free_pct_start" =~ ^[0-9]+$ && "$mem_end" =~ ^[0-9]+$ ]]; then
+    claim_mem_drop=$((memory_free_pct_start - mem_end))
+    if [[ "$claim_mem_drop" -gt 20 ]] 2>/dev/null; then
+      echo "CLAIM_WARNING: MEMORY_DRIFT — free memory dropped ${claim_mem_drop}pp during claim (start=${memory_free_pct_start}% end=${mem_end}%)"
+    fi
   fi
   disk_end="$(df -m "$RESULTS_DIR" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
   if [[ "$disk_end" -lt 512 ]] 2>/dev/null; then
