@@ -465,6 +465,7 @@ jq -s \
 '{
   harness_version: $harness_version,
   probe_version: (map(.probe_version // null) | .[0]),
+  per_run_probe_versions: (map(.probe_version // null)),
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
@@ -613,6 +614,13 @@ gate_warnings=""
 if [[ $failed_runs -gt 0 ]]; then
   gate_status="warn"
   gate_warnings="${gate_warnings}FAILED_RUNS: ${failed_runs}/${REPEATS} runs failed\n"
+fi
+
+# Probe version consistency check
+probe_version_mismatch="$(jq -s 'map(.probe_version // null) | unique | if length > 1 then . else empty end' "${valid_runs[@]}" 2>/dev/null || echo "")"
+if [[ -n "$probe_version_mismatch" ]]; then
+  gate_status="warn"
+  gate_warnings="${gate_warnings}PROBE_VERSION_MISMATCH: runs used different probe versions: ${probe_version_mismatch}\n"
 fi
 
 if [[ "$all_parity_match" != "true" ]]; then
