@@ -212,6 +212,13 @@ trap cleanup_on_interrupt INT TERM
   echo "memory_free_pct=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
 } > "$RESULTS_DIR/metadata.txt"
 
+# Validate scratch path is writable before attempting the build
+mkdir -p "$SCRATCH_PATH" 2>/dev/null || true
+if [[ ! -d "$SCRATCH_PATH" ]] || [[ ! -w "$SCRATCH_PATH" ]]; then
+  echo "FATAL: SCRATCH_PATH ($SCRATCH_PATH) does not exist or is not writable" >&2
+  exit 1
+fi
+
 build_start_epoch=$(date +%s)
 echo "Building release probe into $SCRATCH_PATH"
 swift build -c release --product espresso-multitoken-probe --scratch-path "$SCRATCH_PATH"
