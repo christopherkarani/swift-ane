@@ -6,7 +6,7 @@ import ANETypes
 import Espresso
 
 /// Bump this when the probe JSON output contract changes (new fields, renamed keys, etc.).
-private let probeVersion: Int = 2
+private let probeVersion: Int = 3
 
 private enum RunMode: String {
     case compare
@@ -528,7 +528,9 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     let controlParityTrace = try controlHarness.generate(promptTokens: prompt, maxNewTokens: options.maxNewTokens)
     let twoStepParityTrace = try twoStepHarness.generate(promptTokens: prompt, maxNewTokens: options.maxNewTokens)
     let exactParity = controlParityTrace.generatedTokens == twoStepParityTrace.generatedTokens
-    printStderr("Parity status: \(exactParity ? "match" : "mismatch")")
+    let parityMatchCount = zip(controlParityTrace.generatedTokens, twoStepParityTrace.generatedTokens)
+        .prefix(while: { $0 == $1 }).count
+    printStderr("Parity status: \(exactParity ? "match" : "mismatch") (\(parityMatchCount)/\(options.maxNewTokens) tokens)")
 
     printStderr("Benchmarking control")
     let (control, controlRawLatencies) = try benchmarkDirectSelectionHarness(
@@ -591,6 +593,8 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         "max_sequence_tokens": options.maxSequenceTokens,
         "prompt_tokens": prompt.map(Int.init),
         "parity_status": exactParity ? "match" : "mismatch",
+        "parity_match_count": parityMatchCount,
+        "parity_total": options.maxNewTokens,
         "control": [
             "init_wall_ms": controlInitMs,
             "reported_compile_ms": control.compileTimeMs,
