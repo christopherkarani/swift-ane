@@ -371,7 +371,14 @@ for f in "$RESULTS_DIR"/run-*.json; do
   [[ -f "$f" ]] || continue
   nan_check="$(jq '
     [.two_step.median_ms_per_token, .control.median_ms_per_token, .coreml.median_ms_per_token,
-     .two_step_speedup_vs_coreml, .control_speedup_vs_coreml] |
+     .two_step_speedup_vs_coreml, .control_speedup_vs_coreml,
+     .two_step.median_proposer_ms_per_pass, .two_step.median_verifier_trunk_ms_per_pass,
+     .two_step.median_verifier_logits_ms_per_pass, .two_step.median_state_advance_ms_per_pass,
+     .control.median_trunk_ms_per_token, .control.median_logits_ms_per_token,
+     .coreml.median_trunk_ms_per_token, .coreml.median_logits_ms_per_token,
+     .two_step.p95_ms_per_token, .two_step.p99_ms_per_token,
+     .control.p95_ms_per_token, .control.p99_ms_per_token,
+     .coreml.p95_ms_per_token, .coreml.p99_ms_per_token] |
     map(select(. != null)) | map(select(isnan or isinfinite)) | length
   ' "$f" 2>/dev/null || echo "0")"
   if [[ "$nan_check" -gt 0 ]] 2>/dev/null; then
