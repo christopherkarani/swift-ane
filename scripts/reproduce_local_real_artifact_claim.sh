@@ -132,6 +132,11 @@ fi
   echo "offline_gate_json=$OFFLINE_GATE_JSON"
   echo "offline_gate_sha256=$(shasum -a 256 "$OFFLINE_GATE_JSON" | awk '{print $1}')"
   echo "coreml_model=$COREML_MODEL"
+  if [[ -d "$COREML_MODEL" ]]; then
+    echo "coreml_model_sha256=$(find "$COREML_MODEL" -type f | sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')"
+  elif [[ -f "$COREML_MODEL" ]]; then
+    echo "coreml_model_sha256=$(shasum -a 256 "$COREML_MODEL" | awk '{print $1}')"
+  fi
   echo "prompt_token=$PROMPT_TOKEN"
   echo "offline_committed_exact_tokens_per_pass=$(jq -r '.committed_exact_tokens_per_pass' "$OFFLINE_GATE_JSON")"
   echo "offline_accepted_future_tokens_per_pass=$(jq -r '.accepted_future_tokens_per_pass' "$OFFLINE_GATE_JSON")"
