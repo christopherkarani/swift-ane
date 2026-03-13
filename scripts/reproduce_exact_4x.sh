@@ -719,6 +719,17 @@ if [[ "$THERMAL_START" != "$THERMAL_END" && "$THERMAL_START" != "unknown" && "$T
   gate_warnings="${gate_warnings}THERMAL_DRIFT: thermal pressure changed during benchmark (start='${THERMAL_START}', end='${THERMAL_END}')\n"
 fi
 
+# Load average drift: warn if 1-min load increased significantly
+LOAD_END="$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+load_start_1m="$(echo "$LOAD_START" | awk '{gsub(/[{}]/,""); print $1}' 2>/dev/null || echo "")"
+load_end_1m="$(echo "$LOAD_END" | awk '{gsub(/[{}]/,""); print $1}' 2>/dev/null || echo "")"
+if [[ -n "$load_start_1m" && -n "$load_end_1m" && "$load_start_1m" != "unknown" && "$load_end_1m" != "unknown" ]]; then
+  if jq -e --arg s "$load_start_1m" --arg e "$load_end_1m" \
+    '($e | tonumber) > ([$s | tonumber, 1.0] | max) * 2' <<< 'null' >/dev/null 2>&1; then
+    gate_warnings="${gate_warnings}LOAD_DRIFT: 1-min load average increased significantly (start=${load_start_1m} end=${load_end_1m})\n"
+  fi
+fi
+
 if [[ ${#valid_runs[@]} -lt $MIN_VALID_RUNS ]]; then
   gate_status="warn"
   gate_warnings="${gate_warnings}TOO_FEW_VALID_RUNS: only ${#valid_runs[@]} valid runs (minimum $MIN_VALID_RUNS for reliable statistics)\n"
