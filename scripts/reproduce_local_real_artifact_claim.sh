@@ -267,6 +267,8 @@ fi
       "harness_per_run_os_versions=\(.per_run_os_versions // [] | tojson)",
       "harness_per_run_process_ids=\(.per_run_process_ids // [] | tojson)",
       "harness_per_run_iteration_counts=\(.per_run_iteration_counts // [] | tojson)",
+      "harness_per_run_control_generated=\(.per_run_control_generated_count // [] | tojson)",
+      "harness_per_run_two_step_generated=\(.per_run_two_step_generated_count // [] | tojson)",
       "harness_total_stderr_lines=\(.per_run_stderr_lines // [] | add // 0)",
       "harness_contract_hash=\(.benchmark_contract.contract_hash | na)",
       "harness_contract_input_mode=\(.benchmark_contract.input_mode | na)",
