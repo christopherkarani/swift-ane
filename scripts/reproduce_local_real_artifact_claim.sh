@@ -167,6 +167,20 @@ if [[ -n "$manifest_layer_count" && "$manifest_layer_count" != "$LAYER_COUNT" ]]
   exit 1
 fi
 
+# Compute claim-level contract hash (same algorithm as harness) for cross-validation
+CLAIM_CONTRACT_HASH="$(printf '%s\n' \
+  "input_mode=recurrent-checkpoint" \
+  "control_backend=$CONTROL_BACKEND" \
+  "two_step_backend=$TWO_STEP_BACKEND" \
+  "output_head_backend=$OUTPUT_HEAD_BACKEND" \
+  "warmup=$WARMUP" \
+  "iterations=$ITERATIONS" \
+  "max_new_tokens=$MAX_NEW_TOKENS" \
+  "max_sequence_tokens=$MAX_SEQUENCE_TOKENS" \
+  "layer_count=$LAYER_COUNT" \
+  "prompt_token=$PROMPT_TOKEN" \
+  | shasum -a 256 | awk '{print $1}')"
+
 if [[ ! -x "$COREMLTOOLS_PYTHON" ]]; then
   PY312="${PY312:-/opt/homebrew/opt/python@3.12/bin/python3.12}"
   if [[ ! -x "$PY312" ]]; then
@@ -245,6 +259,7 @@ fi
 
 {
   echo "claim_version=$CLAIM_VERSION"
+  echo "claim_contract_hash=$CLAIM_CONTRACT_HASH"
   echo "timestamp=$(date -Iseconds)"
   echo "git_commit=$(git -C "$ROOT" rev-parse HEAD)"
   echo "git_branch=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
@@ -554,6 +569,11 @@ fi
     harness_contract_input="$(jq -r '.benchmark_contract.input_mode // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
     if [[ -n "$harness_contract_input" && "$harness_contract_input" != "recurrent-checkpoint" ]]; then
       echo "WARNING: expected input_mode=recurrent-checkpoint but harness used input_mode=$harness_contract_input"
+    fi
+    # Cross-validate contract hash: claim and harness must agree on the full parameter set
+    harness_hash="$(jq -r '.benchmark_contract.contract_hash // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
+    if [[ -n "$harness_hash" && "$harness_hash" != "$CLAIM_CONTRACT_HASH" ]]; then
+      echo "WARNING: contract hash mismatch: claim=$CLAIM_CONTRACT_HASH harness=$harness_hash"
     fi
     # Cross-validate valid run count against requested repeats
     harness_valid="$(jq -r '.valid_runs // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
