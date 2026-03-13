@@ -789,6 +789,15 @@ mem_end_gate="${MEMORY_FREE_PCT_END:-100}"
 if [[ "$mem_end_gate" -lt 20 ]] 2>/dev/null; then
   gate_warnings="${gate_warnings}LOW_MEMORY: system memory free at ${MEMORY_FREE_PCT_END}% — swapping may affect benchmark timing\n"
 fi
+# Memory drift: warn if free memory dropped significantly during benchmark
+mem_start_gate="${MEMORY_FREE_PCT_START:-100}"
+[[ "$mem_start_gate" == "null" ]] && mem_start_gate=100
+if [[ "$mem_start_gate" -gt 0 && "$mem_end_gate" -gt 0 ]] 2>/dev/null; then
+  mem_drop=$((mem_start_gate - mem_end_gate))
+  if [[ "$mem_drop" -gt 20 ]] 2>/dev/null; then
+    gate_warnings="${gate_warnings}MEMORY_DRIFT: free memory dropped ${mem_drop}pp during benchmark (start=${MEMORY_FREE_PCT_START}% end=${MEMORY_FREE_PCT_END}%)\n"
+  fi
+fi
 
 if [[ ${#valid_runs[@]} -lt $MIN_VALID_RUNS ]]; then
   gate_status="warn"
