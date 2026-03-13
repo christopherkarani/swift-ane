@@ -9210,6 +9210,278 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         } // end for includeRMS
     }
 
+    // MARK: - Cycle 27: Fused expand+argmax (no logits materialization)
+
+    func test_cycle27_fused_expand_argmax_probe() throws {
+        try requireGenerationHardware()
+
+        let bneck = 64  // production bottleneck
+        let vocab = 32000
+        let spatial = 16384
+        let warmup = 5
+        let iters = 20
+
+        guard let device = MTLCreateSystemDefaultDevice() else { return XCTFail("No Metal") }
+        guard let queue = device.makeCommandQueue() else { return XCTFail("No queue") }
+
+        // --- V2 kernel: 1 simdgroup per row, proj in threadgroup memory, SIMD reduction ---
+        let v2Source = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        #define ROWS_PER_TG 8
+        #define BNECK \(bneck)
+
+        kernel void fused_expand_argmax_v2(
+            const device half *proj [[buffer(0)]],
+            const device half *wExpand [[buffer(1)]],
+            device ushort *output [[buffer(2)]],
+            constant uint &spatial_c [[buffer(3)]],
+            constant uint &vocab_c [[buffer(4)]],
+            uint tg_id [[threadgroup_position_in_grid]],
+            uint sg_id [[simdgroup_index_in_threadgroup]],
+            uint sg_lane [[thread_index_in_simdgroup]]
+        ) {
+            uint row = tg_id * ROWS_PER_TG + sg_id;
+            if (row >= spatial_c) return;
+
+            // Load proj vector into threadgroup memory (cooperative per simdgroup)
+            threadgroup half sharedProj[ROWS_PER_TG][BNECK];
+            for (uint k = sg_lane; k < BNECK; k += 32) {
+                sharedProj[sg_id][k] = proj[row * BNECK + k];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Each of 32 lanes handles ~1000 vocab entries
+            float localMax = -INFINITY;
+            uint localIdx = 0;
+
+            for (uint v = sg_lane; v < vocab_c; v += 32) {
+                const device half *wRow = wExpand + v * BNECK;
+                float dot = 0.0f;
+                for (uint k = 0; k < BNECK; k++) {
+                    dot = fma(float(sharedProj[sg_id][k]), float(wRow[k]), dot);
+                }
+                if (dot > localMax) {
+                    localMax = dot;
+                    localIdx = v;
+                }
+            }
+
+            // SIMD reduction
+            for (ushort offset = 16; offset > 0; offset >>= 1) {
+                float otherVal = simd_shuffle_down(localMax, offset);
+                uint otherIdx = simd_shuffle_down(localIdx, offset);
+                if (otherVal > localMax) {
+                    localMax = otherVal;
+                    localIdx = otherIdx;
+                }
+            }
+
+            if (sg_lane == 0) {
+                output[row] = ushort(localIdx);
+            }
+        }
+        """
+
+        let lib: MTLLibrary
+        do { lib = try device.makeLibrary(source: v2Source, options: nil) }
+        catch { return XCTFail("V2 compile FAILED: \(error)") }
+        guard let fn = lib.makeFunction(name: "fused_expand_argmax_v2") else {
+            return XCTFail("missing function")
+        }
+        let pso: MTLComputePipelineState
+        do { pso = try device.makeComputePipelineState(function: fn) }
+        catch { return XCTFail("pipeline build FAILED: \(error)") }
+
+        print("=== Cycle 27: Fused expand+argmax V2 (1 SG/row, SIMD reduction) ===")
+        print("  Kernel compiled OK. maxThreads=\(pso.maxTotalThreadsPerThreadgroup)")
+
+        // --- Allocate and fill ---
+        let projBuf = device.makeBuffer(length: spatial * bneck * 2, options: .storageModeShared)!
+        let outBuf = device.makeBuffer(length: spatial * 2, options: .storageModeShared)!
+        let projPtr = projBuf.contents().assumingMemoryBound(to: Float16.self)
+        for i in 0..<(spatial * bneck) { projPtr[i] = Float16.random(in: -0.1...0.1) }
+
+        let wExpandPtr = UnsafeMutablePointer<Float16>.allocate(capacity: vocab * bneck)
+        defer { wExpandPtr.deallocate() }
+        for i in 0..<(vocab * bneck) { wExpandPtr[i] = Float16.random(in: -0.01...0.01) }
+        let wExpandBuf = device.makeBuffer(bytes: wExpandPtr, length: vocab * bneck * 2, options: .storageModeShared)!
+
+        // MPS ground truth
+        let logitsBuf = device.makeBuffer(length: spatial * vocab * 2, options: .storageModeShared)!
+        let mpsOutBuf = device.makeBuffer(length: spatial * 2, options: .storageModeShared)!
+        let expandMM = MPSMatrixMultiplication(
+            device: device, transposeLeft: false, transposeRight: true,
+            resultRows: spatial, resultColumns: vocab, interiorColumns: bneck,
+            alpha: 1.0, beta: 0.0)
+        let argLib = try device.makeLibrary(source: MPSExpansionArgmax.argmaxShaderSource, options: nil)
+        guard let argFn = argLib.makeFunction(name: "row_argmax_fp16") else { return XCTFail("no argmax fn") }
+        let argPSO = try device.makeComputePipelineState(function: argFn)
+
+        func runMPS() {
+            let cb = queue.makeCommandBuffer()!
+            let pDesc = MPSMatrixDescriptor(rows: spatial, columns: bneck, rowBytes: bneck * 2, dataType: .float16)
+            let wDesc = MPSMatrixDescriptor(rows: vocab, columns: bneck, rowBytes: bneck * 2, dataType: .float16)
+            let lDesc = MPSMatrixDescriptor(rows: spatial, columns: vocab, rowBytes: vocab * 2, dataType: .float16)
+            expandMM.encode(commandBuffer: cb,
+                leftMatrix: MPSMatrix(buffer: projBuf, descriptor: pDesc),
+                rightMatrix: MPSMatrix(buffer: wExpandBuf, descriptor: wDesc),
+                resultMatrix: MPSMatrix(buffer: logitsBuf, descriptor: lDesc))
+            let enc = cb.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(argPSO)
+            enc.setBuffer(logitsBuf, offset: 0, index: 0)
+            enc.setBuffer(mpsOutBuf, offset: 0, index: 1)
+            var v32 = UInt32(vocab)
+            enc.setBytes(&v32, length: 4, index: 2)
+            enc.dispatchThreadgroups(
+                MTLSize(width: spatial, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: min(256, Int(argPSO.maxTotalThreadsPerThreadgroup)), height: 1, depth: 1))
+            enc.endEncoding()
+            cb.commit(); cb.waitUntilCompleted()
+        }
+
+        func runFusedV2() {
+            let cb = queue.makeCommandBuffer()!
+            let enc = cb.makeComputeCommandEncoder()!
+            enc.setComputePipelineState(pso)
+            enc.setBuffer(projBuf, offset: 0, index: 0)
+            enc.setBuffer(wExpandBuf, offset: 0, index: 1)
+            enc.setBuffer(outBuf, offset: 0, index: 2)
+            var sp = UInt32(spatial); enc.setBytes(&sp, length: 4, index: 3)
+            var vc = UInt32(vocab); enc.setBytes(&vc, length: 4, index: 4)
+            let numTG = (spatial + 7) / 8  // ROWS_PER_TG = 8
+            enc.dispatchThreadgroups(
+                MTLSize(width: numTG, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            enc.endEncoding()
+            cb.commit(); cb.waitUntilCompleted()
+        }
+
+        // --- Correctness ---
+        runMPS()
+        runFusedV2()
+        let mpsResult = mpsOutBuf.contents().assumingMemoryBound(to: UInt16.self)
+        let fusedResult = outBuf.contents().assumingMemoryBound(to: UInt16.self)
+        var mismatches = 0
+        for i in 0..<spatial {
+            if mpsResult[i] != fusedResult[i] { mismatches += 1 }
+        }
+        print("  Correctness: \(mismatches)/\(spatial) mismatches")
+
+        // --- Timing ---
+        for _ in 0..<warmup { runMPS() }
+        var mpsMs: [Double] = []
+        for _ in 0..<iters {
+            let s = mach_absolute_time(); runMPS(); mpsMs.append(machMilliseconds(mach_absolute_time() - s))
+        }
+        for _ in 0..<warmup { runFusedV2() }
+        var fusedMs: [Double] = []
+        for _ in 0..<iters {
+            let s = mach_absolute_time(); runFusedV2(); fusedMs.append(machMilliseconds(mach_absolute_time() - s))
+        }
+
+        // --- Chunked MPS: 4 batches of 4096 rows, reusing 256MB logits buffer ---
+        let chunkSize = 4096
+        let numChunks = (spatial + chunkSize - 1) / chunkSize
+        let chunkLogitsBuf = device.makeBuffer(length: chunkSize * vocab * 2, options: .storageModeShared)!
+        let chunkOutBuf = device.makeBuffer(length: spatial * 2, options: .storageModeShared)!
+        var chunkExpandMMs: [MPSMatrixMultiplication] = []
+        for _ in 0..<numChunks {
+            chunkExpandMMs.append(MPSMatrixMultiplication(
+                device: device, transposeLeft: false, transposeRight: true,
+                resultRows: chunkSize, resultColumns: vocab, interiorColumns: bneck,
+                alpha: 1.0, beta: 0.0))
+        }
+
+        func runChunkedMPS() {
+            let cb = queue.makeCommandBuffer()!
+            let wDesc = MPSMatrixDescriptor(rows: vocab, columns: bneck, rowBytes: bneck * 2, dataType: .float16)
+            let wMat = MPSMatrix(buffer: wExpandBuf, descriptor: wDesc)
+            let lDesc = MPSMatrixDescriptor(rows: chunkSize, columns: vocab, rowBytes: vocab * 2, dataType: .float16)
+
+            for c in 0..<numChunks {
+                let rowOff = c * chunkSize
+                let pDesc = MPSMatrixDescriptor(rows: chunkSize, columns: bneck, rowBytes: bneck * 2, dataType: .float16)
+                let pMat = MPSMatrix(buffer: projBuf, offset: rowOff * bneck * 2, descriptor: pDesc)
+                let lMat = MPSMatrix(buffer: chunkLogitsBuf, descriptor: lDesc)
+                chunkExpandMMs[c].encode(commandBuffer: cb, leftMatrix: pMat, rightMatrix: wMat, resultMatrix: lMat)
+
+                let enc = cb.makeComputeCommandEncoder()!
+                enc.setComputePipelineState(argPSO)
+                enc.setBuffer(chunkLogitsBuf, offset: 0, index: 0)
+                enc.setBuffer(chunkOutBuf, offset: rowOff * 2, index: 1)
+                var v32 = UInt32(vocab)
+                enc.setBytes(&v32, length: 4, index: 2)
+                enc.dispatchThreadgroups(
+                    MTLSize(width: chunkSize, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(256, Int(argPSO.maxTotalThreadsPerThreadgroup)), height: 1, depth: 1))
+                enc.endEncoding()
+            }
+            cb.commit(); cb.waitUntilCompleted()
+        }
+
+        for _ in 0..<warmup { runChunkedMPS() }
+        var chunkedMs: [Double] = []
+        for _ in 0..<iters {
+            let s = mach_absolute_time(); runChunkedMPS(); chunkedMs.append(machMilliseconds(mach_absolute_time() - s))
+        }
+
+        let mpsMed = mpsMs.sorted()[mpsMs.count / 2]
+        let fusedMed = fusedMs.sorted()[fusedMs.count / 2]
+        let chunkedMed = chunkedMs.sorted()[chunkedMs.count / 2]
+        print("  MPS expand+argmax (1GB):   \(String(format: "%.3f", mpsMed)) ms median")
+        print("  Chunked MPS (4×256MB):     \(String(format: "%.3f", chunkedMed)) ms median")
+        print("  Fused V2 expand+argmax:    \(String(format: "%.3f", fusedMed)) ms median")
+        print("  Chunked delta: \(String(format: "%+.3f", chunkedMed - mpsMed)) ms (\(String(format: "%+.1f", (chunkedMed/mpsMed - 1) * 100))%)")
+        print("  Fused delta:   \(String(format: "%+.3f", fusedMed - mpsMed)) ms (\(String(format: "%+.1f", (fusedMed/mpsMed - 1) * 100))%)")
+
+        // --- bneck sweep: MPS expand+argmax at different bottleneck sizes ---
+        print("  --- bneck sweep (MPS expand+argmax only) ---")
+        for bk in [16, 32, 48, 64] {
+            let swProjBuf = device.makeBuffer(length: spatial * bk * 2, options: .storageModeShared)!
+            let swProjPtr = swProjBuf.contents().assumingMemoryBound(to: Float16.self)
+            for i in 0..<(spatial * bk) { swProjPtr[i] = Float16.random(in: -0.1...0.1) }
+            let swWPtr = UnsafeMutablePointer<Float16>.allocate(capacity: vocab * bk)
+            defer { swWPtr.deallocate() }
+            for i in 0..<(vocab * bk) { swWPtr[i] = Float16.random(in: -0.01...0.01) }
+            let swWBuf = device.makeBuffer(bytes: swWPtr, length: vocab * bk * 2, options: .storageModeShared)!
+            let swLogBuf = device.makeBuffer(length: spatial * vocab * 2, options: .storageModeShared)!
+            let swOutBuf = device.makeBuffer(length: spatial * 2, options: .storageModeShared)!
+            let swMM = MPSMatrixMultiplication(
+                device: device, transposeLeft: false, transposeRight: true,
+                resultRows: spatial, resultColumns: vocab, interiorColumns: bk,
+                alpha: 1.0, beta: 0.0)
+
+            func swRun() {
+                let cb = queue.makeCommandBuffer()!
+                let pd = MPSMatrixDescriptor(rows: spatial, columns: bk, rowBytes: bk * 2, dataType: .float16)
+                let wd = MPSMatrixDescriptor(rows: vocab, columns: bk, rowBytes: bk * 2, dataType: .float16)
+                let ld = MPSMatrixDescriptor(rows: spatial, columns: vocab, rowBytes: vocab * 2, dataType: .float16)
+                swMM.encode(commandBuffer: cb,
+                    leftMatrix: MPSMatrix(buffer: swProjBuf, descriptor: pd),
+                    rightMatrix: MPSMatrix(buffer: swWBuf, descriptor: wd),
+                    resultMatrix: MPSMatrix(buffer: swLogBuf, descriptor: ld))
+                let enc = cb.makeComputeCommandEncoder()!
+                enc.setComputePipelineState(argPSO)
+                enc.setBuffer(swLogBuf, offset: 0, index: 0)
+                enc.setBuffer(swOutBuf, offset: 0, index: 1)
+                var v32 = UInt32(vocab)
+                enc.setBytes(&v32, length: 4, index: 2)
+                enc.dispatchThreadgroups(
+                    MTLSize(width: spatial, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: min(256, Int(argPSO.maxTotalThreadsPerThreadgroup)), height: 1, depth: 1))
+                enc.endEncoding()
+                cb.commit(); cb.waitUntilCompleted()
+            }
+            for _ in 0..<warmup { swRun() }
+            var swMs: [Double] = []
+            for _ in 0..<iters { let s = mach_absolute_time(); swRun(); swMs.append(machMilliseconds(mach_absolute_time() - s)) }
+            let swMed = swMs.sorted()[swMs.count / 2]
+            print("    bneck=\(bk): \(String(format: "%.3f", swMed)) ms")
+        }
+    }
+
     // MARK: - Cycle 25: GPUPipelinedHead Production Test
 
     func test_cycle25_gpu_pipelined_head_on_hardware() throws {
@@ -9217,7 +9489,7 @@ final class GenerationHarnessHardwareTests: XCTestCase {
 
         let dim = ModelConfig.dim
         let layerCount = 6
-        let bneck = 64
+        let bneck = 32
         let streamCount = 16384
         let trunkGroups = 16
         let warmup = 10
@@ -9438,6 +9710,164 @@ final class GenerationHarnessHardwareTests: XCTestCase {
 
         } catch {
             print("  FAILED: \(error)")
+        }
+    }
+
+    // MARK: - Cycle 28: bneck reduction sweep (pipelined)
+
+    func test_cycle28_bneck_reduction_pipeline() throws {
+        try requireGenerationHardware()
+
+        let dim = ModelConfig.dim
+        let streamCount = 16384
+        let trunkGroups = 16
+        let warmup = 10
+        let iters = 60
+
+        let weights = makeEchoRecurrentGenerationWeights(layerCount: 6)
+        let vocabSize = weights.vocabSize
+
+        // Shared ANE trunk (bneck-independent)
+        var trA = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+            count: 1,
+            throwingInitializer: { _ in
+                try RWKVStyleFusedThreeLayerSession(
+                    weights0: weights.layers[0], weights1: weights.layers[1],
+                    weights2: weights.layers[2], laneSpatial: streamCount,
+                    groups: trunkGroups, includeRMSNorm: false)
+            })
+        for i in 0..<3 { try trA[0].kernels.step.rebindInput(at: 1+i, to: trA[0].kernels.step.outputSurface(at: 1+i)) }
+        let trunkOutA = trA[0].handles.xOut
+        let t0xInA = trA[0].handles.xIn
+
+        var trB = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+            count: 1,
+            throwingInitializer: { _ in
+                try RWKVStyleFusedThreeLayerSession(
+                    weights0: weights.layers[0], weights1: weights.layers[1],
+                    weights2: weights.layers[2], laneSpatial: streamCount,
+                    groups: trunkGroups, includeRMSNorm: false)
+            })
+        for i in 0..<3 { try trB[0].kernels.step.rebindInput(at: 1+i, to: trB[0].kernels.step.outputSurface(at: 1+i)) }
+        let trunkOutB = trB[0].handles.xOut
+        let t0xInB = trB[0].handles.xIn
+
+        let aneQueue = DispatchQueue(label: "ane.eval.c28", qos: .userInteractive)
+
+        let rmsGammaFp16 = UnsafeMutablePointer<Float16>.allocate(capacity: dim)
+        defer { rmsGammaFp16.deallocate() }
+        weights.rmsFinal.withUnsafePointer { src in
+            for i in 0..<dim { rmsGammaFp16[i] = Float16(src[i]) }
+        }
+        let embFp16 = UnsafeMutablePointer<Float16>.allocate(capacity: vocabSize * dim)
+        defer { embFp16.deallocate() }
+        weights.embedding.withUnsafePointer { src in
+            for i in 0..<(vocabSize * dim) { embFp16[i] = Float16(src[i]) }
+        }
+
+        func cpuEmbWrite(_ surface: IOSurfaceRef) throws {
+            let tokens = Array(repeating: UInt16(0), count: streamCount)
+            try weights.embedding.withUnsafePointer { embPtr in
+                try tokens.withUnsafeBufferPointer { tokenBuf in
+                    try SurfaceIO.writeEmbeddingBatchFP16(
+                        to: surface, channelOffset: 0, spatial: streamCount,
+                        embeddingTable: embPtr, dim: dim,
+                        tokenIDs: tokenBuf.baseAddress!, streamCount: streamCount)
+                }
+            }
+        }
+
+        func med(_ a: [Double]) -> Double { let s = a.sorted(); return s[s.count / 2] }
+
+        print("=== Cycle 28: bneck reduction sweep (3L NoRMS pipelined) ===")
+
+        var results: [(bneck: Int, tps: Double, headUs: Double, aneWaitUs: Double)] = []
+
+        for bneck in [64, 32, 16] {
+            let projWFp16 = UnsafeMutablePointer<Float16>.allocate(capacity: dim * bneck)
+            defer { projWFp16.deallocate() }
+            for i in 0..<(dim * bneck) { projWFp16[i] = Float16.random(in: -0.01...0.01) }
+
+            let wF16 = UnsafeMutablePointer<Float16>.allocate(capacity: vocabSize * bneck)
+            defer { wF16.deallocate() }
+            for i in 0..<(vocabSize * bneck) { wF16[i] = Float16.random(in: -0.01...0.01) }
+            let wBuf = UnsafeBufferPointer(start: wF16, count: vocabSize * bneck)
+
+            let headA = try GPUPipelinedHead(
+                rmsGamma: UnsafeBufferPointer(start: rmsGammaFp16, count: dim),
+                wProject: UnsafeBufferPointer(start: projWFp16, count: dim * bneck),
+                wExpand: wBuf,
+                embeddingFP16: UnsafeBufferPointer(start: embFp16, count: vocabSize * dim),
+                dim: dim, bottleneck: bneck, vocabSize: vocabSize, spatial: streamCount)
+            let headB = try GPUPipelinedHead(
+                rmsGamma: UnsafeBufferPointer(start: rmsGammaFp16, count: dim),
+                wProject: UnsafeBufferPointer(start: projWFp16, count: dim * bneck),
+                wExpand: wBuf,
+                embeddingFP16: UnsafeBufferPointer(start: embFp16, count: vocabSize * dim),
+                dim: dim, bottleneck: bneck, vocabSize: vocabSize, spatial: streamCount)
+
+            try cpuEmbWrite(t0xInA)
+            try cpuEmbWrite(t0xInB)
+            try trA[0].kernels.step.eval()
+            _ = try headA.runAndEmbed(trunkSurface: trunkOutA, embedSurface: t0xInA)
+            try trB[0].kernels.step.eval()
+
+            var pipeUs: [Double] = []
+            var headUsArr: [Double] = []
+            var aneWaitArr: [Double] = []
+            for iter in 0..<(warmup + iters) {
+                let s = GenerationClock.now()
+                var aneError: (any Error)?
+
+                let g1 = DispatchGroup()
+                g1.enter()
+                aneQueue.async { defer { g1.leave() }
+                    do { try trB[0].kernels.step.eval() } catch { aneError = error }
+                }
+                let hs = mach_absolute_time()
+                _ = try headA.runAndEmbed(trunkSurface: trunkOutA, embedSurface: t0xInA)
+                let he = mach_absolute_time()
+                let ws = mach_absolute_time()
+                g1.wait()
+                let we = mach_absolute_time()
+                if let e = aneError { throw e }
+
+                let g2 = DispatchGroup()
+                g2.enter()
+                aneQueue.async { defer { g2.leave() }
+                    do { try trA[0].kernels.step.eval() } catch { aneError = error }
+                }
+                let hs2 = mach_absolute_time()
+                _ = try headB.runAndEmbed(trunkSurface: trunkOutB, embedSurface: t0xInB)
+                let he2 = mach_absolute_time()
+                let ws2 = mach_absolute_time()
+                g2.wait()
+                let we2 = mach_absolute_time()
+                if let e = aneError { throw e }
+
+                let elapsed = machMilliseconds(GenerationClock.now() - s) * 1000
+                if iter >= warmup {
+                    pipeUs.append(elapsed)
+                    headUsArr.append(machMilliseconds(he - hs) * 1000 + machMilliseconds(he2 - hs2) * 1000)
+                    aneWaitArr.append(machMilliseconds(we - ws) * 1000 + machMilliseconds(we2 - ws2) * 1000)
+                }
+            }
+
+            let medUs = med(pipeUs)
+            let tps = Double(streamCount * 2) / (medUs / 1000.0) * 1000.0
+            let hMed = med(headUsArr)
+            let awMed = med(aneWaitArr)
+            results.append((bneck: bneck, tps: tps, headUs: hMed, aneWaitUs: awMed))
+            print("  bneck=\(bneck): \(String(format: "%.0f", tps)) TPS, two-step=\(String(format: "%.3f", medUs / 1000)) ms, head=\(String(format: "%.1f", hMed)) µs, ANE-wait=\(String(format: "%.1f", awMed)) µs")
+        }
+
+        if results.count >= 2 {
+            let base = results[0]
+            for i in 1..<results.count {
+                let exp = results[i]
+                let delta = (exp.tps / base.tps - 1.0) * 100.0
+                print("  bneck=\(exp.bneck) vs bneck=\(base.bneck): \(String(format: "%+.1f", delta))% TPS")
+            }
         }
     }
 
