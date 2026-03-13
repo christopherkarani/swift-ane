@@ -33,6 +33,7 @@ MAX_CORPUS_BYTES="${MAX_CORPUS_BYTES:-262144}"
 CONTROL_BACKEND="${CONTROL_BACKEND:-identity-zero-trunk}"
 TWO_STEP_BACKEND="${TWO_STEP_BACKEND:-identity-zero-trunk}"
 OUTPUT_HEAD_BACKEND="${OUTPUT_HEAD_BACKEND:-ane-rmsnorm-classifier}"
+DRY_RUN="${DRY_RUN:-0}"
 
 mkdir -p "$RESULTS_DIR"
 claim_start_epoch=$(date +%s)
@@ -108,6 +109,7 @@ ITERATIONS="$ITERATIONS" \
 MAX_NEW_TOKENS="$MAX_NEW_TOKENS" \
 MAX_SEQUENCE_TOKENS="$MAX_SEQUENCE_TOKENS" \
 LAYER_COUNT="$LAYER_COUNT" \
+DRY_RUN="$DRY_RUN" \
 "$ROOT/scripts/reproduce_exact_4x.sh" || harness_exit=$?
 # Exit code 2 = gate fail (parity), 1 = runtime error, 0 = pass/warn
 if [[ $harness_exit -eq 1 ]]; then
