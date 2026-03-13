@@ -353,3 +353,4 @@ cycle	timestamp	hypothesis	result	commit	notes
 353	2026-03-13T05:50:31Z	claim	cross-validate harness valid_runs count against REPEATS	scripts/reproduce_local_real_artifact_claim.sh	committed
 354	2026-03-13T12:56:49Z	harness	unify end-of-benchmark environment capture — consistent timing for summary.json and gates	scripts/reproduce_exact_4x.sh	committed
 355	2026-03-13T12:57:26Z	harness	capture memory_free_pct_start at benchmark start — consistent timing	scripts/reproduce_exact_4x.sh	committed
+356	2026-03-13T12:58:04Z	harness	detect memory pressure drift — warn on >20pp drop during benchmark	scripts/reproduce_exact_4x.sh	committed
