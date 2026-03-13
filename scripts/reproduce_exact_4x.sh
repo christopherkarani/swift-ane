@@ -504,6 +504,7 @@ jq -s \
   --arg thermal_pressure "$THERMAL_START" \
   --arg thermal_pressure_end "$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)" \
   --arg load_avg_end "$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)" \
+  --argjson memory_free_pct "$(sysctl -n kern.memorystatus_level 2>/dev/null || echo null)" \
   --arg swift_version "$(swift --version 2>/dev/null | head -1 || echo unknown)" \
   --arg jq_version "$(jq --version 2>/dev/null || echo unknown)" \
   --argjson outer_elapsed "$(printf '%s\n' "${valid_outer_elapsed[@]}" | jq -s '.')" \
@@ -539,7 +540,7 @@ jq -s \
   timestamp: $ts,
   git_commit: $commit,
   git_branch: $branch,
-  host: {hw_model: $hw_model, chip: $chip, ncpu: $ncpu, physical_memory_gb: $physical_memory_gb, thermal_pressure: $thermal_pressure, thermal_pressure_end: $thermal_pressure_end, load_average: $load_avg, load_average_end: $load_avg_end, macos_version: $macos_version, macos_build: $macos_build, power_source: $power_source},
+  host: {hw_model: $hw_model, chip: $chip, ncpu: $ncpu, physical_memory_gb: $physical_memory_gb, thermal_pressure: $thermal_pressure, thermal_pressure_end: $thermal_pressure_end, load_average: $load_avg, load_average_end: $load_avg_end, memory_free_pct: $memory_free_pct, macos_version: $macos_version, macos_build: $macos_build, power_source: $power_source},
   toolchain: {swift_version: $swift_version, jq_version: $jq_version},
   benchmark_contract: {
     contract_hash: $contract_hash,
