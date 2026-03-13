@@ -177,6 +177,14 @@ if [[ -n "$manifest_layer_count" && "$manifest_layer_count" != "$LAYER_COUNT" ]]
   exit 1
 fi
 
+# Cross-validate manifest tokenCount against dataset
+dataset_byte_count="$(wc -c < "$DATASET_PATH" | tr -d ' ')"
+expected_token_count=$((dataset_byte_count / 2))
+manifest_token_count="$(jq -r '.tokenCount // empty' "$ARTIFACT_PREFIX.manifest.json" 2>/dev/null || true)"
+if [[ -n "$manifest_token_count" && "$manifest_token_count" != "$expected_token_count" ]]; then
+  echo "WARNING: manifest tokenCount=$manifest_token_count but dataset has $expected_token_count tokens ($dataset_byte_count bytes / 2)"
+fi
+
 # Compute claim-level contract hash (same algorithm as harness) for cross-validation
 CLAIM_CONTRACT_HASH="$(printf '%s\n' \
   "input_mode=recurrent-checkpoint" \
