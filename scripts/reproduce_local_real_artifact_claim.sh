@@ -128,6 +128,7 @@ fi
   echo "dataset_bytes=$(wc -c < "$DATASET_PATH" | tr -d ' ')"
   echo "max_corpus_bytes=$MAX_CORPUS_BYTES"
   echo "artifact_prefix=$ARTIFACT_PREFIX"
+  echo "artifact_manifest_sha256=$(shasum -a 256 "$ARTIFACT_PREFIX.manifest.json" | awk '{print $1}')"
   echo "offline_gate_json=$OFFLINE_GATE_JSON"
   echo "offline_gate_sha256=$(shasum -a 256 "$OFFLINE_GATE_JSON" | awk '{print $1}')"
   echo "coreml_model=$COREML_MODEL"
