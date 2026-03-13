@@ -265,9 +265,16 @@ if [[ ! -x "$COREMLTOOLS_PYTHON" ]]; then
   COREMLTOOLS_PYTHON="/tmp/coremltools312-install-venv/bin/python"
 fi
 
+# Validate the CoreML generation script exists before invoking it
+COREML_GEN_SCRIPT="$ROOT/scripts/generate_coreml_model.py"
+if [[ ! -f "$COREML_GEN_SCRIPT" ]]; then
+  echo "FATAL: CoreML generation script not found at $COREML_GEN_SCRIPT" >&2
+  exit 1
+fi
+
 coreml_gen_start=$(date +%s)
 echo "Generating matching zero-weight CoreML trunk into $COREML_MODEL"
-"$COREMLTOOLS_PYTHON" "$ROOT/scripts/generate_coreml_model.py" \
+"$COREMLTOOLS_PYTHON" "$COREML_GEN_SCRIPT" \
   --layers "$LAYER_COUNT" \
   --weight-mode zero \
   --output "$COREML_MODEL"
