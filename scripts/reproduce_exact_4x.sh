@@ -225,10 +225,26 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
+# Canonical contract hash for fast cross-run equality comparison
+CONTRACT_HASH="$(printf '%s\n' \
+  "input_mode=$INPUT_MODE" \
+  "control_backend=$CONTROL_BACKEND" \
+  "two_step_backend=$TWO_STEP_BACKEND" \
+  "output_head_backend=$OUTPUT_HEAD_BACKEND" \
+  "warmup=$WARMUP" \
+  "iterations=$ITERATIONS" \
+  "max_new_tokens=$MAX_NEW_TOKENS" \
+  "max_sequence_tokens=$MAX_SEQUENCE_TOKENS" \
+  "layer_count=$LAYER_COUNT" \
+  "prompt_token=$PROMPT_TOKEN" \
+  | shasum -a 256 | awk '{print $1}')"
+
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "=== Dry Run: All prerequisites validated ==="
   echo "harness_version=$HARNESS_VERSION"
+  echo "contract_hash=$CONTRACT_HASH"
   echo "probe=$PROBE"
+  echo "probe_sha256=$PROBE_SHA256"
   echo "coreml_model=$COREML_MODEL"
   echo "jq=$(command -v jq)"
   echo "jq_version=$(jq --version 2>/dev/null || echo unknown)"
@@ -270,20 +286,6 @@ fi
 if [[ -n "$GENERATION_MODEL" ]]; then
   COMMON_ARGS+=(--generation-model "$GENERATION_MODEL")
 fi
-
-# Canonical contract hash for fast cross-run equality comparison
-CONTRACT_HASH="$(printf '%s\n' \
-  "input_mode=$INPUT_MODE" \
-  "control_backend=$CONTROL_BACKEND" \
-  "two_step_backend=$TWO_STEP_BACKEND" \
-  "output_head_backend=$OUTPUT_HEAD_BACKEND" \
-  "warmup=$WARMUP" \
-  "iterations=$ITERATIONS" \
-  "max_new_tokens=$MAX_NEW_TOKENS" \
-  "max_sequence_tokens=$MAX_SEQUENCE_TOKENS" \
-  "layer_count=$LAYER_COUNT" \
-  "prompt_token=$PROMPT_TOKEN" \
-  | shasum -a 256 | awk '{print $1}')"
 
 failed_runs=0
 benchmark_start_epoch=$(date +%s)
