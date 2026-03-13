@@ -88,6 +88,16 @@ for expected_artifact in "$ARTIFACT_PREFIX.manifest.json" "$ARTIFACT_PREFIX.recu
   fi
 done
 
+# Validate that JSON artifacts parse correctly
+if ! jq -e '.promptToken' "$ARTIFACT_PREFIX.manifest.json" >/dev/null 2>&1; then
+  echo "FATAL: manifest.json missing or has no promptToken field" >&2
+  exit 1
+fi
+if ! jq -e '.parity_status' "$OFFLINE_GATE_JSON" >/dev/null 2>&1; then
+  echo "FATAL: offline gate JSON missing or has no parity_status field" >&2
+  exit 1
+fi
+
 PROMPT_TOKEN="$(jq -r '.promptToken' "$ARTIFACT_PREFIX.manifest.json")"
 
 if [[ ! -x "$COREMLTOOLS_PYTHON" ]]; then
