@@ -235,6 +235,7 @@ fi
 # Collect valid run JSONs (skip empty or malformed files from failed runs)
 valid_runs=()
 valid_outer_elapsed=()
+valid_stderr_lines=()
 for f in "$RESULTS_DIR"/run-*.json; do
   if jq -e '.two_step.median_ms_per_token' "$f" >/dev/null 2>&1; then
     valid_runs+=("$f")
@@ -244,6 +245,13 @@ for f in "$RESULTS_DIR"/run-*.json; do
       valid_outer_elapsed+=("$(cat "$elapsed_file")")
     else
       valid_outer_elapsed+=("null")
+    fi
+    # Collect stderr line count for the corresponding run
+    stderr_file="${f%.json}.stderr.log"
+    if [[ -f "$stderr_file" ]]; then
+      valid_stderr_lines+=("$(wc -l < "$stderr_file" | tr -d ' ')")
+    else
+      valid_stderr_lines+=("null")
     fi
   fi
 done
@@ -371,6 +379,7 @@ jq -s \
   --argjson physical_memory_gb "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))" \
   --argjson outer_elapsed "$(printf '%s\n' "${valid_outer_elapsed[@]}" | jq -s '.')" \
   --argjson prompt_token "${PROMPT_TOKEN:-null}" \
+  --argjson stderr_lines "$(printf '%s\n' "${valid_stderr_lines[@]}" | jq -s '.')" \
   --argjson run_files "$(printf '%s\n' "${valid_runs[@]}" | while read -r f; do basename "$f"; done | jq -nR '[inputs | select(length > 0)]')" \
 '{
   probe_version: (map(.probe_version // null) | .[0]),
@@ -486,6 +495,7 @@ jq -s \
   valid_run_files: $run_files,
   per_run_wall_elapsed_s: (map(.probe_wall_elapsed_s // null)),
   per_run_outer_elapsed_s: $outer_elapsed,
+  per_run_stderr_lines: $stderr_lines,
   sum_probe_wall_elapsed_s: (map(.probe_wall_elapsed_s // 0) | add),
   sum_outer_elapsed_s: ($outer_elapsed | map(. // 0) | add)
 }' "${valid_runs[@]}" > "$RESULTS_DIR/summary.json"
