@@ -621,6 +621,8 @@ jq -s \
   probe_version: (map(.probe_version // null) | .[0]),
   probe_version_uniform: (map(.probe_version // null) | unique | length <= 1),
   per_run_probe_versions: (map(.probe_version // null)),
+  build_configuration: (map(.build_configuration // null) | map(select(. != null)) | unique | if length == 1 then .[0] else null end),
+  build_configuration_uniform: (map(.build_configuration // null) | map(select(. != null)) | unique | length <= 1),
   per_run_build_configurations: (map(.build_configuration // null)),
   per_run_input_modes: (map(.input_mode // null)),
   per_run_control_backends: (map(.control_backend // null)),
