@@ -358,6 +358,8 @@ if [[ ${#valid_runs[@]} -eq 0 ]]; then
   echo "FATAL: No valid run JSONs found in $RESULTS_DIR" >&2
   exit 1
 fi
+# Minimum 3 valid runs needed for meaningful statistics (median, IQR, Tukey fences)
+MIN_VALID_RUNS=3
 echo "Summarizing ${#valid_runs[@]} valid run(s) out of $REPEATS"
 
 two_step_median_ms="$(jq -s 'map(.two_step.median_ms_per_token) | sort | .[((length - 1) / 2 | floor)]' "${valid_runs[@]}")"
@@ -695,6 +697,11 @@ fi
 THERMAL_END="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
 if [[ "$THERMAL_START" != "$THERMAL_END" && "$THERMAL_START" != "unknown" && "$THERMAL_END" != "unknown" ]]; then
   gate_warnings="${gate_warnings}THERMAL_DRIFT: thermal pressure changed during benchmark (start='${THERMAL_START}', end='${THERMAL_END}')\n"
+fi
+
+if [[ ${#valid_runs[@]} -lt $MIN_VALID_RUNS ]]; then
+  gate_status="warn"
+  gate_warnings="${gate_warnings}TOO_FEW_VALID_RUNS: only ${#valid_runs[@]} valid runs (minimum $MIN_VALID_RUNS for reliable statistics)\n"
 fi
 
 if [[ $failed_runs -gt 0 ]]; then
