@@ -197,6 +197,11 @@ trap cleanup_on_interrupt INT TERM
 echo "Building release probe into $SCRATCH_PATH"
 swift build -c release --product espresso-multitoken-probe --scratch-path "$SCRATCH_PATH"
 
+if [[ ! -x "$PROBE" ]]; then
+  echo "FATAL: Probe binary not found or not executable at $PROBE" >&2
+  exit 1
+fi
+
 # Record probe binary hash for reproducibility
 PROBE_SHA256="$(shasum -a 256 "$PROBE" | awk '{print $1}')"
 echo "probe_sha256=$PROBE_SHA256" >> "$RESULTS_DIR/metadata.txt"
