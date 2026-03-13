@@ -372,7 +372,7 @@ valid_runs=()
 valid_outer_elapsed=()
 valid_stderr_lines=()
 for f in "$RESULTS_DIR"/run-*.json; do
-  if jq -e '.two_step.median_ms_per_token and .control.median_ms_per_token and .coreml.median_ms_per_token' "$f" >/dev/null 2>&1; then
+  if jq -e '.two_step.median_ms_per_token and .control.median_ms_per_token and .coreml.median_ms_per_token and .probe_version and .parity_status' "$f" >/dev/null 2>&1; then
     valid_runs+=("$f")
     # Collect matching outer elapsed_s file
     elapsed_file="${f%.json}.elapsed_s"
