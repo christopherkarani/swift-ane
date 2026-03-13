@@ -610,6 +610,11 @@ CV_THRESHOLD="${CV_THRESHOLD:-0.10}"
 gate_status="pass"
 gate_warnings=""
 
+if [[ $failed_runs -gt 0 ]]; then
+  gate_status="warn"
+  gate_warnings="${gate_warnings}FAILED_RUNS: ${failed_runs}/${REPEATS} runs failed\n"
+fi
+
 if [[ "$all_parity_match" != "true" ]]; then
   gate_status="fail"
   parity_detail="$(jq -s '[.[] | {run: input_line_number, status: .parity_status, match_count: (.parity_match_count // "n/a"), total: (.parity_total // "n/a")} | select(.status != "match")] | map("\(.run): \(.match_count)/\(.total)") | join(", ")' "${valid_runs[@]}" 2>/dev/null || echo "detail unavailable")"
