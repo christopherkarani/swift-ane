@@ -644,6 +644,7 @@ jq -s \
   control_speedup_min: (map(.control_speedup_vs_coreml // null) | map(select(. != null)) | if length > 0 then min else null end),
   control_speedup_max: (map(.control_speedup_vs_coreml // null) | map(select(. != null)) | if length > 0 then max else null end),
   control_speedup_cv: (map(.control_speedup_vs_coreml // null) | map(select(. != null)) | if length >= 2 then (length) as $n | (add / $n) as $mean | if $mean == 0 then 0 else (map(. - $mean | . * .) | add / $n | sqrt) / $mean end else null end),
+  control_speedup_iqr: (map(.control_speedup_vs_coreml // null) | map(select(. != null)) | sort | if length < 4 then (if length > 0 then (last - first) else null end) else (.[((length * 3 / 4) | floor)] - .[((length / 4) | floor)]) end),
   per_run_control_speedups: (map(.control_speedup_vs_coreml // null)),
   token_accounting: {
     committed_exact_tokens_per_pass: (map(.two_step.median_committed_exact_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
