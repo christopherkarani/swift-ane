@@ -740,6 +740,19 @@ if [[ -n "$short_gen" ]]; then
   gate_warnings="${gate_warnings}SHORT_GENERATION: some runs generated fewer than max_new_tokens ($MAX_NEW_TOKENS) tokens\n"
 fi
 
+# Timestamp monotonicity check (detect clock skew or out-of-order execution)
+ts_nonmono="$(jq -s '
+  [.[] | .probe_timestamp // null] | map(select(. != null)) |
+  if length < 2 then empty
+  else . as $ts |
+    [range(1; $ts | length) | select($ts[.] < $ts[. - 1])] |
+    if length > 0 then "non-monotonic at indices: \(.)" else empty end
+  end
+' "${valid_runs[@]}" 2>/dev/null || echo "")"
+if [[ -n "$ts_nonmono" ]]; then
+  gate_warnings="${gate_warnings}TIMESTAMP_ORDER: probe timestamps are not strictly increasing ($ts_nonmono)\n"
+fi
+
 if [[ "$all_parity_match" != "true" ]]; then
   gate_status="fail"
   parity_detail="$(jq -s '[.[] | {run: input_line_number, status: .parity_status, match_count: (.parity_match_count // "n/a"), total: (.parity_total // "n/a")} | select(.status != "match")] | map("\(.run): \(.match_count)/\(.total)") | join(", ")' "${valid_runs[@]}" 2>/dev/null || echo "detail unavailable")"
