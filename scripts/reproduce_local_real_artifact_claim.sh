@@ -76,6 +76,7 @@ if [[ ! -s "$DATASET_PATH" ]]; then
   exit 1
 fi
 
+artifact_export_start=$(date +%s)
 echo "Exporting local bigram artifacts into $ARTIFACT_PREFIX.*"
 swift run espresso-train \
   --data "$DATASET_PATH" \
@@ -83,6 +84,7 @@ swift run espresso-train \
   --artifact-layer-count "$LAYER_COUNT" \
   --offline-acceptance-json "$OFFLINE_GATE_JSON" \
   --gate-max-new-tokens "$MAX_NEW_TOKENS"
+artifact_export_elapsed_s=$(( $(date +%s) - artifact_export_start ))
 
 for expected_artifact in "$ARTIFACT_PREFIX.manifest.json" "$ARTIFACT_PREFIX.recurrent.bin" "$ARTIFACT_PREFIX.generation.bin" "$ARTIFACT_PREFIX.future-sidecar.bin" "$OFFLINE_GATE_JSON"; do
   if [[ ! -s "$expected_artifact" ]]; then
@@ -119,11 +121,13 @@ if [[ ! -x "$COREMLTOOLS_PYTHON" ]]; then
   COREMLTOOLS_PYTHON="/tmp/coremltools312-install-venv/bin/python"
 fi
 
+coreml_gen_start=$(date +%s)
 echo "Generating matching zero-weight CoreML trunk into $COREML_MODEL"
 "$COREMLTOOLS_PYTHON" "$ROOT/scripts/generate_coreml_model.py" \
   --layers "$LAYER_COUNT" \
   --weight-mode zero \
   --output "$COREML_MODEL"
+coreml_gen_elapsed_s=$(( $(date +%s) - coreml_gen_start ))
 
 if [[ ! -e "$COREML_MODEL" ]]; then
   echo "FATAL: CoreML model generation succeeded but $COREML_MODEL is missing" >&2
@@ -172,6 +176,8 @@ fi
   echo "results_dir=$RESULTS_DIR"
   echo "dataset=$DATASET_PATH"
   echo "dataset_build_elapsed_s=$dataset_build_elapsed_s"
+  echo "artifact_export_elapsed_s=$artifact_export_elapsed_s"
+  echo "coreml_gen_elapsed_s=$coreml_gen_elapsed_s"
   echo "dataset_sha256=$(shasum -a 256 "$DATASET_PATH" | awk '{print $1}')"
   dataset_bytes="$(wc -c < "$DATASET_PATH" | tr -d ' ')"
   echo "dataset_bytes=$dataset_bytes"
