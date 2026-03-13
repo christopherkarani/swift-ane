@@ -223,6 +223,13 @@ if [[ ! -x "$PROBE" ]]; then
   exit 1
 fi
 
+# Verify probe binary is native to this architecture
+probe_arch="$(file "$PROBE" 2>/dev/null | grep -o 'arm64\|x86_64' | head -1 || echo unknown)"
+host_arch="$(uname -m 2>/dev/null || echo unknown)"
+if [[ "$probe_arch" != "unknown" && "$host_arch" != "unknown" && "$probe_arch" != "$host_arch" ]]; then
+  echo "WARNING: Probe binary is $probe_arch but host is $host_arch — may fail or run under Rosetta" >&2
+fi
+
 # Record probe binary hash for reproducibility
 PROBE_SHA256="$(shasum -a 256 "$PROBE" | awk '{print $1}')"
 echo "probe_sha256=$PROBE_SHA256" >> "$RESULTS_DIR/metadata.txt"
