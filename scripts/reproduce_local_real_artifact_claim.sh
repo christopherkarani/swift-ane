@@ -515,6 +515,11 @@ fi
     if [[ -n "$harness_contract_input" && "$harness_contract_input" != "recurrent-checkpoint" ]]; then
       echo "WARNING: expected input_mode=recurrent-checkpoint but harness used input_mode=$harness_contract_input"
     fi
+    # Cross-validate git commit: claim and harness should be on the same commit
+    harness_git="$(jq -r '.git_commit // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
+    if [[ -n "$harness_git" && "$harness_git" != "$git_commit_start" ]]; then
+      echo "WARNING: claim git_commit=$git_commit_start but harness git_commit=$harness_git"
+    fi
     # Cross-validate hostname: claim pipeline must run on same host as harness
     claim_hostname="$(hostname 2>/dev/null || echo "")"
     harness_hostnames="$(jq -r '.per_run_hostnames // [] | map(select(. != null)) | unique | join(",")' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
