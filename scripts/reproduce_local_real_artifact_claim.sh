@@ -686,6 +686,18 @@ fi
     if [[ -n "$claim_gen_sha" && -n "$harness_gen_sha" && "$claim_gen_sha" != "$harness_gen_sha" ]]; then
       echo "WARNING: generation model SHA mismatch: claim=$claim_gen_sha harness=$harness_gen_sha"
     fi
+    # Cross-validate CoreML model SHA: claim-generated model vs harness input
+    if [[ -d "$COREML_MODEL" ]]; then
+      claim_coreml_sha="$(find "$COREML_MODEL" -type f | sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')"
+    elif [[ -f "$COREML_MODEL" ]]; then
+      claim_coreml_sha="$(shasum -a 256 "$COREML_MODEL" | awk '{print $1}')"
+    else
+      claim_coreml_sha=""
+    fi
+    harness_coreml_sha="$(jq -r '.artifact_hashes.coreml_model_sha256 // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
+    if [[ -n "$claim_coreml_sha" && -n "$harness_coreml_sha" && "$claim_coreml_sha" != "$harness_coreml_sha" ]]; then
+      echo "WARNING: CoreML model SHA mismatch: claim=$claim_coreml_sha harness=$harness_coreml_sha"
+    fi
   fi
   # Validate that all critical artifact files still exist and are non-empty
   missing_artifacts=""
