@@ -511,6 +511,7 @@ jq -s \
   per_run_max_sequence_tokens: (map(.max_sequence_tokens // null)),
   per_run_hostnames: (map(.hostname // null)),
   per_run_os_versions: (map(.os_version // null)),
+  per_run_process_ids: (map(.process_id // null)),
   per_run_warmup: (map(.warmup // null)),
   per_run_iterations: (map(.iterations // null)),
   results_dir: $dir,
