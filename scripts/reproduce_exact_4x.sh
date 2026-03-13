@@ -142,9 +142,10 @@ esac
 
 mkdir -p "$RESULTS_DIR"
 
-# Warn if results directory already has run data from a previous invocation
+# Fail if results directory already has run data from a previous invocation
 if ls "$RESULTS_DIR"/run-*.json >/dev/null 2>&1; then
-  echo "WARNING: results directory $RESULTS_DIR already contains run-*.json files — stale data may contaminate aggregation" >&2
+  echo "FATAL: results directory $RESULTS_DIR already contains run-*.json files — stale data would contaminate aggregation. Use a clean directory or delete existing run files." >&2
+  exit 1
 fi
 
 # Capture git HEAD at harness start for drift detection
