@@ -692,6 +692,10 @@ if [[ ${#valid_runs[@]} -ge 4 ]]; then
     '{two_step: $ts, control: $ct, coreml: $cm, speedup: $sp}')"
 
   if [[ $outlier_count -gt 0 ]]; then
+    if [[ "$gate_status" == "pass" ]]; then
+      gate_status="warn"
+    fi
+    gate_warnings="${gate_warnings}OUTLIERS_DETECTED: ${outlier_count} outlier(s) across paths (Tukey 1.5x IQR)\n"
     echo ""
     echo "=== Outlier Detection ==="
     echo "total_outlier_count=$outlier_count"
