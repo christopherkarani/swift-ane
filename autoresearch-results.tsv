@@ -259,3 +259,36 @@ cycle	timestamp	hypothesis	result	commit	notes
 258	2026-03-13T05:02:09+03:00	-	status assessment: deep diminishing returns	-	pass
 259	2026-03-13T05:02:45+03:00	6d03a7c	per-run input modes/layer counts in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
 260	2026-03-13T05:03:57+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
+261	2026-03-13T05:04:39+03:00	289c5e4	CoreML model SHA256 in DRY_RUN output	scripts/reproduce_exact_4x.sh	pass
+262	2026-03-13T02:07:51Z	dataset_tokens	claim	emit dataset_tokens (dataset_bytes/2) in claim-summary.txt	pass
+263	2026-03-13T02:08:32Z	per-run-component-breakdowns	claim	extract per-run proposer/verifier/trunk/logits arrays into claim	pass
+264	2026-03-13T02:09:07Z	per-run-contract-p99-state	claim	extract per-run backends, token params, p99s, state_advance into claim	pass
+265	2026-03-13T02:09:38Z	per-run-iter-min-max	claim	extract per-run iteration min/max ms for all 3 paths	pass
+266	2026-03-13T02:11:14Z	artifact-integrity-check	claim	validate artifact files exist and non-empty at claim time	pass
+267	2026-03-13T02:12:24Z	odd-byte-count-warning	claim	warn on odd dataset byte count (uint16 encoding invariant)	pass
+268	2026-03-13T02:13:43Z	metadata-sha256	claim	extract harness metadata_sha256 into claim	pass
+269	2026-03-13T02:14:08Z	contract-fields-complete	claim	extract remaining benchmark_contract fields into claim	pass
+270	2026-03-13T02:14:45Z	claim-harness-contract-xval	claim	cross-validate claim LAYER_COUNT/MAX_NEW_TOKENS vs harness contract	pass
+271	2026-03-13T02:18:53Z	harness-git-info	claim	extract harness git_commit and git_branch into claim	pass
+272	2026-03-13T02:19:13Z	harness-timestamp	claim	extract harness timestamp into claim	pass
+273	2026-03-13T04:38:48Z	post-build-artifact-check	claim	validate dataset and artifact files exist after build steps	pass
+274	2026-03-13T04:39:09Z	coreml-model-check	claim	validate CoreML model exists after generation	pass
+275	2026-03-13T04:39:30Z	offline-gate-in-artifact-check	claim	include offline gate JSON in post-export artifact check	pass
+276	2026-03-13T04:39:55Z	json-structure-validation	claim	validate manifest and offline gate JSON structure after export	pass
+277	2026-03-13T04:40:45Z	test-suite	verify	405 tests pass, 0 failures, 121 skipped	pass
+278	2026-03-13T04:41:19Z	prompt-token-validation	claim	validate promptToken is a non-negative integer	pass
+279	2026-03-13T04:41:55Z	dry-run-system-info	harness	add chip/power/thermal to DRY_RUN output	pass
+280	2026-03-13T04:42:42Z	load-drift-gate	harness	add LOAD_DRIFT gate warning for 1-min load average	pass
+281	2026-03-13T04:43:16Z	low-disk-gate	harness	add LOW_DISK_SPACE gate warning	pass
+282	2026-03-13T04:43:49Z	disk-space-tracking	claim	add disk_free_mb_start and disk_free_mb_end to claim	pass
+283	2026-03-13T04:44:25Z	memory-pressure-gate	harness	add memory_free_pct tracking and LOW_MEMORY gate warning	pass
+284	2026-03-13T04:45:03Z	memory-free-pct-summary	harness+claim	add memory_free_pct to summary.json host section and claim	pass
+285	2026-03-13T04:45:48Z	version-bump	harness+claim	bump HARNESS_VERSION=7, CLAIM_VERSION=6	pass
+286	2026-03-13T04:47:29Z	dataset-build-timing	claim	track dataset_build_elapsed_s in claim	pass
+287	2026-03-13T04:48:05Z	pipeline-step-timing	claim	track artifact_export and coreml_gen elapsed times	pass
+288	2026-03-13T04:48:39Z	stale-data-warning	harness	warn on pre-existing run data in results directory	pass
+289	2026-03-13T04:49:56Z	probe-build-timing	harness+claim	track probe_build_elapsed_s in summary and claim	pass
+290	2026-03-13T04:50:49Z	test-suite	verify	405 tests pass, 0 failures, 121 skipped	pass
+291	2026-03-13T04:51:12Z	dry-run-build-time	harness	include probe_build_elapsed_s in DRY_RUN output	pass
+292	2026-03-13T04:51:34Z	build-time-in-summary-txt	harness	add probe_build_elapsed_s to summary.txt	pass
+293	2026-03-13T04:53:06Z	null-safety	claim	add null-safety (| na) to all remaining unprotected jq fields	pass
