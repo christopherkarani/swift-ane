@@ -832,13 +832,17 @@ done
 
 # Cold compile detection: warn if first run init time is >3x the median
 cold_compile="$(jq -s '
-  [.[] | .control.init_wall_ms // null] | map(select(. != null)) |
-  if length >= 3 then
-    .[0] as $first | (sort | .[((length - 1) / 2 | floor)]) as $med |
-    if $med > 0 and ($first / $med) > 3 then
-      "first run control init \($first)ms vs median \($med)ms (\($first / $med | . * 100 | floor / 100)x)"
-    else empty end
-  else empty end
+  def cold_check(label):
+    map(select(. != null)) |
+    if length >= 3 then
+      .[0] as $first | (sort | .[((length - 1) / 2 | floor)]) as $med |
+      if $med > 0 and ($first / $med) > 3 then
+        "\(label) first=\($first)ms median=\($med)ms (\($first / $med | . * 100 | floor / 100)x)"
+      else empty end
+    else empty end;
+  ([.[] | .control.init_wall_ms // null] | cold_check("control")),
+  ([.[] | .two_step.init_wall_ms // null] | cold_check("two_step")),
+  ([.[] | .coreml.reported_compile_ms // null] | cold_check("coreml"))
 ' "${valid_runs[@]}" 2>/dev/null || echo "")"
 if [[ -n "$cold_compile" ]]; then
   gate_warnings="${gate_warnings}COLD_COMPILE: ${cold_compile}\n"
