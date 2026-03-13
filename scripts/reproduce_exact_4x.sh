@@ -53,6 +53,11 @@ if [[ "$MAX_SEQUENCE_TOKENS" -lt 1 ]]; then
   exit 1
 fi
 
+if ! [[ "$PROMPT_TOKEN" =~ ^[0-9]+$ ]]; then
+  echo "PROMPT_TOKEN must be a non-negative integer (got: $PROMPT_TOKEN)" >&2
+  exit 1
+fi
+
 if [[ ! -e "$COREML_MODEL" ]]; then
   echo "CoreML model not found at $COREML_MODEL" >&2
   exit 1
