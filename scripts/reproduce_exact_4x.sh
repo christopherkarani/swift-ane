@@ -142,9 +142,9 @@ esac
 
 mkdir -p "$RESULTS_DIR"
 
-# Fail if results directory already has run data from a previous invocation
-if ls "$RESULTS_DIR"/run-*.json >/dev/null 2>&1; then
-  echo "FATAL: results directory $RESULTS_DIR already contains run-*.json files — stale data would contaminate aggregation. Use a clean directory or delete existing run files." >&2
+# Fail if results directory already has data from a previous invocation
+if ls "$RESULTS_DIR"/run-*.json >/dev/null 2>&1 || [[ -f "$RESULTS_DIR/summary.json" ]]; then
+  echo "FATAL: results directory $RESULTS_DIR already contains run data — stale data would contaminate aggregation. Use a clean directory or delete existing files." >&2
   exit 1
 fi
 
