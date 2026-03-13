@@ -76,6 +76,12 @@ if [[ ! -x "$COREMLTOOLS_PYTHON" ]]; then
   fi
 fi
 
+# Pre-check: swift toolchain is required for dataset build and artifact export
+if ! command -v swift &>/dev/null; then
+  echo "FATAL: swift is required but not found on PATH" >&2
+  exit 1
+fi
+
 # Pre-check: jq is required for JSON validation and summary extraction
 if ! command -v jq &>/dev/null; then
   echo "FATAL: jq is required but not found on PATH" >&2
