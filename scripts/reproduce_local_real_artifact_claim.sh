@@ -255,6 +255,7 @@ fi
       "harness_accepted_future_tokens_per_pass=\(.token_accounting.accepted_future_tokens_per_pass | na)",
       "harness_per_run_os_versions=\(.per_run_os_versions // [] | tojson)",
       "harness_per_run_process_ids=\(.per_run_process_ids // [] | tojson)",
+      "harness_per_run_iteration_counts=\(.per_run_iteration_counts // [] | tojson)",
       "harness_total_stderr_lines=\(.per_run_stderr_lines // [] | add // 0)",
       "harness_contract_hash=\(.benchmark_contract.contract_hash | na)",
       "harness_first_run_timestamp=\(.first_run_timestamp | na)",
