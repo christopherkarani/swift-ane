@@ -133,8 +133,10 @@ echo "macos_version=$(sw_vers -productVersion 2>/dev/null || echo unknown)"
 echo "claim_pid=$$"
 memory_free_pct_start="$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
 echo "memory_free_pct_start=$memory_free_pct_start"
-echo "thermal_pressure_start=$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
-echo "load_average_start=$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+thermal_pressure_start="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
+echo "thermal_pressure_start=$thermal_pressure_start"
+load_average_start="$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+echo "load_average_start=$load_average_start"
 power_source_start="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
 echo "power_source_start=$power_source_start"
 echo ""
@@ -745,8 +747,10 @@ fi
   fi
   echo "disk_free_mb_end=$(df -m "$RESULTS_DIR" 2>/dev/null | awk 'NR==2{print $4}' || echo unknown)"
   echo "memory_free_pct_end=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
-  echo "thermal_pressure_end=$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
-  echo "load_average_end=$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+  thermal_pressure_end="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
+  echo "thermal_pressure_end=$thermal_pressure_end"
+  load_average_end="$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+  echo "load_average_end=$load_average_end"
   power_source_end="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
   echo "power_source_end=$power_source_end"
   # Claim-level environment drift warnings
@@ -772,6 +776,9 @@ fi
   fi
   if [[ "$power_source_start" != "$power_source_end" && "$power_source_start" != "unknown" && "$power_source_end" != "unknown" ]]; then
     echo "CLAIM_WARNING: POWER_DRIFT — power source changed during claim (start='$power_source_start', end='$power_source_end')"
+  fi
+  if [[ "$thermal_pressure_start" != "$thermal_pressure_end" && "$thermal_pressure_start" != "unknown" && "$thermal_pressure_end" != "unknown" ]]; then
+    echo "CLAIM_WARNING: THERMAL_DRIFT — thermal pressure changed during claim (start='$thermal_pressure_start', end='$thermal_pressure_end')"
   fi
   claim_elapsed_s=$(( $(date +%s) - claim_start_epoch ))
   echo "claim_total_elapsed_s=$claim_elapsed_s"
