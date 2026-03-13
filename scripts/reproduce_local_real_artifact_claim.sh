@@ -353,6 +353,22 @@ fi
       echo "WARNING: token accounting mismatch: offline committed=$offline_committed harness committed=$harness_committed"
     fi
   fi
+  # Validate that all critical artifact files still exist and are non-empty
+  missing_artifacts=""
+  for artifact_file in \
+    "$DATASET_PATH" \
+    "$ARTIFACT_PREFIX.recurrent.bin" \
+    "$ARTIFACT_PREFIX.future-sidecar.bin" \
+    "$ARTIFACT_PREFIX.generation.bin" \
+    "$ARTIFACT_PREFIX.manifest.json" \
+    "$OFFLINE_GATE_JSON"; do
+    if [[ ! -s "$artifact_file" ]]; then
+      missing_artifacts="${missing_artifacts}$(basename "$artifact_file") "
+    fi
+  done
+  if [[ -n "$missing_artifacts" ]]; then
+    echo "WARNING: artifact file(s) missing or empty at claim time: $missing_artifacts"
+  fi
   claim_elapsed_s=$(( $(date +%s) - claim_start_epoch ))
   echo "claim_total_elapsed_s=$claim_elapsed_s"
   git_commit_end="$(git -C "$ROOT" rev-parse HEAD)"
