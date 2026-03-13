@@ -25,6 +25,8 @@ FUTURE_SIDECAR="${FUTURE_SIDECAR:-}"
 GENERATION_MODEL="${GENERATION_MODEL:-}"
 PROMPT_TOKEN="${PROMPT_TOKEN:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+CV_THRESHOLD="${CV_THRESHOLD:-0.10}"
+DURATION_BUDGET_S="${DURATION_BUDGET_S:-600}"
 
 if [[ "$REPEATS" -lt 3 || $((REPEATS % 2)) -ne 1 ]]; then
   echo "REPEATS must be an odd integer >= 3" >&2
@@ -259,6 +261,8 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "future_sidecar=${FUTURE_SIDECAR:-<none>}"
   echo "generation_model=${GENERATION_MODEL:-<none>}"
   echo "results_dir=$RESULTS_DIR"
+  echo "cv_threshold=$CV_THRESHOLD"
+  echo "duration_budget_s=$DURATION_BUDGET_S"
   exit 0
 fi
 
@@ -648,7 +652,6 @@ jq -s \
 }' "${valid_runs[@]}" > "$RESULTS_DIR/summary.json"
 
 # Reproducibility gate: warn on high cross-run variance or parity failure
-CV_THRESHOLD="${CV_THRESHOLD:-0.10}"
 gate_status="pass"
 gate_warnings=""
 
@@ -657,8 +660,6 @@ power_source="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" |
 if [[ "$power_source" != "AC Power" && "$power_source" != "unknown" ]]; then
   gate_warnings="${gate_warnings}BATTERY_POWER: running on '${power_source}' — frequency scaling may reduce reproducibility\n"
 fi
-
-DURATION_BUDGET_S="${DURATION_BUDGET_S:-600}"
 if [[ "$total_benchmark_elapsed" -gt "$DURATION_BUDGET_S" ]]; then
   gate_warnings="${gate_warnings}LONG_DURATION: total ${total_benchmark_elapsed}s exceeds budget ${DURATION_BUDGET_S}s — thermal throttling may affect results\n"
 fi
