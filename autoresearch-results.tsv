@@ -198,3 +198,44 @@ cycle	timestamp	hypothesis	result	commit	notes
 197	2026-03-13T05:20:00+03:00	dd51777	two_step breakdown in claim summary	scripts/reproduce_local_real_artifact_claim.sh	pass
 198	2026-03-13T05:22:00+03:00	dff1d1f	control/coreml breakdown in claim summary	scripts/reproduce_local_real_artifact_claim.sh	pass
 199	2026-03-13T05:25:00+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
+200	2026-03-13T05:28:00+03:00	1d13aff	summary.json SHA256 in claim summary	scripts/reproduce_local_real_artifact_claim.sh	pass
+201	2026-03-13T05:31:00+03:00	65e78b6	process_id in probe JSON output	Sources/EspressoMultiTokenProbe/main.swift	pass
+202	2026-03-13T05:33:00+03:00	4b441fd	per-run process IDs in summary.json	scripts/reproduce_exact_4x.sh	pass
+203	2026-03-13T05:35:00+03:00	b039f04	process ID uniqueness gate check	scripts/reproduce_exact_4x.sh	pass
+204	2026-03-13T05:38:00+03:00	a5d9ebc	bump probeVersion to 6	Sources/EspressoMultiTokenProbe/main.swift	pass
+205	2026-03-13T05:39:00+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
+206	2026-03-13T04:29:33+03:00	59e6f00	git commit drift detection during claim run	scripts/reproduce_local_real_artifact_claim.sh	pass
+207	2026-03-13T04:30:11+03:00	da2bad2	propagate jq_version to claim summary	scripts/reproduce_local_real_artifact_claim.sh	pass
+208	2026-03-13T04:30:46+03:00	6d79c29	per-run OS versions and PIDs in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+209	2026-03-13T04:31:47+03:00	39ca810	per-run speedup arrays in claim summary	scripts/reproduce_local_real_artifact_claim.sh	pass
+210	2026-03-13T04:32:12+03:00	ab97a2f	per-run median latency arrays in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+211	2026-03-13T04:33:13+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
+212	2026-03-13T04:33:35+03:00	718aa89	per-run wall/outer timing in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+213	2026-03-13T04:33:57+03:00	f871aad	per-run init/compile times in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+214	2026-03-13T04:34:17+03:00	004338c	first/last run timestamps in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+215	2026-03-13T04:34:40+03:00	73e679d	init/compile time min/max in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+216	2026-03-13T04:35:09+03:00	8f0eb13	probe/outer elapsed sums in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+217	2026-03-13T04:36:06+03:00	773b51a	git HEAD drift detection in harness	scripts/reproduce_exact_4x.sh	pass
+218	2026-03-13T04:36:35+03:00	b1525e5	per-run iteration counts in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+219	2026-03-13T04:37:01+03:00	764f6b9	per-run parity status in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+220	2026-03-13T04:37:32+03:00	6816d56	bump CLAIM_VERSION to 5	scripts/reproduce_local_real_artifact_claim.sh	pass
+221	2026-03-13T04:38:23+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
+222	2026-03-13T04:39:15+03:00	48408ae	gate warning for insufficient valid runs	scripts/reproduce_exact_4x.sh	pass
+223	2026-03-13T04:39:31+03:00	0c9fc85	bump HARNESS_VERSION to 6	scripts/reproduce_exact_4x.sh	pass
+224	2026-03-13T04:40:26+03:00	fd6b0cb	probe binary existence check after build	scripts/reproduce_exact_4x.sh	pass
+225	2026-03-13T04:40:50+03:00	9e33d45	CoreML model existence pre-flight check	scripts/reproduce_exact_4x.sh	pass
+226	2026-03-13T04:41:16+03:00	79a6d7d	remove duplicate CoreML model check	scripts/reproduce_exact_4x.sh	pass
+227	2026-03-13T04:41:47+03:00	94b0b0f	offline/harness parity cross-validation	scripts/reproduce_local_real_artifact_claim.sh	pass
+228	2026-03-13T04:42:22+03:00	715d962	validate all 3 path medians in run JSON	scripts/reproduce_exact_4x.sh	pass
+229	2026-03-13T04:43:15+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
+230	2026-03-13T04:44:03+03:00	6507ab9	harness contract params in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+231	2026-03-13T04:44:34+03:00	e7b8b91	cold compile detection for all 3 paths	scripts/reproduce_exact_4x.sh	pass
+232	2026-03-13T04:45:04+03:00	a536923	token accounting cross-validation	scripts/reproduce_local_real_artifact_claim.sh	pass
+233	2026-03-13T04:45:29+03:00	04d6e44	git info in DRY_RUN output	scripts/reproduce_exact_4x.sh	pass
+234	2026-03-13T04:45:50+03:00	32e7ae6	validate summary.json after aggregation	scripts/reproduce_exact_4x.sh	pass
+235	2026-03-13T04:46:18+03:00	2488c82	validate summary.json after gate merge	scripts/reproduce_exact_4x.sh	pass
+236	2026-03-13T04:47:10+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
+237	2026-03-13T04:48:39+03:00	7e7e7a5	build_configuration in probe JSON + probeVersion=7	Sources/EspressoMultiTokenProbe/main.swift	pass
+238	2026-03-13T04:48:58+03:00	0ef1db6	debug build gate warning	scripts/reproduce_exact_4x.sh	pass
+239	2026-03-13T04:49:29+03:00	b8ec554	per-run build config in summary/claim	scripts	pass
+240	2026-03-13T04:50:22+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
