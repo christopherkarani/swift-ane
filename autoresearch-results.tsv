@@ -292,3 +292,7 @@ cycle	timestamp	hypothesis	result	commit	notes
 291	2026-03-13T04:51:12Z	dry-run-build-time	harness	include probe_build_elapsed_s in DRY_RUN output	pass
 292	2026-03-13T04:51:34Z	build-time-in-summary-txt	harness	add probe_build_elapsed_s to summary.txt	pass
 293	2026-03-13T04:53:06Z	null-safety	claim	add null-safety (| na) to all remaining unprotected jq fields	pass
+295	2026-03-13T04:54:18Z	disk-free-in-summary	harness+claim	add disk_free_mb_start/end to summary.json host and claim	pass
+296	2026-03-13T04:54:49Z	stale-data-fatal	harness	upgrade stale run data from warning to FATAL error	pass
+297	2026-03-13T04:55:07Z	stale-summary-check	harness	extend stale-data check to include summary.json	pass
+298	2026-03-13T04:55:58Z	test-suite	verify	405 tests pass, 0 failures, 121 skipped	pass
