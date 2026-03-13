@@ -389,6 +389,8 @@ fi
       "harness_per_run_max_sequence_tokens=\(.per_run_max_sequence_tokens // [] | tojson)",
       "harness_per_run_warmup=\(.per_run_warmup // [] | tojson)",
       "harness_per_run_iterations=\(.per_run_iterations // [] | tojson)",
+      "harness_per_run_trunk_lane_spatials=\(.per_run_trunk_lane_spatials // [] | tojson)",
+      "harness_per_run_output_head_lane_spatials=\(.per_run_output_head_lane_spatials // [] | tojson)",
       "harness_per_run_two_step_p99s_ms=\(.two_step.per_run_p99s_ms // [] | tojson)",
       "harness_per_run_control_p99s_ms=\(.control.per_run_p99s_ms // [] | tojson)",
       "harness_per_run_coreml_p99s_ms=\(.coreml.per_run_p99s_ms // [] | tojson)",
