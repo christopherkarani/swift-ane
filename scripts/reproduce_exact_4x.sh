@@ -803,6 +803,20 @@ for path_label in two_step control coreml speedup; do
   fi
 done
 
+# Cold compile detection: warn if first run init time is >3x the median
+cold_compile="$(jq -s '
+  [.[] | .control.init_wall_ms // null] | map(select(. != null)) |
+  if length >= 3 then
+    .[0] as $first | (sort | .[((length - 1) / 2 | floor)]) as $med |
+    if $med > 0 and ($first / $med) > 3 then
+      "first run control init \($first)ms vs median \($med)ms (\($first / $med | . * 100 | floor / 100)x)"
+    else empty end
+  else empty end
+' "${valid_runs[@]}" 2>/dev/null || echo "")"
+if [[ -n "$cold_compile" ]]; then
+  gate_warnings="${gate_warnings}COLD_COMPILE: ${cold_compile}\n"
+fi
+
 # Speedup floor: warn if any run shows two_step slower than coreml
 if jq -e --arg min "$speedup_min" '($min | tonumber) < 1.0' <<< 'null' >/dev/null 2>&1; then
   gate_status="warn"
