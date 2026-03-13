@@ -481,6 +481,7 @@ jq -s \
   harness_version: $harness_version,
   probe_version: (map(.probe_version // null) | .[0]),
   per_run_probe_versions: (map(.probe_version // null)),
+  per_run_input_modes: (map(.input_mode // null)),
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
@@ -643,6 +644,13 @@ probe_version_mismatch="$(jq -s 'map(.probe_version // null) | unique | if lengt
 if [[ -n "$probe_version_mismatch" ]]; then
   gate_status="warn"
   gate_warnings="${gate_warnings}PROBE_VERSION_MISMATCH: runs used different probe versions: ${probe_version_mismatch}\n"
+fi
+
+# Input mode consistency check (contract integrity)
+input_mode_mismatch="$(jq -s --arg expected "$INPUT_MODE" 'map(.input_mode // null) | map(select(. != $expected)) | if length > 0 then . else empty end' "${valid_runs[@]}" 2>/dev/null || echo "")"
+if [[ -n "$input_mode_mismatch" ]]; then
+  gate_status="fail"
+  gate_warnings="${gate_warnings}INPUT_MODE_MISMATCH: runs reported input modes inconsistent with contract ($INPUT_MODE): ${input_mode_mismatch}\n"
 fi
 
 if [[ "$all_parity_match" != "true" ]]; then
