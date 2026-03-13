@@ -281,6 +281,14 @@ fi
       echo "harness_$gate_line"
     fi
   fi
+  # Cross-validate offline gate parity with harness parity
+  if [[ -f "$PUBLIC_RESULTS_DIR/summary.json" ]]; then
+    harness_parity="$(jq -r '.all_parity_match' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || echo "unknown")"
+    offline_parity="$(jq -r '.parity_status' "$OFFLINE_GATE_JSON" 2>/dev/null || echo "unknown")"
+    if [[ "$offline_parity" == "match" && "$harness_parity" != "true" ]]; then
+      echo "WARNING: offline gate shows parity=match but harness shows all_parity_match=$harness_parity"
+    fi
+  fi
   claim_elapsed_s=$(( $(date +%s) - claim_start_epoch ))
   echo "claim_total_elapsed_s=$claim_elapsed_s"
   git_commit_end="$(git -C "$ROOT" rev-parse HEAD)"
