@@ -82,6 +82,12 @@ if ! command -v swift &>/dev/null; then
   exit 1
 fi
 
+# Pre-check: shasum is required for artifact integrity verification
+if ! command -v shasum &>/dev/null; then
+  echo "FATAL: shasum is required but not found on PATH" >&2
+  exit 1
+fi
+
 # Pre-check: jq is required for JSON validation and summary extraction
 if ! command -v jq &>/dev/null; then
   echo "FATAL: jq is required but not found on PATH" >&2
