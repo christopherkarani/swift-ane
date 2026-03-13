@@ -230,9 +230,11 @@ if [[ "$probe_arch" != "unknown" && "$host_arch" != "unknown" && "$probe_arch" !
   echo "WARNING: Probe binary is $probe_arch but host is $host_arch — may fail or run under Rosetta" >&2
 fi
 
-# Record probe binary hash for reproducibility
+# Record probe binary hash and architecture for reproducibility
 PROBE_SHA256="$(shasum -a 256 "$PROBE" | awk '{print $1}')"
 echo "probe_sha256=$PROBE_SHA256" >> "$RESULTS_DIR/metadata.txt"
+echo "probe_arch=$probe_arch" >> "$RESULTS_DIR/metadata.txt"
+echo "host_arch=$host_arch" >> "$RESULTS_DIR/metadata.txt"
 
 METADATA_SHA256="$(shasum -a 256 "$RESULTS_DIR/metadata.txt" | awk '{print $1}')"
 
