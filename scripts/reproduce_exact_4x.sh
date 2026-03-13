@@ -482,6 +482,9 @@ jq -s \
   probe_version: (map(.probe_version // null) | .[0]),
   per_run_probe_versions: (map(.probe_version // null)),
   per_run_input_modes: (map(.input_mode // null)),
+  per_run_control_backends: (map(.control_backend // null)),
+  per_run_two_step_backends: (map(.two_step_backend // null)),
+  per_run_output_head_backends: (map(.output_head_backend // null)),
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
@@ -654,6 +657,22 @@ if [[ -n "$input_mode_mismatch" ]]; then
   gate_status="fail"
   gate_warnings="${gate_warnings}INPUT_MODE_MISMATCH: runs reported input modes inconsistent with contract ($INPUT_MODE): ${input_mode_mismatch}\n"
 fi
+
+# Backend consistency checks (contract integrity)
+for backend_field in control_backend two_step_backend output_head_backend; do
+  case "$backend_field" in
+    control_backend) expected="$CONTROL_BACKEND" ;;
+    two_step_backend) expected="$TWO_STEP_BACKEND" ;;
+    output_head_backend) expected="$OUTPUT_HEAD_BACKEND" ;;
+  esac
+  backend_mismatch="$(jq -s --arg expected "$expected" --arg field "$backend_field" \
+    'map(.[$field] // null) | map(select(. != $expected)) | if length > 0 then . else empty end' \
+    "${valid_runs[@]}" 2>/dev/null || echo "")"
+  if [[ -n "$backend_mismatch" ]]; then
+    gate_status="fail"
+    gate_warnings="${gate_warnings}BACKEND_MISMATCH: ${backend_field} inconsistent with contract (${expected}): ${backend_mismatch}\n"
+  fi
+done
 
 if [[ "$all_parity_match" != "true" ]]; then
   gate_status="fail"
