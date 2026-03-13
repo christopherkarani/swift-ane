@@ -350,3 +350,4 @@ cycle	timestamp	hypothesis	result	commit	notes
 350	2026-03-13T05:41:10Z	harness	detect power source drift during benchmark — AC/battery transition warning	scripts/reproduce_exact_4x.sh	committed
 351	2026-03-13T05:41:55Z	claim	add power source drift detection — warn on AC/battery transition	scripts/reproduce_local_real_artifact_claim.sh	committed
 352	2026-03-13T05:43:01Z	harness+claim	add memory_free_pct_end to summary.json and fix gate null-handling	scripts/reproduce_exact_4x.sh,scripts/reproduce_local_real_artifact_claim.sh	committed
+353	2026-03-13T05:50:31Z	claim	cross-validate harness valid_runs count against REPEATS	scripts/reproduce_local_real_artifact_claim.sh	committed
