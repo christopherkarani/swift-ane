@@ -291,6 +291,10 @@ if [[ -n "$GENERATION_MODEL" ]]; then
   COMMON_ARGS+=(--generation-model "$GENERATION_MODEL")
 fi
 
+# Capture pre-benchmark thermal and load for drift comparison
+THERMAL_START="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
+LOAD_START="$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+
 failed_runs=0
 benchmark_start_epoch=$(date +%s)
 for run in $(seq 1 "$REPEATS"); do
@@ -475,7 +479,7 @@ jq -s \
   --arg chip "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)" \
   --argjson ncpu "$(sysctl -n hw.ncpu 2>/dev/null || echo null)" \
   --argjson physical_memory_gb "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))" \
-  --arg thermal_pressure "$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)" \
+  --arg thermal_pressure "$THERMAL_START" \
   --arg thermal_pressure_end "$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)" \
   --arg load_avg_end "$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)" \
   --arg swift_version "$(swift --version 2>/dev/null | head -1 || echo unknown)" \
@@ -671,6 +675,11 @@ if [[ "$power_source" != "AC Power" && "$power_source" != "unknown" ]]; then
 fi
 if [[ "$total_benchmark_elapsed" -gt "$DURATION_BUDGET_S" ]]; then
   gate_warnings="${gate_warnings}LONG_DURATION: total ${total_benchmark_elapsed}s exceeds budget ${DURATION_BUDGET_S}s — thermal throttling may affect results\n"
+fi
+# Thermal drift: compare pre- and post-benchmark thermal pressure
+THERMAL_END="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
+if [[ "$THERMAL_START" != "$THERMAL_END" && "$THERMAL_START" != "unknown" && "$THERMAL_END" != "unknown" ]]; then
+  gate_warnings="${gate_warnings}THERMAL_DRIFT: thermal pressure changed during benchmark (start='${THERMAL_START}', end='${THERMAL_END}')\n"
 fi
 
 if [[ $failed_runs -gt 0 ]]; then
