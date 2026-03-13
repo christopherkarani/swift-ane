@@ -99,6 +99,10 @@ if ! jq -e '.parity_status' "$OFFLINE_GATE_JSON" >/dev/null 2>&1; then
 fi
 
 PROMPT_TOKEN="$(jq -r '.promptToken' "$ARTIFACT_PREFIX.manifest.json")"
+if ! [[ "$PROMPT_TOKEN" =~ ^[0-9]+$ ]]; then
+  echo "FATAL: promptToken from manifest is not a valid non-negative integer: '$PROMPT_TOKEN'" >&2
+  exit 1
+fi
 
 if [[ ! -x "$COREMLTOOLS_PYTHON" ]]; then
   PY312="${PY312:-/opt/homebrew/opt/python@3.12/bin/python3.12}"
