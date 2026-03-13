@@ -275,6 +275,9 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "results_dir=$RESULTS_DIR"
   echo "cv_threshold=$CV_THRESHOLD"
   echo "duration_budget_s=$DURATION_BUDGET_S"
+  echo "chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+  echo "power_source=$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
+  echo "thermal_pressure=$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
   exit 0
 fi
 
