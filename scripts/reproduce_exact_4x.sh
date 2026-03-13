@@ -419,6 +419,8 @@ speedup_stddev="$(jq -s 'map(.two_step_speedup_vs_coreml) | (length) as $n | (ad
   echo "committed_exact_tokens_per_pass=$committed_tokens_per_pass"
   echo "accepted_future_tokens_per_pass=$accepted_future_tokens_per_pass"
   echo "all_parity_match=$all_parity_match"
+  parity_counts="$(jq -s '[.[] | .parity_match_count // null] | map(select(. != null))' "${valid_runs[@]}" 2>/dev/null || echo "[]")"
+  echo "parity_match_counts=$parity_counts"
 } | tee "$RESULTS_DIR/summary.txt"
 
 # Machine-readable aggregate JSON combining all per-run data with summary stats
