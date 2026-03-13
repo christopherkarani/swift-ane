@@ -322,6 +322,7 @@ THERMAL_START="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || 
 LOAD_START="$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
 POWER_SOURCE_START="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
 DISK_FREE_MB_START="$(df -m "$RESULTS_DIR" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
+MEMORY_FREE_PCT_START="$(sysctl -n kern.memorystatus_level 2>/dev/null || echo null)"
 
 failed_runs=0
 benchmark_start_epoch=$(date +%s)
@@ -538,7 +539,7 @@ jq -s \
   --arg thermal_pressure "$THERMAL_START" \
   --arg thermal_pressure_end "$THERMAL_END" \
   --arg load_avg_end "$LOAD_END" \
-  --argjson memory_free_pct "$(sysctl -n kern.memorystatus_level 2>/dev/null || echo null)" \
+  --argjson memory_free_pct "${MEMORY_FREE_PCT_START:-null}" \
   --argjson memory_free_pct_end "${MEMORY_FREE_PCT_END:-null}" \
   --argjson disk_free_mb_start "${DISK_FREE_MB_START:-0}" \
   --argjson disk_free_mb_end "${DISK_FREE_MB_END:-0}" \
