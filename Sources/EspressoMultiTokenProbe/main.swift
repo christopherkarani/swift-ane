@@ -6,7 +6,15 @@ import ANETypes
 import Espresso
 
 /// Bump this when the probe JSON output contract changes (new fields, renamed keys, etc.).
-private let probeVersion: Int = 6
+private let probeVersion: Int = 7
+
+private let buildConfiguration: String = {
+    #if DEBUG
+    return "debug"
+    #else
+    return "release"
+    #endif
+}()
 
 private enum RunMode: String {
     case compare
@@ -452,6 +460,7 @@ private func compileOnlyPayload(options: Options) throws -> [String: Any] {
         "probe_version": probeVersion,
         "probe_timestamp": isoFormatter.string(from: Date()),
         "probe_wall_elapsed_s": probeElapsedS,
+        "build_configuration": buildConfiguration,
         "hostname": ProcessInfo.processInfo.hostName,
         "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
         "process_id": ProcessInfo.processInfo.processIdentifier,
@@ -586,6 +595,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         "probe_version": probeVersion,
         "probe_timestamp": probeTimestamp,
         "probe_wall_elapsed_s": probeElapsedS,
+        "build_configuration": buildConfiguration,
         "hostname": ProcessInfo.processInfo.hostName,
         "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
         "process_id": ProcessInfo.processInfo.processIdentifier,
