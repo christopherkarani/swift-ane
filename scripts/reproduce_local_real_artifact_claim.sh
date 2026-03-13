@@ -226,8 +226,13 @@ fi
   fi
   echo "prompt_token=$PROMPT_TOKEN"
   echo "recurrent_checkpoint_sha256=$(shasum -a 256 "$ARTIFACT_PREFIX.recurrent.bin" | awk '{print $1}')"
+  echo "recurrent_checkpoint_bytes=$(wc -c < "$ARTIFACT_PREFIX.recurrent.bin" | tr -d ' ')"
   echo "future_sidecar_sha256=$(shasum -a 256 "$ARTIFACT_PREFIX.future-sidecar.bin" | awk '{print $1}')"
+  echo "future_sidecar_bytes=$(wc -c < "$ARTIFACT_PREFIX.future-sidecar.bin" | tr -d ' ')"
   echo "generation_model_sha256=$(shasum -a 256 "$ARTIFACT_PREFIX.generation.bin" | awk '{print $1}')"
+  echo "generation_model_bytes=$(wc -c < "$ARTIFACT_PREFIX.generation.bin" | tr -d ' ')"
+  echo "manifest_bytes=$(wc -c < "$ARTIFACT_PREFIX.manifest.json" | tr -d ' ')"
+  echo "offline_gate_bytes=$(wc -c < "$OFFLINE_GATE_JSON" | tr -d ' ')"
   echo "offline_committed_exact_tokens_per_pass=$(jq -r '.committed_exact_tokens_per_pass' "$OFFLINE_GATE_JSON")"
   echo "offline_accepted_future_tokens_per_pass=$(jq -r '.accepted_future_tokens_per_pass' "$OFFLINE_GATE_JSON")"
   echo "offline_parity_status=$(jq -r '.parity_status' "$OFFLINE_GATE_JSON")"
