@@ -61,6 +61,7 @@ echo "disk_free_mb_start=$(df -m "$RESULTS_DIR" 2>/dev/null | awk 'NR==2{print $
 echo "memory_free_pct_start=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
 echo "thermal_pressure_start=$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
 echo "load_average_start=$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+echo "power_source_start=$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
 echo ""
 
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -497,6 +498,7 @@ fi
   echo "memory_free_pct_end=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
   echo "thermal_pressure_end=$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
   echo "load_average_end=$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+  echo "power_source_end=$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
   claim_elapsed_s=$(( $(date +%s) - claim_start_epoch ))
   echo "claim_total_elapsed_s=$claim_elapsed_s"
   git_commit_end="$(git -C "$ROOT" rev-parse HEAD)"
