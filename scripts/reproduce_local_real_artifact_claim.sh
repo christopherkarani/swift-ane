@@ -178,6 +178,7 @@ fi
       "harness_version=\(.harness_version | na)",
       "harness_git_commit=\(.git_commit | na)",
       "harness_git_branch=\(.git_branch | na)",
+      "harness_timestamp=\(.timestamp | na)",
       "harness_probe_version=\(.probe_version | na)",
       "harness_two_step_median_ms=\(.two_step.median_ms_per_token)",
       "harness_two_step_min_ms=\(.two_step.min_ms_per_token | na)",
