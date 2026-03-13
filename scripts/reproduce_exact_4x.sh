@@ -491,6 +491,7 @@ jq -s \
   per_run_two_step_backends: (map(.two_step_backend // null)),
   per_run_output_head_backends: (map(.output_head_backend // null)),
   per_run_layer_counts: (map(.layer_count // null)),
+  per_run_prompt_tokens: (map(.prompt_token // null)),
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
