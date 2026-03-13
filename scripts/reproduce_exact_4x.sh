@@ -595,6 +595,7 @@ jq -s \
   per_run_wall_elapsed_s: (map(.probe_wall_elapsed_s // null)),
   per_run_outer_elapsed_s: $outer_elapsed,
   per_run_stderr_lines: $stderr_lines,
+  total_stderr_lines: ($stderr_lines | map(. // 0) | add),
   sum_probe_wall_elapsed_s: (map(.probe_wall_elapsed_s // 0) | add),
   sum_outer_elapsed_s: ($outer_elapsed | map(. // 0) | add)
 }' "${valid_runs[@]}" > "$RESULTS_DIR/summary.json"
