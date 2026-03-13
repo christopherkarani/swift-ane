@@ -399,6 +399,7 @@ jq -s \
   --arg chip "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)" \
   --argjson ncpu "$(sysctl -n hw.ncpu 2>/dev/null || echo null)" \
   --argjson physical_memory_gb "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))" \
+  --arg thermal_pressure "$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)" \
   --argjson outer_elapsed "$(printf '%s\n' "${valid_outer_elapsed[@]}" | jq -s '.')" \
   --argjson prompt_token "${PROMPT_TOKEN:-null}" \
   --argjson stderr_lines "$(printf '%s\n' "${valid_stderr_lines[@]}" | jq -s '.')" \
@@ -414,7 +415,7 @@ jq -s \
   timestamp: $ts,
   git_commit: $commit,
   git_branch: $branch,
-  host: {hw_model: $hw_model, chip: $chip, ncpu: $ncpu, physical_memory_gb: $physical_memory_gb, load_average: $load_avg, macos_version: $macos_version, macos_build: $macos_build, power_source: $power_source},
+  host: {hw_model: $hw_model, chip: $chip, ncpu: $ncpu, physical_memory_gb: $physical_memory_gb, thermal_pressure: $thermal_pressure, load_average: $load_avg, macos_version: $macos_version, macos_build: $macos_build, power_source: $power_source},
   benchmark_contract: {
     input_mode: $input_mode,
     control_backend: $control_backend,
