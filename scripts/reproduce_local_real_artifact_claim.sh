@@ -66,6 +66,22 @@ if [[ "$MAX_CORPUS_BYTES" -lt 1 ]]; then
   exit 1
 fi
 
+# Pre-check: ensure coremltools Python or a fallback Python 3.12 is available
+# This catches missing Python before spending minutes on dataset build + artifact export
+if [[ ! -x "$COREMLTOOLS_PYTHON" ]]; then
+  PY312_PRECHECK="${PY312:-/opt/homebrew/opt/python@3.12/bin/python3.12}"
+  if [[ ! -x "$PY312_PRECHECK" ]]; then
+    echo "FATAL: Neither COREMLTOOLS_PYTHON ($COREMLTOOLS_PYTHON) nor Python 3.12 ($PY312_PRECHECK) found — cannot generate CoreML model" >&2
+    exit 1
+  fi
+fi
+
+# Pre-check: jq is required for JSON validation and summary extraction
+if ! command -v jq &>/dev/null; then
+  echo "FATAL: jq is required but not found on PATH" >&2
+  exit 1
+fi
+
 mkdir -p "$RESULTS_DIR"
 # Check for stale claim data in the results directory
 if [[ -f "$RESULTS_DIR/claim-summary.txt" ]]; then
