@@ -36,12 +36,33 @@ OUTPUT_HEAD_BACKEND="${OUTPUT_HEAD_BACKEND:-ane-rmsnorm-classifier}"
 DRY_RUN="${DRY_RUN:-0}"
 
 # Early validation of claim-level parameters (mirrors harness validation)
+# Fail fast before expensive pipeline steps (dataset build, artifact export, CoreML gen)
 if [[ "$REPEATS" -lt 3 || $((REPEATS % 2)) -ne 1 ]]; then
   echo "REPEATS must be an odd integer >= 3 (got: $REPEATS)" >&2
   exit 1
 fi
 if [[ "$LAYER_COUNT" -lt 1 ]]; then
   echo "LAYER_COUNT must be >= 1 (got: $LAYER_COUNT)" >&2
+  exit 1
+fi
+if [[ "$MAX_NEW_TOKENS" -lt 1 ]]; then
+  echo "MAX_NEW_TOKENS must be >= 1 (got: $MAX_NEW_TOKENS)" >&2
+  exit 1
+fi
+if [[ "$MAX_SEQUENCE_TOKENS" -lt $((MAX_NEW_TOKENS + 1)) ]]; then
+  echo "MAX_SEQUENCE_TOKENS ($MAX_SEQUENCE_TOKENS) must be >= MAX_NEW_TOKENS + 1 ($((MAX_NEW_TOKENS + 1)))" >&2
+  exit 1
+fi
+if [[ "$WARMUP" -lt 0 ]]; then
+  echo "WARMUP must be >= 0 (got: $WARMUP)" >&2
+  exit 1
+fi
+if [[ "$ITERATIONS" -lt 1 ]]; then
+  echo "ITERATIONS must be >= 1 (got: $ITERATIONS)" >&2
+  exit 1
+fi
+if [[ "$MAX_CORPUS_BYTES" -lt 1 ]]; then
+  echo "MAX_CORPUS_BYTES must be >= 1 (got: $MAX_CORPUS_BYTES)" >&2
   exit 1
 fi
 
