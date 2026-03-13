@@ -8,6 +8,8 @@ public enum RecurrentGenerationWeightMmapStoreError: Error, Equatable, Sendable 
     case mmapFailed(TensorBufferMmapError)
     /// A tensor could not be written to the flat-weight file.
     case writeFailed(TensorBufferWriteError)
+    /// The mmap store layout is fixed to the compile-time vocabulary size.
+    case unsupportedVocabSize(expected: Int, actual: Int)
 }
 
 /// A zero-copy mmap-backed loader for `RecurrentGenerationWeights`.
@@ -63,6 +65,9 @@ public enum RecurrentGenerationWeightMmapStore {
         _ weights: borrowing RecurrentGenerationWeights,
         to path: String
     ) throws(RecurrentGenerationWeightMmapStoreError) {
+        guard weights.vocabSize == ModelConfig.vocab else {
+            throw .unsupportedVocabSize(expected: ModelConfig.vocab, actual: weights.vocabSize)
+        }
         guard let file = Darwin.fopen(path, "wb") else {
             throw .writeFailed(.fileOpenFailed(path: path, errno: Darwin.errno))
         }

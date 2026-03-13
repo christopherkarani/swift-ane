@@ -164,4 +164,9 @@ coreml_ttft_cold_ms="$(jq -s 'map(.coreml.ttft_cold_ms // 0) | sort | .[((length
   echo "coreml_ttft_cold_ms=$coreml_ttft_cold_ms"
 } | tee "$RESULTS_DIR/summary.txt"
 
+if [[ "$all_parity_match" != "true" ]]; then
+  echo "Parity mismatch detected across probe runs; refusing to publish benchmark summary." >&2
+  exit 2
+fi
+
 echo "Wrote raw JSON and stderr logs to $RESULTS_DIR"

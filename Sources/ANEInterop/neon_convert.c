@@ -52,19 +52,16 @@ void ane_interop_neon_argmax_f16(const void *src, int count,
         float16x8_t vBest = vld1q_f16(s);
         // Track indices as 16-bit integers for efficiency.
         uint16x8_t vIdx = (uint16x8_t){0, 1, 2, 3, 4, 5, 6, 7};
-        uint16x8_t vStep = vdupq_n_u16(8);
+        const uint16x8_t vLaneOffsets = (uint16x8_t){0, 1, 2, 3, 4, 5, 6, 7};
 
         i = 8;
         for (; i + 7 < count; i += 8) {
             float16x8_t vCur = vld1q_f16(s + i);
-            uint16x8_t vCurIdx = vaddq_u16(vIdx, vStep);
+            uint16x8_t vCurIdx = vaddq_u16(vdupq_n_u16((uint16_t)i), vLaneOffsets);
             // Mask: true where current > best (strictly greater).
             uint16x8_t mask = vcgtq_f16(vCur, vBest);
             vBest = vbslq_f16(mask, vCur, vBest);
             vIdx = vbslq_u16(mask, vCurIdx, vIdx);
-            // Advance base indices.
-            vIdx = vbslq_u16(mask, vCurIdx, vIdx);
-            vStep = vaddq_u16(vStep, vdupq_n_u16(8));
         }
 
         // Reduce 8 lanes to scalar. For first-max semantics, among lanes with

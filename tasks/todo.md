@@ -32,3 +32,21 @@
   - lead now scopes the performance number to the reproducible non-echo local-artifact benchmark
   - repro notes now state that first-run `coremltools` bootstrap may occur
   - public copy now avoids broader "CoreML in general" wording
+
+## 2026-03-13 PR Review
+
+- [x] Enumerate all pull requests for `christopherkarani/Espresso` and confirm review scope.
+- [x] Collect each PR's metadata, diff summary, and test/CI signals.
+- [x] Review each PR for correctness, regressions, performance risk, and test coverage gaps.
+- [x] Write a severity-ordered review summary with file/line references and coverage notes.
+
+# Review
+
+- Reviewed PRs `#1` through `#8` via GitHub metadata plus local branch diffs where available.
+- Highest-signal findings:
+  - PR `#2`: `claude.yml` lets any commenter/issue opener trigger the Claude workflow without checking repository permission level.
+  - PR `#4`: benchmark app history reconstructs run success from summary-file presence, so failed gated runs can be shown as successful after reload; active runs can also duplicate when history reloads mid-run.
+  - PR `#7`: zero-copy read-only weight sharing and deferred ANE-head compilation introduce lifetime hazards; the new NEON argmax helper also appears to compute wrong indices.
+  - PR `#8`: benchmark `contract_hash` omits `cv_threshold` and `duration_budget_s`, so claim-level cross-validation can accept non-equivalent runs as matching.
+- Additional medium-severity findings exist in PRs `#5`, `#7`, and `#8` around validation gaps, provenance drift, and missing edge-case coverage.
+- No additional blocking findings surfaced from the targeted passes on PRs `#1`, `#3`, and `#6`; residual risk remains because this review was static and I did not execute each PR’s branch-specific test/build matrix.

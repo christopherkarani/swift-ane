@@ -10,7 +10,7 @@ public enum GenerationOutputHeadBackend: Sendable {
     case cpuExactClustered
     case aneClassifier
     case aneRMSNormClassifier
-    /// CPU for the first token; background-compiles ANE head and switches to it once ready.
+    /// CPU fallback that uses an ANE RMSNorm+classifier head when one is available.
     case cpuThenANE
     /// Vocabulary-partitioned argmax with Cauchy-Schwarz pruning.
     case cpuPartitionedArgmax
@@ -21,12 +21,10 @@ public enum GenerationOutputHeadBackend: Sendable {
 
 // MARK: - Deferred ANE head
 
-/// Thread-safe container for a lazily background-compiled `ANEGenerationRMSNormClassifierHead`.
+/// Thread-safe container for an optional `ANEGenerationRMSNormClassifierHead`.
 ///
-/// The owning model initialises this during its own init, launches a background compile on
-/// `DispatchQueue.global(qos: .userInitiated)`, then stores the compiled head here once done.
-/// Readers on the hot token-selection path call `readyHead` which performs a single `os_unfair_lock`-
-/// protected load — cheap on the fast path once the head is compiled, and never blocks.
+/// Readers on the hot token-selection path call `readyHead`, which performs a single
+/// `os_unfair_lock`-protected load.
 public final class DeferredANEHead: @unchecked Sendable {
     private var _lock: os_unfair_lock = os_unfair_lock()
     private var _head: ANEGenerationRMSNormClassifierHead?

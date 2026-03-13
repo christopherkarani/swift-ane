@@ -128,4 +128,25 @@ final class RecurrentGenerationWeightMmapStoreTests: XCTestCase {
         XCTAssertEqual(count1, headRegion + 1 * perLayer)
         XCTAssertEqual(count6, headRegion + 6 * perLayer)
     }
+
+    func testWriteRejectsUnsupportedVocabSize() {
+        let customVocab = ModelConfig.vocab - 1
+        let weights = RecurrentGenerationWeights(
+            layers: LayerStorage<RWKVStyleRecurrentWeights>(count: 1) { _ in RWKVStyleRecurrentWeights() },
+            rmsFinal: TensorBuffer(count: ModelConfig.dim, zeroed: true),
+            embedding: TensorBuffer(count: customVocab * ModelConfig.dim, zeroed: true),
+            classifier: TensorBuffer(count: customVocab * ModelConfig.dim, zeroed: true),
+            sharedClassifier: false,
+            vocabSize: customVocab
+        )
+        let tmpPath = NSTemporaryDirectory() + "test_mmap_vocab_\(ProcessInfo.processInfo.processIdentifier).bin"
+        defer { try? FileManager.default.removeItem(atPath: tmpPath) }
+
+        XCTAssertThrowsError(try RecurrentGenerationWeightMmapStore.write(weights, to: tmpPath)) { error in
+            XCTAssertEqual(
+                error as? RecurrentGenerationWeightMmapStoreError,
+                .unsupportedVocabSize(expected: ModelConfig.vocab, actual: customVocab)
+            )
+        }
+    }
 }

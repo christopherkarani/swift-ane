@@ -259,7 +259,7 @@ private func printUsageAndExit() -> Never {
       --output-head-backend cpu|ane-classifier|ane-rmsnorm-classifier
       --trunk-lane-spatial N
       --output-head-lane-spatial N
-      --share-weights            Use non-owning weight views (skip cloning)
+      --share-weights            Use retained read-only weight buffers for probe initialization
     """
     print(usage)
     exit(0)
@@ -476,7 +476,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     let prompt: [UInt16] = [options.promptToken]
     let weights = try loadRecurrentGenerationWeights(input: plan.input, layerCount: options.layerCount)
 
-    printStderr("Starting control model init\(options.shareWeights ? " (shared weights)" : "")")
+    printStderr("Starting control model init\(options.shareWeights ? " (retained read-only weights)" : "")")
     let controlInitStart = mach_absolute_time()
     let controlModel = try ANERecurrentGenerationModel(
         weights: weights,
@@ -492,7 +492,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
     printStderr(String(format: "Control model init done in %.3f ms", controlInitMs))
     var controlHarness = DirectTokenSelectionGenerationHarness(model: controlModel, strategy: .argmax)
 
-    printStderr("Starting two-step model init\(options.shareWeights ? " (shared weights)" : "")")
+    printStderr("Starting two-step model init\(options.shareWeights ? " (retained read-only weights)" : "")")
     let twoStepInitStart = mach_absolute_time()
     let twoStepModel: ANEExactTwoTokenBranchStatePromotionModel
     if let futureSidecarPath = options.futureSidecarPath {
@@ -699,6 +699,12 @@ do {
         payload = try comparePayload(options: options)
     }
     try writeJSON(payload)
+    if options.mode == .compare,
+       let parityStatus = payload["parity_status"] as? String,
+       parityStatus != "match" {
+        fputs("espresso-multitoken-probe error: parity mismatch\n", stderr)
+        exit(2)
+    }
 } catch {
     fatal("\(error)")
 }

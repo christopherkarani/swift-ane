@@ -411,6 +411,26 @@ enum GenerationWeightCloner {
     }
 }
 
+struct SharedReadOnlyOutputHeadWeights: ~Copyable {
+    let rmsFinal: TensorBuffer
+    let embedding: TensorBuffer
+    let classifier: TensorBuffer
+
+    init() {
+        self.rmsFinal = TensorBuffer(count: 0, zeroed: true)
+        self.embedding = TensorBuffer(count: 0, zeroed: true)
+        self.classifier = TensorBuffer(count: 0, zeroed: true)
+    }
+
+    init(cloning weights: borrowing RecurrentGenerationWeights) {
+        self.rmsFinal = GenerationWeightCloner.cloneTensor(weights.rmsFinal)
+        self.embedding = GenerationWeightCloner.cloneTensor(weights.embedding)
+        self.classifier = weights.sharedClassifier
+            ? TensorBuffer(count: 0, zeroed: true)
+            : GenerationWeightCloner.cloneTensor(weights.classifier)
+    }
+}
+
 enum GenerationClock {
     private static let timebase: mach_timebase_info_data_t = {
         var tb = mach_timebase_info_data_t()
@@ -879,6 +899,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     private let aneRMSNormClassifierHead: ANEGenerationRMSNormClassifierHead?
     private let futureANEClassifierHead: ANEGenerationClassifierHead?
     private let futureANERMSNormClassifierHead: ANEGenerationRMSNormClassifierHead?
+    private let sharedOutputHeadWeights: SharedReadOnlyOutputHeadWeights
     private var twoStepSessions: LayerStorage<RWKVStyleTwoStepRecurrentSession>
     private var fusedPairTwoStepSessions: LayerStorage<RWKVStyleFusedTwoLayerTwoStepSession>
     private var fusedTripletTwoStepSessions: LayerStorage<RWKVStyleFusedThreeLayerTwoStepSession>
@@ -927,12 +948,10 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         if outputHeadBackend == .cpuExactStaged || outputHeadBackend == .cpuExactClustered {
             throw .invalidArguments("two-step branch-state promotion model does not support staged CPU output heads")
         }
-        #if DEBUG
         if trunkBackend == .identityZeroTrunk,
            !recurrentWeightsUseIdentityZeroTrunk(weights, layerCount: layerCount) {
             throw .invalidArguments("identity zero-trunk backend requires all recurrent Wx/Ws/Wd/Wo weights to be zero")
         }
-        #endif
 
         let compileStart = GenerationClock.now()
         let twoStepSessions: LayerStorage<RWKVStyleTwoStepRecurrentSession>
@@ -1024,6 +1043,9 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
             }
         }
 
+        let sharedOutputHeadWeights = shareReadOnlyWeights
+            ? SharedReadOnlyOutputHeadWeights(cloning: weights)
+            : SharedReadOnlyOutputHeadWeights()
         let vocabSize = weights.vocabSize
         let sharedClassifier = weights.sharedClassifier
         guard vocabSize > 0 else {
@@ -1031,15 +1053,15 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         }
 
         let rmsFinal = shareReadOnlyWeights
-            ? GenerationWeightCloner.shareTensor(weights.rmsFinal)
+            ? GenerationWeightCloner.shareTensor(sharedOutputHeadWeights.rmsFinal)
             : GenerationWeightCloner.cloneTensor(weights.rmsFinal)
         let embedding = shareReadOnlyWeights
-            ? GenerationWeightCloner.shareTensor(weights.embedding)
+            ? GenerationWeightCloner.shareTensor(sharedOutputHeadWeights.embedding)
             : GenerationWeightCloner.cloneTensor(weights.embedding)
         let classifier = sharedClassifier
             ? TensorBuffer(count: 0, zeroed: true)
             : (shareReadOnlyWeights
-                ? GenerationWeightCloner.shareTensor(weights.classifier)
+                ? GenerationWeightCloner.shareTensor(sharedOutputHeadWeights.classifier)
                 : GenerationWeightCloner.cloneTensor(weights.classifier))
         let futureRMS: TensorBuffer
         let futureClassifier: TensorBuffer
@@ -1183,6 +1205,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         self.aneRMSNormClassifierHead = aneRMSNormClassifierHead
         self.futureANEClassifierHead = futureANEClassifierHead
         self.futureANERMSNormClassifierHead = futureANERMSNormClassifierHead
+        self.sharedOutputHeadWeights = sharedOutputHeadWeights
         self.twoStepSessions = twoStepSessions
         self.fusedPairTwoStepSessions = fusedPairTwoStepSessions
         self.fusedTripletTwoStepSessions = fusedTripletTwoStepSessions
@@ -2762,6 +2785,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
     private let cpuExactStagedHead: CPUStagedExactGenerationOutputHead?
     private let aneClassifierHead: ANEGenerationClassifierHead?
     private let aneRMSNormClassifierHead: ANEGenerationRMSNormClassifierHead?
+    private let sharedOutputHeadWeights: SharedReadOnlyOutputHeadWeights
     private var activationA: TensorBuffer
     private var activationB: TensorBuffer
     private var currentActivationIsA: Bool
@@ -2804,12 +2828,10 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
         if trunkBackend == .fusedThreeLayerTriplets, !layerCount.isMultiple(of: 3) {
             throw .invalidArguments("fused three-layer recurrent trunk backend requires a layerCount that is a multiple of 3")
         }
-        #if DEBUG
         if trunkBackend == .identityZeroTrunk,
            !recurrentWeightsUseIdentityZeroTrunk(weights, layerCount: layerCount) {
             throw .invalidArguments("identity zero-trunk backend requires all recurrent Wx/Ws/Wd/Wo weights to be zero")
         }
-        #endif
         guard trunkLaneSpatial > 0 else {
             throw .invalidArguments("recurrent trunk laneSpatial must be > 0")
         }
@@ -2819,6 +2841,9 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
         guard maxSequenceTokens > 0 else {
             throw .invalidArguments("maxSequenceTokens must be > 0")
         }
+        let sharedOutputHeadWeights = shareReadOnlyWeights
+            ? SharedReadOnlyOutputHeadWeights(cloning: weights)
+            : SharedReadOnlyOutputHeadWeights()
         let vocabSize = weights.vocabSize
         let sharedClassifier = weights.sharedClassifier
         guard vocabSize > 0 else {
@@ -2845,15 +2870,15 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
             laneSpatial: trunkLaneSpatial
         )
         let rmsFinal = shareReadOnlyWeights
-            ? GenerationWeightCloner.shareTensor(weights.rmsFinal)
+            ? GenerationWeightCloner.shareTensor(sharedOutputHeadWeights.rmsFinal)
             : GenerationWeightCloner.cloneTensor(weights.rmsFinal)
         let embedding = shareReadOnlyWeights
-            ? GenerationWeightCloner.shareTensor(weights.embedding)
+            ? GenerationWeightCloner.shareTensor(sharedOutputHeadWeights.embedding)
             : GenerationWeightCloner.cloneTensor(weights.embedding)
         let classifier = sharedClassifier
             ? TensorBuffer(count: 0, zeroed: true)
             : (shareReadOnlyWeights
-                ? GenerationWeightCloner.shareTensor(weights.classifier)
+                ? GenerationWeightCloner.shareTensor(sharedOutputHeadWeights.classifier)
                 : GenerationWeightCloner.cloneTensor(weights.classifier))
         let aneClassifierHead = try Self.makeANEClassifierHead(
             outputHeadBackend: outputHeadBackend,
@@ -2907,30 +2932,25 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
             partitionedLogitsScratch = TensorBuffer(count: 0, zeroed: true)
         }
 
-        // Deferred ANE compilation: extract raw pointers before weights are consumed
         let deferredANEHead: DeferredANEHead?
         if outputHeadBackend == .cpuThenANE {
             let deferred = DeferredANEHead()
-            let rmsPtr = rmsFinal.withUnsafePointer { UnsafeMutablePointer(mutating: $0) }
-            let clsPtr: UnsafeMutablePointer<Float>
             if sharedClassifier {
-                clsPtr = embedding.withUnsafePointer { UnsafeMutablePointer(mutating: $0) }
+                let head = try ANEGenerationRMSNormClassifierHead(
+                    rmsFinal: rmsFinal,
+                    classifierWeights: embedding,
+                    vocabSize: vocabSize,
+                    laneSpatial: outputHeadLaneSpatial
+                )
+                deferred.store(head)
             } else {
-                clsPtr = classifier.withUnsafePointer { UnsafeMutablePointer(mutating: $0) }
-            }
-            let clsCount = vocabSize * ModelConfig.dim
-            let capturedVocab = vocabSize
-            let capturedLane = outputHeadLaneSpatial
-            // Background compile — pointers valid because self owns the TensorBuffers
-            DispatchQueue.global(qos: .userInitiated).async {
-                let rmsBuf = TensorBuffer(nonOwningPointer: rmsPtr, count: ModelConfig.dim)
-                let clsBuf = TensorBuffer(nonOwningPointer: clsPtr, count: clsCount)
-                if let head = try? ANEGenerationRMSNormClassifierHead(
-                    rmsFinal: rmsBuf, classifierWeights: clsBuf,
-                    vocabSize: capturedVocab, laneSpatial: capturedLane
-                ) {
-                    deferred.store(head)
-                }
+                let head = try ANEGenerationRMSNormClassifierHead(
+                    rmsFinal: rmsFinal,
+                    classifierWeights: classifier,
+                    vocabSize: vocabSize,
+                    laneSpatial: outputHeadLaneSpatial
+                )
+                deferred.store(head)
             }
             deferredANEHead = deferred
         } else {
@@ -2975,6 +2995,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
         self.cpuExactStagedHead = cpuExactStagedHead
         self.aneClassifierHead = aneClassifierHead
         self.aneRMSNormClassifierHead = aneRMSNormClassifierHead
+        self.sharedOutputHeadWeights = sharedOutputHeadWeights
         self.activationA = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.activationB = TensorBuffer(count: ModelConfig.dim, zeroed: true)
         self.currentActivationIsA = true
