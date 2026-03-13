@@ -742,6 +742,15 @@ if [[ -n "$prompt_token_mismatch" ]]; then
   gate_warnings="${gate_warnings}PROMPT_TOKEN_MISMATCH: runs reported prompt tokens inconsistent with contract ($PROMPT_TOKEN): ${prompt_token_mismatch}\n"
 fi
 
+# Generated token count check (detect premature termination)
+short_gen="$(jq -s --argjson expected "$MAX_NEW_TOKENS" \
+  '[.[] | {control: (.control.generated_tokens // null | if . != null then length else null end), two_step: (.two_step.generated_tokens // null | if . != null then length else null end)} | select(.control != $expected or .two_step != $expected)] | if length > 0 then . else empty end' \
+  "${valid_runs[@]}" 2>/dev/null || echo "")"
+if [[ -n "$short_gen" ]]; then
+  gate_status="warn"
+  gate_warnings="${gate_warnings}SHORT_GENERATION: some runs generated fewer than max_new_tokens ($MAX_NEW_TOKENS) tokens\n"
+fi
+
 if [[ "$all_parity_match" != "true" ]]; then
   gate_status="fail"
   parity_detail="$(jq -s '[.[] | {run: input_line_number, status: .parity_status, match_count: (.parity_match_count // "n/a"), total: (.parity_total // "n/a")} | select(.status != "match")] | map("\(.run): \(.match_count)/\(.total)") | join(", ")' "${valid_runs[@]}" 2>/dev/null || echo "detail unavailable")"
