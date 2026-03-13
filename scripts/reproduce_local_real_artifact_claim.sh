@@ -91,6 +91,7 @@ echo "Generating matching zero-weight CoreML trunk into $COREML_MODEL"
   --output "$COREML_MODEL"
 
 echo "Running public recurrent-checkpoint harness"
+harness_exit=0
 RESULTS_DIR="$PUBLIC_RESULTS_DIR" \
 INPUT_MODE="recurrent-checkpoint" \
 CONTROL_BACKEND="$CONTROL_BACKEND" \
@@ -107,7 +108,12 @@ ITERATIONS="$ITERATIONS" \
 MAX_NEW_TOKENS="$MAX_NEW_TOKENS" \
 MAX_SEQUENCE_TOKENS="$MAX_SEQUENCE_TOKENS" \
 LAYER_COUNT="$LAYER_COUNT" \
-"$ROOT/scripts/reproduce_exact_4x.sh"
+"$ROOT/scripts/reproduce_exact_4x.sh" || harness_exit=$?
+# Exit code 2 = gate fail (parity), 1 = runtime error, 0 = pass/warn
+if [[ $harness_exit -eq 1 ]]; then
+  echo "FATAL: Inner harness failed with runtime error (exit 1)" >&2
+  exit 1
+fi
 
 {
   echo "claim_version=$CLAIM_VERSION"
@@ -191,4 +197,8 @@ LAYER_COUNT="$LAYER_COUNT" \
   fi
   claim_elapsed_s=$(( $(date +%s) - claim_start_epoch ))
   echo "claim_total_elapsed_s=$claim_elapsed_s"
+  echo "harness_exit_code=$harness_exit"
 } | tee "$RESULTS_DIR/claim-summary.txt"
+
+# Propagate inner harness gate exit code (2 = gate fail)
+exit "$harness_exit"
