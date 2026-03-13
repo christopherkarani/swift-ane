@@ -267,6 +267,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "contract_hash=$CONTRACT_HASH"
   echo "probe=$PROBE"
   echo "probe_sha256=$PROBE_SHA256"
+  echo "probe_build_elapsed_s=$PROBE_BUILD_ELAPSED_S"
   echo "coreml_model=$COREML_MODEL"
   echo "coreml_model_sha256=${COREML_MODEL_SHA256:-n/a}"
   echo "jq=$(command -v jq)"
