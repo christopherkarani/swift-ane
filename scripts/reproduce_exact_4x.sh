@@ -566,6 +566,8 @@ jq -s \
   accepted_future_tokens_per_pass: (map(.two_step.median_accepted_future_tokens_per_pass) | sort | .[((length - 1) / 2 | floor)]),
   all_parity_match: (all(.[]; .parity_status == "match")),
   per_run_parity: (map(.parity_status)),
+  per_run_parity_match_count: (map(.parity_match_count // null)),
+  parity_total: (map(.parity_total // null) | .[0]),
   per_run_timestamps: (map(.probe_timestamp // null)),
   valid_run_files: $run_files,
   per_run_wall_elapsed_s: (map(.probe_wall_elapsed_s // null)),
