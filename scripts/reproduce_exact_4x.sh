@@ -620,7 +620,9 @@ jq -s \
   per_run_stderr_lines: $stderr_lines,
   total_stderr_lines: ($stderr_lines | map(. // 0) | add),
   sum_probe_wall_elapsed_s: (map(.probe_wall_elapsed_s // 0) | add),
-  sum_outer_elapsed_s: ($outer_elapsed | map(. // 0) | add)
+  sum_outer_elapsed_s: ($outer_elapsed | map(. // 0) | add),
+  probe_wall_range_s: (map(.probe_wall_elapsed_s // null) | map(select(. != null)) | if length >= 2 then (max - min) else null end),
+  outer_elapsed_range_s: ($outer_elapsed | map(select(. != null)) | if length >= 2 then (max - min) else null end)
 }' "${valid_runs[@]}" > "$RESULTS_DIR/summary.json"
 
 # Reproducibility gate: warn on high cross-run variance or parity failure
