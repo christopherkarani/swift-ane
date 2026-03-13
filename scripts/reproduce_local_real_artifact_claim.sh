@@ -270,6 +270,10 @@ fi
   echo "offline_gate_json=$OFFLINE_GATE_JSON"
   echo "offline_gate_sha256=$(shasum -a 256 "$OFFLINE_GATE_JSON" | awk '{print $1}')"
   echo "coreml_model=$COREML_MODEL"
+  if [[ -d "$COREML_MODEL" ]]; then
+    echo "coreml_model_file_count=$(find "$COREML_MODEL" -type f | wc -l | tr -d ' ')"
+    echo "coreml_model_total_bytes=$(find "$COREML_MODEL" -type f -exec stat -f%z {} + 2>/dev/null | awk '{s+=$1}END{print s+0}' || echo unknown)"
+  fi
   echo "coremltools_python_version=$("$COREMLTOOLS_PYTHON" --version 2>/dev/null || echo unknown)"
   echo "coremltools_version=$("$COREMLTOOLS_PYTHON" -c 'import coremltools; print(coremltools.__version__)' 2>/dev/null || echo unknown)"
   if [[ -d "$COREML_MODEL" ]]; then
