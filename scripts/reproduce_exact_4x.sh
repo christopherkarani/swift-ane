@@ -147,7 +147,29 @@ echo "Building release probe into $SCRATCH_PATH"
 swift build -c release --product espresso-multitoken-probe --scratch-path "$SCRATCH_PATH"
 
 # Record probe binary hash for reproducibility
-echo "probe_sha256=$(shasum -a 256 "$PROBE" | awk '{print $1}')" >> "$RESULTS_DIR/metadata.txt"
+PROBE_SHA256="$(shasum -a 256 "$PROBE" | awk '{print $1}')"
+echo "probe_sha256=$PROBE_SHA256" >> "$RESULTS_DIR/metadata.txt"
+
+# Precompute artifact hashes for summary.json
+if [[ -d "$COREML_MODEL" ]]; then
+  COREML_MODEL_SHA256="$(find "$COREML_MODEL" -type f | sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')"
+elif [[ -f "$COREML_MODEL" ]]; then
+  COREML_MODEL_SHA256="$(shasum -a 256 "$COREML_MODEL" | awk '{print $1}')"
+else
+  COREML_MODEL_SHA256=""
+fi
+RECURRENT_SHA256=""
+if [[ -n "${RECURRENT_CHECKPOINT:-}" && -f "$RECURRENT_CHECKPOINT" ]]; then
+  RECURRENT_SHA256="$(shasum -a 256 "$RECURRENT_CHECKPOINT" | awk '{print $1}')"
+fi
+FUTURE_SIDECAR_SHA256=""
+if [[ -n "${FUTURE_SIDECAR:-}" && -f "$FUTURE_SIDECAR" ]]; then
+  FUTURE_SIDECAR_SHA256="$(shasum -a 256 "$FUTURE_SIDECAR" | awk '{print $1}')"
+fi
+GENERATION_MODEL_SHA256=""
+if [[ -n "${GENERATION_MODEL:-}" && -e "$GENERATION_MODEL" ]]; then
+  GENERATION_MODEL_SHA256="$(shasum -a 256 "$GENERATION_MODEL" | awk '{print $1}')"
+fi
 
 # Verify jq is available (required for aggregation)
 if ! command -v jq &>/dev/null; then
@@ -380,6 +402,11 @@ jq -s \
   --argjson outer_elapsed "$(printf '%s\n' "${valid_outer_elapsed[@]}" | jq -s '.')" \
   --argjson prompt_token "${PROMPT_TOKEN:-null}" \
   --argjson stderr_lines "$(printf '%s\n' "${valid_stderr_lines[@]}" | jq -s '.')" \
+  --arg probe_sha256 "$PROBE_SHA256" \
+  --arg coreml_sha256 "${COREML_MODEL_SHA256:-}" \
+  --arg recurrent_sha256 "${RECURRENT_SHA256:-}" \
+  --arg sidecar_sha256 "${FUTURE_SIDECAR_SHA256:-}" \
+  --arg generation_sha256 "${GENERATION_MODEL_SHA256:-}" \
   --argjson run_files "$(printf '%s\n' "${valid_runs[@]}" | while read -r f; do basename "$f"; done | jq -nR '[inputs | select(length > 0)]')" \
 '{
   probe_version: (map(.probe_version // null) | .[0]),
@@ -399,6 +426,13 @@ jq -s \
     max_sequence_tokens: $max_seq,
     layer_count: $layers,
     prompt_token: $prompt_token
+  },
+  artifact_hashes: {
+    probe_sha256: $probe_sha256,
+    coreml_model_sha256: (if $coreml_sha256 == "" then null else $coreml_sha256 end),
+    recurrent_checkpoint_sha256: (if $recurrent_sha256 == "" then null else $recurrent_sha256 end),
+    future_sidecar_sha256: (if $sidecar_sha256 == "" then null else $sidecar_sha256 end),
+    generation_model_sha256: (if $generation_sha256 == "" then null else $generation_sha256 end)
   },
   requested_repeats: $requested_repeats,
   valid_runs: (length),
