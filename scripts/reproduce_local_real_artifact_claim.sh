@@ -571,6 +571,9 @@ fi
   fi
   claim_elapsed_s=$(( $(date +%s) - claim_start_epoch ))
   echo "claim_total_elapsed_s=$claim_elapsed_s"
+  pipeline_sum_s=$((dataset_build_elapsed_s + artifact_export_elapsed_s + coreml_gen_elapsed_s + harness_elapsed_s))
+  echo "pipeline_sum_s=$pipeline_sum_s"
+  echo "pipeline_overhead_s=$((claim_elapsed_s - pipeline_sum_s))"
   git_commit_end="$(git -C "$ROOT" rev-parse HEAD)"
   echo "git_commit_end=$git_commit_end"
   if [[ "$git_commit_end" != "$git_commit_start" ]]; then
