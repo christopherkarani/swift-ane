@@ -372,6 +372,8 @@ done
 DISK_FREE_MB_END="$(df -m "$RESULTS_DIR" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
 POWER_SOURCE_END="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
 MEMORY_FREE_PCT_END="$(sysctl -n kern.memorystatus_level 2>/dev/null || echo null)"
+THERMAL_END="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
+LOAD_END="$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
 
 # Collect valid run JSONs (skip empty or malformed files from failed runs)
 valid_runs=()
@@ -534,8 +536,8 @@ jq -s \
   --argjson ncpu "$(sysctl -n hw.ncpu 2>/dev/null || echo null)" \
   --argjson physical_memory_gb "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))" \
   --arg thermal_pressure "$THERMAL_START" \
-  --arg thermal_pressure_end "$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)" \
-  --arg load_avg_end "$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)" \
+  --arg thermal_pressure_end "$THERMAL_END" \
+  --arg load_avg_end "$LOAD_END" \
   --argjson memory_free_pct "$(sysctl -n kern.memorystatus_level 2>/dev/null || echo null)" \
   --argjson memory_free_pct_end "${MEMORY_FREE_PCT_END:-null}" \
   --argjson disk_free_mb_start "${DISK_FREE_MB_START:-0}" \
@@ -757,13 +759,13 @@ if [[ "$total_benchmark_elapsed" -gt "$DURATION_BUDGET_S" ]]; then
   gate_warnings="${gate_warnings}LONG_DURATION: total ${total_benchmark_elapsed}s exceeds budget ${DURATION_BUDGET_S}s — thermal throttling may affect results\n"
 fi
 # Thermal drift: compare pre- and post-benchmark thermal pressure
-THERMAL_END="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
+# THERMAL_END was captured earlier (before aggregation)
 if [[ "$THERMAL_START" != "$THERMAL_END" && "$THERMAL_START" != "unknown" && "$THERMAL_END" != "unknown" ]]; then
   gate_warnings="${gate_warnings}THERMAL_DRIFT: thermal pressure changed during benchmark (start='${THERMAL_START}', end='${THERMAL_END}')\n"
 fi
 
 # Load average drift: warn if 1-min load increased significantly
-LOAD_END="$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+# LOAD_END was captured earlier (before aggregation)
 load_start_1m="$(echo "$LOAD_START" | awk '{gsub(/[{}]/,""); print $1}' 2>/dev/null || echo "")"
 load_end_1m="$(echo "$LOAD_END" | awk '{gsub(/[{}]/,""); print $1}' 2>/dev/null || echo "")"
 if [[ -n "$load_start_1m" && -n "$load_end_1m" && "$load_start_1m" != "unknown" && "$load_end_1m" != "unknown" ]]; then
