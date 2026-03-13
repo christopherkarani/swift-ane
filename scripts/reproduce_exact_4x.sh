@@ -393,6 +393,7 @@ speedup_stddev="$(jq -s 'map(.two_step_speedup_vs_coreml) | (length) as $n | (ad
 
 {
   echo "harness_version=$HARNESS_VERSION"
+  echo "contract_hash=$CONTRACT_HASH"
   echo "results_dir=$RESULTS_DIR"
   echo "requested_repeats=$REPEATS"
   echo "valid_runs=${#valid_runs[@]}"
