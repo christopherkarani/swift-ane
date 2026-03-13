@@ -81,6 +81,23 @@ case "$OUTPUT_HEAD_BACKEND" in
   *) echo "Unsupported OUTPUT_HEAD_BACKEND=$OUTPUT_HEAD_BACKEND (expected cpu|ane-classifier|ane-rmsnorm-classifier)" >&2; exit 1 ;;
 esac
 
+if [[ "$CONTROL_BACKEND" == "fused-pair" ]] && (( LAYER_COUNT % 2 != 0 )); then
+  echo "fused-pair CONTROL_BACKEND requires even LAYER_COUNT (got $LAYER_COUNT)" >&2
+  exit 1
+fi
+if [[ "$CONTROL_BACKEND" == "fused-triplet" ]] && (( LAYER_COUNT % 3 != 0 )); then
+  echo "fused-triplet CONTROL_BACKEND requires LAYER_COUNT divisible by 3 (got $LAYER_COUNT)" >&2
+  exit 1
+fi
+if [[ "$TWO_STEP_BACKEND" == "fused-pair" ]] && (( LAYER_COUNT % 2 != 0 )); then
+  echo "fused-pair TWO_STEP_BACKEND requires even LAYER_COUNT (got $LAYER_COUNT)" >&2
+  exit 1
+fi
+if [[ "$TWO_STEP_BACKEND" == "fused-triplet" ]] && (( LAYER_COUNT % 3 != 0 )); then
+  echo "fused-triplet TWO_STEP_BACKEND requires LAYER_COUNT divisible by 3 (got $LAYER_COUNT)" >&2
+  exit 1
+fi
+
 if [[ ! -e "$COREML_MODEL" ]]; then
   echo "CoreML model not found at $COREML_MODEL" >&2
   exit 1
