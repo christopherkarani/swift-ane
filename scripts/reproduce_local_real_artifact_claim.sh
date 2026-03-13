@@ -199,6 +199,7 @@ fi
       "harness_recurrent_sha256=\(.artifact_hashes.recurrent_checkpoint_sha256 | na)",
       "harness_sidecar_sha256=\(.artifact_hashes.future_sidecar_sha256 | na)",
       "harness_generation_sha256=\(.artifact_hashes.generation_model_sha256 | na)",
+      "harness_hostname=\(.per_run_hostnames // [] | map(select(. != null)) | unique | join(",") | if . == "" then "n/a" else . end)",
       "harness_chip=\(.host.chip | na)",
       "harness_thermal_pressure=\(.host.thermal_pressure | na)",
       "harness_thermal_pressure_end=\(.host.thermal_pressure_end | na)",
