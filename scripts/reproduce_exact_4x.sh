@@ -908,6 +908,18 @@ if [[ "$neg_latency" -gt 0 ]] 2>/dev/null; then
   gate_warnings="${gate_warnings}DATA_INTEGRITY: ${neg_latency} negative latency value(s) detected across runs\n"
 fi
 
+# Zero latency detection (no-work iteration or timing resolution issue)
+zero_latency="$(jq -s '
+  [.[] | (
+    (.control.raw_token_latencies_ms // [] | map(select(. == 0)) | length) +
+    (.two_step.raw_token_latencies_ms // [] | map(select(. == 0)) | length) +
+    (.coreml.raw_token_latencies_ms // [] | map(select(. == 0)) | length)
+  )] | add // 0
+' "${valid_runs[@]}" 2>/dev/null || echo "0")"
+if [[ "$zero_latency" -gt 0 ]] 2>/dev/null; then
+  gate_warnings="${gate_warnings}DATA_INTEGRITY: ${zero_latency} zero latency value(s) detected — possible no-work iteration\n"
+fi
+
 # Timestamp monotonicity check (detect clock skew or out-of-order execution)
 ts_nonmono="$(jq -s '
   [.[] | .probe_timestamp // null] | map(select(. != null)) |
