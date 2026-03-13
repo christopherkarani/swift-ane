@@ -68,6 +68,16 @@ if ! [[ "$PROMPT_TOKEN" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+if ! jq -e --arg v "$CV_THRESHOLD" '($v | tonumber) > 0 and ($v | tonumber) <= 1' <<< 'null' >/dev/null 2>&1; then
+  echo "CV_THRESHOLD must be a float in (0, 1] (got: $CV_THRESHOLD)" >&2
+  exit 1
+fi
+
+if ! [[ "$DURATION_BUDGET_S" =~ ^[0-9]+$ ]] || [[ "$DURATION_BUDGET_S" -lt 1 ]]; then
+  echo "DURATION_BUDGET_S must be a positive integer (got: $DURATION_BUDGET_S)" >&2
+  exit 1
+fi
+
 case "$CONTROL_BACKEND" in
   single|fused-pair|fused-triplet|identity-zero-trunk) ;;
   *) echo "Unsupported CONTROL_BACKEND=$CONTROL_BACKEND (expected single|fused-pair|fused-triplet|identity-zero-trunk)" >&2; exit 1 ;;
