@@ -6,7 +6,7 @@ import ANETypes
 import Espresso
 
 /// Bump this when the probe JSON output contract changes (new fields, renamed keys, etc.).
-private let probeVersion: Int = 4
+private let probeVersion: Int = 5
 
 private enum RunMode: String {
     case compare
