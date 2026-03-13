@@ -119,6 +119,13 @@ if [[ $harness_exit -eq 1 ]]; then
   exit 1
 fi
 
+# Validate harness produced a valid summary.json
+if [[ -f "$PUBLIC_RESULTS_DIR/summary.json" ]]; then
+  if ! jq -e '.harness_version' "$PUBLIC_RESULTS_DIR/summary.json" >/dev/null 2>&1; then
+    echo "WARNING: harness summary.json missing harness_version field" >&2
+  fi
+fi
+
 {
   echo "claim_version=$CLAIM_VERSION"
   echo "timestamp=$(date -Iseconds)"
