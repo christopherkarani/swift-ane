@@ -247,3 +247,11 @@ cycle	timestamp	hypothesis	result	commit	notes
 246	2026-03-13T04:54:06+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
 247	2026-03-13T04:54:32+03:00	0e2793f	per-run token accounting in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
 248	2026-03-13T04:55:08+03:00	7ff4336	per-run p95 latency arrays in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+249	2026-03-13T04:55:48+03:00	2560443	commit TSV through cycle 248	autoresearch-results.tsv	pass
+250	2026-03-13T04:56:23+03:00	c228e42	git dirty status in claim output	scripts/reproduce_local_real_artifact_claim.sh	pass
+251	2026-03-13T04:56:47+03:00	34d6134	git dirty status in harness metadata	scripts/reproduce_exact_4x.sh	pass
+252	2026-03-13T04:57:43+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
+253	2026-03-13T04:58:31+03:00	6bcde36	per-run stderr lines in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+254	2026-03-13T04:58:58+03:00	d4037fb	valid run files in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+255	2026-03-13T04:59:22+03:00	b470ff2	per-run timestamps/probe versions in claim	scripts/reproduce_local_real_artifact_claim.sh	pass
+256	2026-03-13T05:00:22+03:00	-	test suite checkpoint: 405 pass, 0 fail	-	pass
