@@ -6,7 +6,7 @@
 
 #if defined(__aarch64__) || defined(__arm64__)
 #include <arm_neon.h>
-#define ARGMAX_MAX_NVECS 128  /* supports up to spatial=1024 */
+#define ARGMAX_MAX_NVECS 256  /* supports up to spatial=2048 */
 #endif
 
 #include "ane_interop.h"
@@ -480,9 +480,9 @@ bool ane_interop_io_write_embedding_batch_fp16(
          * convert float32→fp16 in 8-wide NEON vectors, writing a contiguous
          * row per channel. Much better cache behavior than per-stream scattered writes.
          */
-        if (stream_count > 0 && (stream_count % 8) == 0 && stream_count <= 512) {
+        if (stream_count > 0 && (stream_count % 8) == 0 && stream_count <= 2048) {
             /* Pre-compute row pointers for each stream (avoid repeated multiply in inner loop) */
-            const float *embRows[512];
+            const float *embRows[2048];
             for (int s = 0; s < stream_count; s++) {
                 embRows[s] = embedding_table + (size_t)token_ids[s] * (size_t)dim;
             }
@@ -1091,7 +1091,7 @@ bool ane_interop_io_argmax_batch_fp16_spatial_parallel(
     if (!surface || !out_indices || !out_values) return false;
     if (ch_off < 0 || spatial <= 0 || channels <= 0 || stream_count <= 0) return false;
     if (stream_count > spatial) return false;
-    if (spatial > 1024 || (spatial % 8) != 0) {
+    if (spatial > 2048 || (spatial % 8) != 0) {
         return ane_interop_io_argmax_batch_fp16_spatial(
             surface, ch_off, spatial, channels, stream_count,
             out_indices, out_values);
