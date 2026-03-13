@@ -260,6 +260,9 @@ fi
   if (( dataset_bytes % 2 != 0 )); then
     echo "WARNING: dataset file has odd byte count ($dataset_bytes) — expected uint16 encoding"
   fi
+  if (( dataset_bytes > MAX_CORPUS_BYTES * 2 )); then
+    echo "WARNING: dataset_bytes ($dataset_bytes) exceeds 2x MAX_CORPUS_BYTES ($MAX_CORPUS_BYTES) — tokenization may have expanded beyond expected bounds"
+  fi
   echo "dataset_tokens=$((dataset_bytes / 2))"
   echo "max_corpus_bytes=$MAX_CORPUS_BYTES"
   echo "artifact_prefix=$ARTIFACT_PREFIX"
