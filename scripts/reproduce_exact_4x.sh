@@ -589,6 +589,7 @@ jq -s \
   per_run_parity_match_count: (map(.parity_match_count // null)),
   parity_total: (map(.parity_total // null) | .[0]),
   per_run_timestamps: (map(.probe_timestamp // null)),
+  per_run_iteration_counts: (map(.measured_iteration_count // null)),
   first_run_timestamp: (map(.probe_timestamp // null) | map(select(. != null)) | sort | first // null),
   last_run_timestamp: (map(.probe_timestamp // null) | map(select(. != null)) | sort | last // null),
   valid_run_files: $run_files,
