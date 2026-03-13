@@ -216,6 +216,12 @@ trap cleanup_on_interrupt INT TERM
   echo "memory_free_pct=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
 } > "$RESULTS_DIR/metadata.txt"
 
+# Verify swift toolchain is available
+if ! command -v swift &>/dev/null; then
+  echo "FATAL: swift is required but not found on PATH" >&2
+  exit 1
+fi
+
 # Validate scratch path is writable before attempting the build
 mkdir -p "$SCRATCH_PATH" 2>/dev/null || true
 if [[ ! -d "$SCRATCH_PATH" ]] || [[ ! -w "$SCRATCH_PATH" ]]; then
