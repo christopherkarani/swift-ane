@@ -844,6 +844,13 @@ fi
 if [[ "$DISK_FREE_MB_END" -lt 512 ]] 2>/dev/null; then
   gate_warnings="${gate_warnings}LOW_DISK_SPACE: only ${DISK_FREE_MB_END}MB free (started with ${DISK_FREE_MB_START}MB) — results may be unreliable\n"
 fi
+# Disk space drift: warn if free space dropped by more than 1GB during benchmark
+if [[ "$DISK_FREE_MB_START" =~ ^[0-9]+$ && "$DISK_FREE_MB_END" =~ ^[0-9]+$ ]]; then
+  disk_drop=$((DISK_FREE_MB_START - DISK_FREE_MB_END))
+  if [[ "$disk_drop" -gt 1024 ]] 2>/dev/null; then
+    gate_warnings="${gate_warnings}DISK_DRIFT: free disk dropped ${disk_drop}MB during benchmark (start=${DISK_FREE_MB_START}MB end=${DISK_FREE_MB_END}MB)\n"
+  fi
+fi
 
 # Memory pressure check: warn if system memory is critically low
 # MEMORY_FREE_PCT_END was captured earlier (before aggregation); fallback to 100 for gate comparison
