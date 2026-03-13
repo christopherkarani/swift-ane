@@ -513,6 +513,7 @@ jq -s \
   harness_version: $harness_version,
   probe_version: (map(.probe_version // null) | .[0]),
   per_run_probe_versions: (map(.probe_version // null)),
+  per_run_build_configurations: (map(.build_configuration // null)),
   per_run_input_modes: (map(.input_mode // null)),
   per_run_control_backends: (map(.control_backend // null)),
   per_run_two_step_backends: (map(.two_step_backend // null)),

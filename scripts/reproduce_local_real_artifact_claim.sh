@@ -254,6 +254,7 @@ fi
       "harness_per_run_coreml_compile_ms=\(.init_times.per_run_coreml_compile_ms // [] | tojson)",
       "harness_committed_tokens_per_pass=\(.token_accounting.committed_exact_tokens_per_pass | na)",
       "harness_accepted_future_tokens_per_pass=\(.token_accounting.accepted_future_tokens_per_pass | na)",
+      "harness_per_run_build_configurations=\(.per_run_build_configurations // [] | tojson)",
       "harness_per_run_os_versions=\(.per_run_os_versions // [] | tojson)",
       "harness_per_run_process_ids=\(.per_run_process_ids // [] | tojson)",
       "harness_per_run_iteration_counts=\(.per_run_iteration_counts // [] | tojson)",
