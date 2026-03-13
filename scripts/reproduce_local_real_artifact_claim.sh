@@ -236,6 +236,8 @@ fi
   echo "offline_gate_json=$OFFLINE_GATE_JSON"
   echo "offline_gate_sha256=$(shasum -a 256 "$OFFLINE_GATE_JSON" | awk '{print $1}')"
   echo "coreml_model=$COREML_MODEL"
+  echo "coremltools_python_version=$("$COREMLTOOLS_PYTHON" --version 2>/dev/null || echo unknown)"
+  echo "coremltools_version=$("$COREMLTOOLS_PYTHON" -c 'import coremltools; print(coremltools.__version__)' 2>/dev/null || echo unknown)"
   if [[ -d "$COREML_MODEL" ]]; then
     echo "coreml_model_sha256=$(find "$COREML_MODEL" -type f | sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')"
   elif [[ -f "$COREML_MODEL" ]]; then
