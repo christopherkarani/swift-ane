@@ -186,6 +186,7 @@ fi
       "harness_coreml_iqr_ms=\(.coreml.iqr_ms | na)",
       "harness_speedup_mean=\(.two_step_speedup_mean | na)",
       "harness_speedup_stddev=\(.two_step_speedup_stddev | na)",
+      "harness_speedup_iqr=\(.two_step_speedup_iqr | na)",
       "harness_control_speedup=\(.control_speedup_vs_coreml | na)",
       "harness_control_speedup_min=\(.control_speedup_min | na)",
       "harness_control_speedup_max=\(.control_speedup_max | na)",
