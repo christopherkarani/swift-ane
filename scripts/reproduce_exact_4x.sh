@@ -216,9 +216,13 @@ trap cleanup_on_interrupt INT TERM
   echo "memory_free_pct=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
 } > "$RESULTS_DIR/metadata.txt"
 
-# Verify swift toolchain is available
+# Verify required tools are available
 if ! command -v swift &>/dev/null; then
   echo "FATAL: swift is required but not found on PATH" >&2
+  exit 1
+fi
+if ! command -v shasum &>/dev/null; then
+  echo "FATAL: shasum is required but not found on PATH" >&2
   exit 1
 fi
 
