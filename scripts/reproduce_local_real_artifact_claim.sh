@@ -482,6 +482,22 @@ fi
     if [[ -n "$harness_contract_prompt" && "$harness_contract_prompt" != "$PROMPT_TOKEN" ]]; then
       echo "WARNING: claim PROMPT_TOKEN=$PROMPT_TOKEN but harness contract prompt_token=$harness_contract_prompt"
     fi
+    # Cross-validate artifact hashes: claim exports vs harness inputs
+    claim_recurrent_sha="$(shasum -a 256 "$ARTIFACT_PREFIX.recurrent.bin" 2>/dev/null | awk '{print $1}')"
+    harness_recurrent_sha="$(jq -r '.artifact_hashes.recurrent_checkpoint_sha256 // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
+    if [[ -n "$claim_recurrent_sha" && -n "$harness_recurrent_sha" && "$claim_recurrent_sha" != "$harness_recurrent_sha" ]]; then
+      echo "WARNING: recurrent checkpoint SHA mismatch: claim=$claim_recurrent_sha harness=$harness_recurrent_sha"
+    fi
+    claim_sidecar_sha="$(shasum -a 256 "$ARTIFACT_PREFIX.future-sidecar.bin" 2>/dev/null | awk '{print $1}')"
+    harness_sidecar_sha="$(jq -r '.artifact_hashes.future_sidecar_sha256 // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
+    if [[ -n "$claim_sidecar_sha" && -n "$harness_sidecar_sha" && "$claim_sidecar_sha" != "$harness_sidecar_sha" ]]; then
+      echo "WARNING: future sidecar SHA mismatch: claim=$claim_sidecar_sha harness=$harness_sidecar_sha"
+    fi
+    claim_gen_sha="$(shasum -a 256 "$ARTIFACT_PREFIX.generation.bin" 2>/dev/null | awk '{print $1}')"
+    harness_gen_sha="$(jq -r '.artifact_hashes.generation_model_sha256 // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
+    if [[ -n "$claim_gen_sha" && -n "$harness_gen_sha" && "$claim_gen_sha" != "$harness_gen_sha" ]]; then
+      echo "WARNING: generation model SHA mismatch: claim=$claim_gen_sha harness=$harness_gen_sha"
+    fi
   fi
   # Validate that all critical artifact files still exist and are non-empty
   missing_artifacts=""
