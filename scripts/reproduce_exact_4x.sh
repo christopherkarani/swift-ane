@@ -492,6 +492,8 @@ jq -s \
   per_run_output_head_backends: (map(.output_head_backend // null)),
   per_run_layer_counts: (map(.layer_count // null)),
   per_run_prompt_tokens: (map(.prompt_token // null)),
+  per_run_max_new_tokens: (map(.max_new_tokens // null)),
+  per_run_max_sequence_tokens: (map(.max_sequence_tokens // null)),
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
@@ -701,6 +703,21 @@ if [[ -n "$layer_count_mismatch" ]]; then
   gate_status="fail"
   gate_warnings="${gate_warnings}LAYER_COUNT_MISMATCH: runs reported layer counts inconsistent with contract ($LAYER_COUNT): ${layer_count_mismatch}\n"
 fi
+
+# Token parameter consistency checks
+for token_field in max_new_tokens max_sequence_tokens; do
+  case "$token_field" in
+    max_new_tokens) expected="$MAX_NEW_TOKENS" ;;
+    max_sequence_tokens) expected="$MAX_SEQUENCE_TOKENS" ;;
+  esac
+  token_mismatch="$(jq -s --argjson expected "$expected" --arg field "$token_field" \
+    'map(.[$field] // null) | map(select(. != null and . != $expected)) | if length > 0 then . else empty end' \
+    "${valid_runs[@]}" 2>/dev/null || echo "")"
+  if [[ -n "$token_mismatch" ]]; then
+    gate_status="fail"
+    gate_warnings="${gate_warnings}TOKEN_PARAM_MISMATCH: ${token_field} inconsistent with contract (${expected}): ${token_mismatch}\n"
+  fi
+done
 
 # Prompt token consistency check
 prompt_token_mismatch="$(jq -s --argjson expected "$PROMPT_TOKEN" \
