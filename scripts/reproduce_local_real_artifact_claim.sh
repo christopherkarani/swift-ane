@@ -292,6 +292,13 @@ if [[ -d "$COREML_MODEL" ]]; then
   fi
 fi
 
+# Validate inner harness script exists
+HARNESS_SCRIPT="$ROOT/scripts/reproduce_exact_4x.sh"
+if [[ ! -f "$HARNESS_SCRIPT" ]]; then
+  echo "FATAL: Inner harness script not found at $HARNESS_SCRIPT" >&2
+  exit 1
+fi
+
 echo "Running public recurrent-checkpoint harness"
 harness_start_epoch=$(date +%s)
 harness_exit=0
@@ -312,7 +319,7 @@ MAX_NEW_TOKENS="$MAX_NEW_TOKENS" \
 MAX_SEQUENCE_TOKENS="$MAX_SEQUENCE_TOKENS" \
 LAYER_COUNT="$LAYER_COUNT" \
 DRY_RUN="$DRY_RUN" \
-"$ROOT/scripts/reproduce_exact_4x.sh" || harness_exit=$?
+"$HARNESS_SCRIPT" || harness_exit=$?
 harness_elapsed_s=$(( $(date +%s) - harness_start_epoch ))
 # Exit code 2 = gate fail (parity), 1 = runtime error, 0 = pass/warn
 if [[ $harness_exit -eq 1 ]]; then
