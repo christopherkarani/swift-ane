@@ -1031,6 +1031,18 @@ if [[ -n "$wall_outlier" ]]; then
   gate_warnings="${gate_warnings}WALL_TIME_OUTLIER: ${wall_outlier}\n"
 fi
 
+# High stderr output: warn if any single run produced >100 lines of stderr
+# (typically indicates deprecation warnings, crash logs, or runaway logging)
+max_stderr=0
+for sl in "${valid_stderr_lines[@]}"; do
+  if [[ "$sl" =~ ^[0-9]+$ ]] && [[ "$sl" -gt "$max_stderr" ]]; then
+    max_stderr="$sl"
+  fi
+done
+if [[ "$max_stderr" -gt 100 ]]; then
+  gate_warnings="${gate_warnings}HIGH_STDERR: one or more runs produced $max_stderr stderr lines — check for crash logs or runaway warnings\n"
+fi
+
 if [[ "$all_parity_match" != "true" ]]; then
   gate_status="fail"
   parity_detail="$(jq -s '[to_entries[] | {run: (.key + 1), status: .value.parity_status, match_count: (.value.parity_match_count // "n/a"), total: (.value.parity_total // "n/a")} | select(.status != "match")] | map("\(.run): \(.match_count)/\(.total)") | join(", ")' "${valid_runs[@]}" 2>/dev/null || echo "detail unavailable")"
