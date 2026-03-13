@@ -70,7 +70,8 @@ echo "claim_pid=$$"
 echo "memory_free_pct_start=$(sysctl -n kern.memorystatus_level 2>/dev/null || echo unknown)"
 echo "thermal_pressure_start=$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
 echo "load_average_start=$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
-echo "power_source_start=$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
+power_source_start="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
+echo "power_source_start=$power_source_start"
 echo ""
 
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -606,6 +607,9 @@ fi
   disk_end="$(df -m "$RESULTS_DIR" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
   if [[ "$disk_end" -lt 512 ]] 2>/dev/null; then
     echo "CLAIM_WARNING: LOW_DISK_SPACE — only ${disk_end}MB free at claim end"
+  fi
+  if [[ "$power_source_start" != "$power_source_end" && "$power_source_start" != "unknown" && "$power_source_end" != "unknown" ]]; then
+    echo "CLAIM_WARNING: POWER_DRIFT — power source changed during claim (start='$power_source_start', end='$power_source_end')"
   fi
   claim_elapsed_s=$(( $(date +%s) - claim_start_epoch ))
   echo "claim_total_elapsed_s=$claim_elapsed_s"
