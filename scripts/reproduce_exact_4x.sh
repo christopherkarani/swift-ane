@@ -400,6 +400,7 @@ speedup_cv="$(jq -s 'map(.two_step_speedup_vs_coreml) | (length) as $n | (add / 
 speedup_min="$(jq -s 'map(.two_step_speedup_vs_coreml) | min' "${valid_runs[@]}")"
 speedup_max="$(jq -s 'map(.two_step_speedup_vs_coreml) | max' "${valid_runs[@]}")"
 control_speedup="$(jq -s 'map(.control_speedup_vs_coreml // null) | if all(. != null) then sort | .[((length - 1) / 2 | floor)] else "n/a" end' "${valid_runs[@]}")"
+control_speedup_min="$(jq -s 'map(.control_speedup_vs_coreml // null) | map(select(. != null)) | if length > 0 then min else "n/a" end' "${valid_runs[@]}")"
 
 # Mean, stddev, IQR for summary.txt (already in summary.json via inline jq)
 two_step_mean_ms="$(jq -s 'map(.two_step.median_ms_per_token) | add / length' "${valid_runs[@]}")"
@@ -882,7 +883,11 @@ fi
 # Speedup floor: warn if any run shows two_step slower than coreml
 if jq -e --arg min "$speedup_min" '($min | tonumber) < 1.0' <<< 'null' >/dev/null 2>&1; then
   gate_status="warn"
-  gate_warnings="${gate_warnings}SPEEDUP_BELOW_1X: minimum speedup=${speedup_min} (two_step slower than coreml in at least one run)\n"
+  gate_warnings="${gate_warnings}SPEEDUP_BELOW_1X: minimum two_step speedup=${speedup_min} (slower than coreml in at least one run)\n"
+fi
+if [[ "$control_speedup_min" != "n/a" ]] && jq -e --arg min "$control_speedup_min" '($min | tonumber) < 1.0' <<< 'null' >/dev/null 2>&1; then
+  gate_status="warn"
+  gate_warnings="${gate_warnings}CONTROL_SPEEDUP_BELOW_1X: minimum control speedup=${control_speedup_min} (slower than coreml in at least one run)\n"
 fi
 
 echo ""
