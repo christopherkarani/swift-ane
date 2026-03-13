@@ -201,6 +201,7 @@ fi
       "harness_generation_sha256=\(.artifact_hashes.generation_model_sha256 | na)",
       "harness_chip=\(.host.chip | na)",
       "harness_thermal_pressure=\(.host.thermal_pressure | na)",
+      "harness_thermal_pressure_end=\(.host.thermal_pressure_end | na)",
       "harness_power_source=\(.host.power_source | na)",
       "harness_total_stderr_lines=\(.per_run_stderr_lines // [] | add // 0)",
       "harness_contract_hash=\(.benchmark_contract.contract_hash | na)",
