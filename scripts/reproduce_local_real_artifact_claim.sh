@@ -757,9 +757,12 @@ fi
   echo "harness_exit_code=$harness_exit"
 } | tee "$RESULTS_DIR/claim-summary.txt"
 
-# Append warning count to claim-summary
+# Append warning and cross-validation counts to claim-summary
 claim_warnings="$(grep -c '^WARNING:\|^CLAIM_WARNING:' "$RESULTS_DIR/claim-summary.txt" 2>/dev/null || echo 0)"
 echo "claim_warning_count=$claim_warnings" | tee -a "$RESULTS_DIR/claim-summary.txt"
+# Count cross-validation checks that ran (lines with "claim" or "harness" SHA/hash/mismatch/match patterns)
+claim_xval_checks="$(grep -c 'mismatch\|harness_contract_\|claim_contract_hash\|_sha256=' "$RESULTS_DIR/claim-summary.txt" 2>/dev/null || echo 0)"
+echo "claim_cross_validation_fields=$claim_xval_checks" | tee -a "$RESULTS_DIR/claim-summary.txt"
 
 # Propagate inner harness gate exit code (2 = gate fail)
 exit "$harness_exit"
