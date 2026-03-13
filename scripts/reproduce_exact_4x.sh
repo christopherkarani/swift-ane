@@ -354,6 +354,19 @@ if [[ $failed_runs -gt 0 ]]; then
   echo "WARNING: $failed_runs/$REPEATS runs failed. Summary will use remaining valid runs." >&2
 fi
 
+# Check for NaN/Infinity in critical latency fields (probe-level timing bugs)
+for f in "$RESULTS_DIR"/run-*.json; do
+  [[ -f "$f" ]] || continue
+  nan_check="$(jq '
+    [.two_step.median_ms_per_token, .control.median_ms_per_token, .coreml.median_ms_per_token,
+     .two_step_speedup_vs_coreml, .control_speedup_vs_coreml] |
+    map(select(. != null)) | map(select(isnan or isinfinite)) | length
+  ' "$f" 2>/dev/null || echo "0")"
+  if [[ "$nan_check" -gt 0 ]] 2>/dev/null; then
+    echo "WARNING: $(basename "$f") contains NaN or Infinity in critical latency fields" >&2
+  fi
+done
+
 # Collect valid run JSONs (skip empty or malformed files from failed runs)
 valid_runs=()
 valid_outer_elapsed=()
