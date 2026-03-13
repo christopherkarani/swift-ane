@@ -241,6 +241,7 @@ fi
       "harness_valid_runs=\(.valid_runs)",
       "harness_failed_runs=\(.failed_runs // 0)",
       "harness_valid_run_files=\(.valid_run_files // [] | tojson)",
+      "harness_metadata_sha256=\(.artifact_hashes.metadata_sha256 | na)",
       "harness_probe_sha256=\(.artifact_hashes.probe_sha256 | na)",
       "harness_coreml_model_sha256=\(.artifact_hashes.coreml_model_sha256 | na)",
       "harness_recurrent_sha256=\(.artifact_hashes.recurrent_checkpoint_sha256 | na)",
