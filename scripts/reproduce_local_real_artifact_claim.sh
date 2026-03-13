@@ -143,6 +143,10 @@ if ! jq -e '.parity_status' "$OFFLINE_GATE_JSON" >/dev/null 2>&1; then
   echo "FATAL: offline gate JSON missing or has no parity_status field" >&2
   exit 1
 fi
+if ! jq -e '.committed_exact_tokens_per_pass and .accepted_future_tokens_per_pass' "$OFFLINE_GATE_JSON" >/dev/null 2>&1; then
+  echo "FATAL: offline gate JSON missing token accounting fields" >&2
+  exit 1
+fi
 
 PROMPT_TOKEN="$(jq -r '.promptToken' "$ARTIFACT_PREFIX.manifest.json")"
 if ! [[ "$PROMPT_TOKEN" =~ ^[0-9]+$ ]]; then
