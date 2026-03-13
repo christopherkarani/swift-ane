@@ -273,6 +273,8 @@ fi
       "harness_accepted_future_tokens_per_pass=\(.token_accounting.accepted_future_tokens_per_pass | na)",
       "harness_committed_per_run=\(.token_accounting.committed_per_run // [] | tojson)",
       "harness_accepted_per_run=\(.token_accounting.accepted_per_run // [] | tojson)",
+      "harness_per_run_input_modes=\(.per_run_input_modes // [] | tojson)",
+      "harness_per_run_layer_counts=\(.per_run_layer_counts // [] | tojson)",
       "harness_per_run_build_configurations=\(.per_run_build_configurations // [] | tojson)",
       "harness_per_run_os_versions=\(.per_run_os_versions // [] | tojson)",
       "harness_per_run_process_ids=\(.per_run_process_ids // [] | tojson)",
