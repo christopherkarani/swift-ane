@@ -738,3 +738,9 @@ jq --argjson gate "$gate_json" '. + {reproducibility: $gate}' "$RESULTS_DIR/summ
   && mv "$RESULTS_DIR/summary.json.tmp" "$RESULTS_DIR/summary.json"
 
 echo "Wrote raw JSON, stderr logs, and summary.json to $RESULTS_DIR"
+
+# Exit code reflects gate status for CI integration:
+#   0 = pass (or warn), 2 = fail (parity mismatch), 1 = reserved for runtime errors
+if [[ "$gate_status" == "fail" ]]; then
+  exit 2
+fi
