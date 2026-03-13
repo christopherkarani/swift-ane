@@ -338,3 +338,4 @@ cycle	timestamp	hypothesis	result	commit	notes
 338	2026-03-13T05:28:11Z	jq-error-guard	claim	add error handling for jq extraction from summary.json	pass
 339	2026-03-13T05:28:38Z	parity-val-check	claim	validate offline gate parity_status is match|mismatch	pass
 340	2026-03-13T05:29:33Z	test-suite	verify	405 tests pass, 0 failures, 121 skipped	pass
+341	2026-03-13T05:34:43Z	claim	validate CoreML model directory structure before harness invocation	scripts/reproduce_local_real_artifact_claim.sh	committed
