@@ -969,6 +969,12 @@ fi
 jq --argjson gate "$gate_json" '. + {reproducibility: $gate}' "$RESULTS_DIR/summary.json" > "$RESULTS_DIR/summary.json.tmp" \
   && mv "$RESULTS_DIR/summary.json.tmp" "$RESULTS_DIR/summary.json"
 
+# Final validation of summary.json after gate merge
+if ! jq -e '.reproducibility.gate_status' "$RESULTS_DIR/summary.json" >/dev/null 2>&1; then
+  echo "FATAL: summary.json corrupted during gate merge" >&2
+  exit 1
+fi
+
 echo "Wrote raw JSON, stderr logs, and summary.json to $RESULTS_DIR"
 
 # Exit code reflects gate status for CI integration:
