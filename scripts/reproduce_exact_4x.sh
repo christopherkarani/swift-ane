@@ -317,9 +317,10 @@ if [[ -n "$GENERATION_MODEL" ]]; then
   COMMON_ARGS+=(--generation-model "$GENERATION_MODEL")
 fi
 
-# Capture pre-benchmark thermal, load, and disk for drift comparison
+# Capture pre-benchmark thermal, load, disk, and power for drift comparison
 THERMAL_START="$(pmset -g therm 2>/dev/null | grep -i 'cpu.*speed' | head -1 || echo unknown)"
 LOAD_START="$(sysctl -n vm.loadavg 2>/dev/null || echo unknown)"
+POWER_SOURCE_START="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
 DISK_FREE_MB_START="$(df -m "$RESULTS_DIR" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
 
 failed_runs=0
@@ -744,9 +745,11 @@ gate_status="pass"
 gate_warnings=""
 
 # Environment quality warnings (non-failing)
-power_source="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
-if [[ "$power_source" != "AC Power" && "$power_source" != "unknown" ]]; then
-  gate_warnings="${gate_warnings}BATTERY_POWER: running on '${power_source}' — frequency scaling may reduce reproducibility\n"
+if [[ "$POWER_SOURCE_END" != "AC Power" && "$POWER_SOURCE_END" != "unknown" ]]; then
+  gate_warnings="${gate_warnings}BATTERY_POWER: running on '${POWER_SOURCE_END}' — frequency scaling may reduce reproducibility\n"
+fi
+if [[ "$POWER_SOURCE_START" != "$POWER_SOURCE_END" && "$POWER_SOURCE_START" != "unknown" && "$POWER_SOURCE_END" != "unknown" ]]; then
+  gate_warnings="${gate_warnings}POWER_DRIFT: power source changed during benchmark (start='${POWER_SOURCE_START}', end='${POWER_SOURCE_END}')\n"
 fi
 if [[ "$total_benchmark_elapsed" -gt "$DURATION_BUDGET_S" ]]; then
   gate_warnings="${gate_warnings}LONG_DURATION: total ${total_benchmark_elapsed}s exceeds budget ${DURATION_BUDGET_S}s — thermal throttling may affect results\n"
