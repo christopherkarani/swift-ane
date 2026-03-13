@@ -202,6 +202,8 @@ fi
       "harness_hostname=\(.per_run_hostnames // [] | map(select(. != null)) | unique | join(",") | if . == "" then "n/a" else . end)",
       "harness_hw_model=\(.host.hw_model | na)",
       "harness_chip=\(.host.chip | na)",
+      "harness_macos_version=\(.host.macos_version | na)",
+      "harness_macos_build=\(.host.macos_build | na)",
       "harness_thermal_pressure=\(.host.thermal_pressure | na)",
       "harness_thermal_pressure_end=\(.host.thermal_pressure_end | na)",
       "harness_power_source=\(.host.power_source | na)",
