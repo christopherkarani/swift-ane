@@ -196,6 +196,8 @@ swift build -c release --product espresso-multitoken-probe --scratch-path "$SCRA
 PROBE_SHA256="$(shasum -a 256 "$PROBE" | awk '{print $1}')"
 echo "probe_sha256=$PROBE_SHA256" >> "$RESULTS_DIR/metadata.txt"
 
+METADATA_SHA256="$(shasum -a 256 "$RESULTS_DIR/metadata.txt" | awk '{print $1}')"
+
 # Precompute artifact hashes for summary.json
 if [[ -d "$COREML_MODEL" ]]; then
   COREML_MODEL_SHA256="$(find "$COREML_MODEL" -type f | sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')"
@@ -471,6 +473,7 @@ jq -s \
   --argjson prompt_token "${PROMPT_TOKEN:-null}" \
   --argjson stderr_lines "$(printf '%s\n' "${valid_stderr_lines[@]}" | jq -s '.')" \
   --arg contract_hash "$CONTRACT_HASH" \
+  --arg metadata_sha256 "$METADATA_SHA256" \
   --arg probe_sha256 "$PROBE_SHA256" \
   --arg coreml_sha256 "${COREML_MODEL_SHA256:-}" \
   --arg recurrent_sha256 "${RECURRENT_SHA256:-}" \
@@ -506,6 +509,7 @@ jq -s \
     prompt_token: $prompt_token
   },
   artifact_hashes: {
+    metadata_sha256: $metadata_sha256,
     probe_sha256: $probe_sha256,
     coreml_model_sha256: (if $coreml_sha256 == "" then null else $coreml_sha256 end),
     recurrent_checkpoint_sha256: (if $recurrent_sha256 == "" then null else $recurrent_sha256 end),
