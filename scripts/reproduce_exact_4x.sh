@@ -550,6 +550,8 @@ jq -s \
   per_run_process_ids: (map(.process_id // null)),
   per_run_warmup: (map(.warmup // null)),
   per_run_iterations: (map(.iterations // null)),
+  per_run_trunk_lane_spatials: (map(.trunk_lane_spatial // null)),
+  per_run_output_head_lane_spatials: (map(.output_head_lane_spatial // null)),
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
@@ -841,6 +843,24 @@ check_contract_field max_sequence_tokens "$MAX_SEQUENCE_TOKENS" number
 check_contract_field warmup "$WARMUP" number
 check_contract_field iterations "$ITERATIONS" number
 check_contract_field prompt_token "$PROMPT_TOKEN" number
+
+# Lane spatial consistency (probe-internal config, must be uniform across runs)
+lane_inconsistent="$(jq -s '
+  [.[] | .trunk_lane_spatial // null] | map(select(. != null)) | unique |
+  if length > 1 then "trunk_lane_spatial varies: \(.)" else empty end
+' "${valid_runs[@]}" 2>/dev/null || echo "")"
+if [[ -n "$lane_inconsistent" ]]; then
+  gate_status="warn"
+  gate_warnings="${gate_warnings}CONTRACT_MISMATCH: $lane_inconsistent\n"
+fi
+head_lane_inconsistent="$(jq -s '
+  [.[] | .output_head_lane_spatial // null] | map(select(. != null)) | unique |
+  if length > 1 then "output_head_lane_spatial varies: \(.)" else empty end
+' "${valid_runs[@]}" 2>/dev/null || echo "")"
+if [[ -n "$head_lane_inconsistent" ]]; then
+  gate_status="warn"
+  gate_warnings="${gate_warnings}CONTRACT_MISMATCH: $head_lane_inconsistent\n"
+fi
 
 # Generated token count check (detect premature termination)
 short_gen="$(jq -s --argjson expected "$MAX_NEW_TOKENS" \
