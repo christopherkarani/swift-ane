@@ -185,7 +185,7 @@ public final class MPSExpansionArgmax {
 
     // MARK: - GPU Argmax Shader
 
-    private static let argmaxShaderSource = """
+    static let argmaxShaderSource = """
     #include <metal_stdlib>
     using namespace metal;
 
@@ -251,6 +251,462 @@ public final class MPSExpansionArgmax {
         }
     }
     """
+}
+
+/// GPU-side full head: RMSNorm + projection + expansion + argmax.
+/// Takes raw trunk output [1, dim, 1, spatial] from IOSurface, produces token IDs.
+/// Eliminates the ANE head dispatch by doing RMSNorm + projection on GPU.
+///
+/// Pipeline:
+///  1. memcpy IOSurface [dim, spatial] → Metal buffer
+///  2. GPU RMSNorm: in-place normalize + scale
+///  3. MPS matmul: norm^T [spatial, dim] × projW^T [dim, bneck] → proj [spatial, bneck]
+///  4. MPS matmul: proj [spatial, bneck] × expandW^T [bneck, vocab] → logits [spatial, vocab]
+///  5. GPU argmax: logits → uint16 token IDs
+public final class GPUFullHeadArgmax {
+
+    private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let rmsNormPipeline: MTLComputePipelineState
+    private let argmaxPipeline: MTLComputePipelineState
+    private let projMatmul: MPSMatrixMultiplication
+    private let expandMatmul: MPSMatrixMultiplication
+
+    private let trunkBuffer: MTLBuffer      // [dim, spatial] fp16
+    private let gammaBuffer: MTLBuffer      // [dim] fp16
+    private let projWBuffer: MTLBuffer      // [dim, bneck] fp16
+    private let projOutBuffer: MTLBuffer    // [spatial, bneck] fp16
+    private let expandWBuffer: MTLBuffer    // [vocab, bneck] fp16
+    private let logitsBuffer: MTLBuffer     // [spatial, vocab] fp16
+    private let outputBuffer: MTLBuffer     // [spatial] uint16
+
+    public let dim: Int
+    public let bottleneck: Int
+    public let vocabSize: Int
+    public let spatial: Int
+
+    public init(
+        rmsGamma: UnsafeBufferPointer<Float16>,
+        wProject: UnsafeBufferPointer<Float16>,
+        wExpand: UnsafeBufferPointer<Float16>,
+        dim: Int,
+        bottleneck: Int,
+        vocabSize: Int,
+        spatial: Int
+    ) throws(MetalExpansionArgmaxError) {
+        guard dim > 0, bottleneck > 0, vocabSize > 0, spatial > 0 else {
+            throw .invalidArguments("all dimensions must be > 0")
+        }
+        guard rmsGamma.count >= dim else { throw .invalidArguments("rmsGamma too small") }
+        guard wProject.count >= dim * bottleneck else { throw .invalidArguments("wProject too small") }
+        guard wExpand.count >= vocabSize * bottleneck else { throw .invalidArguments("wExpand too small") }
+
+        guard let device = MTLCreateSystemDefaultDevice() else { throw .metalUnavailable }
+        guard let queue = device.makeCommandQueue() else { throw .commandQueueUnavailable }
+
+        // Compile RMSNorm kernel
+        let rmsLib: MTLLibrary
+        do { rmsLib = try device.makeLibrary(source: Self.rmsNormSource(dim: dim), options: nil) }
+        catch { throw .libraryBuildFailed("RMSNorm: \(error)") }
+        guard let rmsFn = rmsLib.makeFunction(name: "rms_norm_channelfirst") else {
+            throw .libraryBuildFailed("missing rms_norm_channelfirst")
+        }
+        let rmsPSO: MTLComputePipelineState
+        do { rmsPSO = try device.makeComputePipelineState(function: rmsFn) }
+        catch { throw .pipelineBuildFailed("RMSNorm: \(error)") }
+
+        // Compile argmax kernel
+        let argLib: MTLLibrary
+        do { argLib = try device.makeLibrary(source: MPSExpansionArgmax.argmaxShaderSource, options: nil) }
+        catch { throw .libraryBuildFailed("argmax: \(error)") }
+        guard let argFn = argLib.makeFunction(name: "row_argmax_fp16") else {
+            throw .libraryBuildFailed("missing row_argmax_fp16")
+        }
+        let argPSO: MTLComputePipelineState
+        do { argPSO = try device.makeComputePipelineState(function: argFn) }
+        catch { throw .pipelineBuildFailed("argmax: \(error)") }
+
+        // MPS matmuls
+        let projMM = MPSMatrixMultiplication(
+            device: device, transposeLeft: true, transposeRight: true,
+            resultRows: spatial, resultColumns: bottleneck, interiorColumns: dim,
+            alpha: 1.0, beta: 0.0)
+        let expandMM = MPSMatrixMultiplication(
+            device: device, transposeLeft: false, transposeRight: true,
+            resultRows: spatial, resultColumns: vocabSize, interiorColumns: bottleneck,
+            alpha: 1.0, beta: 0.0)
+
+        // Allocate buffers
+        let trunkSize = dim * spatial * MemoryLayout<Float16>.stride
+        guard let trunkBuf = device.makeBuffer(length: trunkSize, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+        guard let gammaBuf = device.makeBuffer(bytes: rmsGamma.baseAddress!, length: dim * 2, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+        let projWSize = dim * bottleneck * MemoryLayout<Float16>.stride
+        guard let projWBuf = device.makeBuffer(bytes: wProject.baseAddress!, length: projWSize, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+        let projOutSize = spatial * bottleneck * MemoryLayout<Float16>.stride
+        guard let projOutBuf = device.makeBuffer(length: projOutSize, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+        let expandWSize = vocabSize * bottleneck * MemoryLayout<Float16>.stride
+        guard let expandWBuf = device.makeBuffer(bytes: wExpand.baseAddress!, length: expandWSize, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+        let logitsSize = spatial * vocabSize * MemoryLayout<Float16>.stride
+        guard let logitsBuf = device.makeBuffer(length: logitsSize, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+        guard let outBuf = device.makeBuffer(length: spatial * 2, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+
+        self.device = device
+        self.commandQueue = queue
+        self.rmsNormPipeline = rmsPSO
+        self.argmaxPipeline = argPSO
+        self.projMatmul = projMM
+        self.expandMatmul = expandMM
+        self.trunkBuffer = trunkBuf
+        self.gammaBuffer = gammaBuf
+        self.projWBuffer = projWBuf
+        self.projOutBuffer = projOutBuf
+        self.expandWBuffer = expandWBuf
+        self.logitsBuffer = logitsBuf
+        self.outputBuffer = outBuf
+        self.dim = dim
+        self.bottleneck = bottleneck
+        self.vocabSize = vocabSize
+        self.spatial = spatial
+    }
+
+    /// Run full GPU head pipeline on trunk output surface.
+    public func run(trunkSurface: IOSurfaceRef) throws(MetalExpansionArgmaxError) -> UnsafeBufferPointer<UInt16> {
+        let trunkBytes = dim * spatial * MemoryLayout<Float16>.stride
+
+        // 1. Copy trunk output to GPU buffer
+        let lockStatus = IOSurfaceLock(trunkSurface, [.readOnly], nil)
+        guard lockStatus == 0 else { throw .surfaceLockFailed(lockStatus) }
+        memcpy(trunkBuffer.contents(), IOSurfaceGetBaseAddress(trunkSurface), trunkBytes)
+        IOSurfaceUnlock(trunkSurface, [.readOnly], nil)
+
+        guard let cb = commandQueue.makeCommandBuffer() else { throw .commandBufferUnavailable }
+
+        // 2. GPU RMSNorm in-place
+        guard let rmsEnc = cb.makeComputeCommandEncoder() else { throw .commandEncoderUnavailable }
+        rmsEnc.setComputePipelineState(rmsNormPipeline)
+        rmsEnc.setBuffer(trunkBuffer, offset: 0, index: 0)
+        rmsEnc.setBuffer(gammaBuffer, offset: 0, index: 1)
+        var dims = (UInt32(dim), UInt32(spatial))
+        withUnsafeBytes(of: &dims) { rmsEnc.setBytes($0.baseAddress!, length: $0.count, index: 2) }
+        let rmsTpg = min(256, Int(rmsNormPipeline.maxTotalThreadsPerThreadgroup))
+        rmsEnc.dispatchThreadgroups(
+            MTLSize(width: (spatial + rmsTpg - 1) / rmsTpg, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: rmsTpg, height: 1, depth: 1))
+        rmsEnc.endEncoding()
+
+        // 3. MPS projection: norm^T [S, dim] × projW^T [dim, bneck] → [S, bneck]
+        let trunkDesc = MPSMatrixDescriptor(rows: dim, columns: spatial,
+            rowBytes: spatial * 2, dataType: .float16)
+        let projWDesc = MPSMatrixDescriptor(rows: bottleneck, columns: dim,
+            rowBytes: dim * 2, dataType: .float16)
+        let projOutDesc = MPSMatrixDescriptor(rows: spatial, columns: bottleneck,
+            rowBytes: bottleneck * 2, dataType: .float16)
+
+        let trunkMat = MPSMatrix(buffer: trunkBuffer, descriptor: trunkDesc)
+        let projWMat = MPSMatrix(buffer: projWBuffer, descriptor: projWDesc)
+        let projOutMat = MPSMatrix(buffer: projOutBuffer, descriptor: projOutDesc)
+        projMatmul.encode(commandBuffer: cb, leftMatrix: trunkMat, rightMatrix: projWMat, resultMatrix: projOutMat)
+
+        // 4. MPS expansion: proj [S, bneck] × expandW^T [bneck, vocab] → logits [S, vocab]
+        let projDesc2 = MPSMatrixDescriptor(rows: spatial, columns: bottleneck,
+            rowBytes: bottleneck * 2, dataType: .float16)
+        let expandWDesc = MPSMatrixDescriptor(rows: vocabSize, columns: bottleneck,
+            rowBytes: bottleneck * 2, dataType: .float16)
+        let logitsDesc = MPSMatrixDescriptor(rows: spatial, columns: vocabSize,
+            rowBytes: vocabSize * 2, dataType: .float16)
+
+        let projMat2 = MPSMatrix(buffer: projOutBuffer, descriptor: projDesc2)
+        let expandWMat = MPSMatrix(buffer: expandWBuffer, descriptor: expandWDesc)
+        let logitsMat = MPSMatrix(buffer: logitsBuffer, descriptor: logitsDesc)
+        expandMatmul.encode(commandBuffer: cb, leftMatrix: projMat2, rightMatrix: expandWMat, resultMatrix: logitsMat)
+
+        // 5. GPU argmax
+        guard let argEnc = cb.makeComputeCommandEncoder() else { throw .commandEncoderUnavailable }
+        argEnc.setComputePipelineState(argmaxPipeline)
+        argEnc.setBuffer(logitsBuffer, offset: 0, index: 0)
+        argEnc.setBuffer(outputBuffer, offset: 0, index: 1)
+        var vocabU32 = UInt32(vocabSize)
+        argEnc.setBytes(&vocabU32, length: 4, index: 2)
+        let argTpg = min(256, Int(argmaxPipeline.maxTotalThreadsPerThreadgroup))
+        argEnc.dispatchThreadgroups(
+            MTLSize(width: spatial, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: argTpg, height: 1, depth: 1))
+        argEnc.endEncoding()
+
+        cb.commit()
+        cb.waitUntilCompleted()
+        if cb.status != .completed {
+            throw .commandExecutionFailed(cb.error?.localizedDescription ?? "status=\(cb.status.rawValue)")
+        }
+
+        return UnsafeBufferPointer(start: outputBuffer.contents().assumingMemoryBound(to: UInt16.self), count: spatial)
+    }
+
+    // MARK: - RMSNorm Shader
+
+    private static func rmsNormSource(dim: Int) -> String {
+        """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        #define DIM \(dim)
+
+        /// RMSNorm on channel-first [dim, spatial] data. One thread per spatial position.
+        /// Adjacent threads access adjacent spatial positions → coalesced reads.
+        kernel void rms_norm_channelfirst(
+            device half *x [[buffer(0)]],
+            constant half *gamma [[buffer(1)]],
+            constant uint2 &dims [[buffer(2)]],
+            uint s [[thread_position_in_grid]]
+        ) {
+            uint spatial = dims.y;
+            if (s >= spatial) return;
+
+            // Compute sum of squares across channels
+            float sum_sq = 0.0f;
+            for (uint c = 0; c < DIM; c++) {
+                float v = float(x[c * spatial + s]);
+                sum_sq += v * v;
+            }
+            float rms_inv = rsqrt(sum_sq / float(DIM) + 1e-5f);
+
+            // Normalize and scale
+            for (uint c = 0; c < DIM; c++) {
+                float v = float(x[c * spatial + s]);
+                x[c * spatial + s] = half(v * rms_inv * float(gamma[c]));
+            }
+        }
+        """
+    }
+}
+
+/// Fused matmul+argmax: computes proj[spatial,bneck] × w[bneck,vocab] → argmax without
+/// materializing the full [spatial,vocab] logits matrix. Eliminates ~1GB intermediate buffer.
+///
+/// One threadgroup per spatial row. Each thread handles a stripe of vocab entries,
+/// computing dot products and tracking the local max. Cooperative SIMD+threadgroup
+/// reduction finds the global argmax per row.
+///
+/// Input: IOSurface [1, bneck, 1, spatial] fp16 channel-first (ANE native layout).
+/// Output: uint16 token IDs, one per spatial lane.
+public final class FusedExpansionArgmax {
+
+    private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let pipeline: MTLComputePipelineState
+    private let projBuffer: MTLBuffer
+    private let wBuffer: MTLBuffer
+    private let outputBuffer: MTLBuffer
+    private let threadsPerGroup: Int
+
+    public let bottleneck: Int
+    public let vocabSize: Int
+    public let spatial: Int
+
+    public init(
+        wExpand: UnsafeBufferPointer<Float16>,
+        bottleneck: Int,
+        vocabSize: Int,
+        spatial: Int
+    ) throws(MetalExpansionArgmaxError) {
+        guard bottleneck > 0, vocabSize > 0, spatial > 0 else {
+            throw .invalidArguments("all dimensions must be > 0")
+        }
+        guard wExpand.count >= vocabSize * bottleneck else {
+            throw .invalidArguments("wExpand too small")
+        }
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw .metalUnavailable
+        }
+        guard let commandQueue = device.makeCommandQueue() else {
+            throw .commandQueueUnavailable
+        }
+
+        let library: MTLLibrary
+        do {
+            library = try device.makeLibrary(source: Self.shaderSource(bneck: bottleneck), options: nil)
+        } catch {
+            throw .libraryBuildFailed(String(describing: error))
+        }
+        guard let fn = library.makeFunction(name: "fused_expansion_argmax") else {
+            throw .libraryBuildFailed("missing fused_expansion_argmax")
+        }
+        let pso: MTLComputePipelineState
+        do {
+            pso = try device.makeComputePipelineState(function: fn)
+        } catch {
+            throw .pipelineBuildFailed(String(describing: error))
+        }
+
+        let projSize = bottleneck * spatial * MemoryLayout<Float16>.stride
+        guard let projBuf = device.makeBuffer(length: projSize, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+        let wSize = vocabSize * bottleneck * MemoryLayout<Float16>.stride
+        guard let wBuf = device.makeBuffer(bytes: wExpand.baseAddress!, length: wSize, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+        let outSize = spatial * MemoryLayout<UInt16>.stride
+        guard let outBuf = device.makeBuffer(length: outSize, options: .storageModeShared) else {
+            throw .bufferAllocationFailed
+        }
+
+        self.device = device
+        self.commandQueue = commandQueue
+        self.pipeline = pso
+        self.projBuffer = projBuf
+        self.wBuffer = wBuf
+        self.outputBuffer = outBuf
+        self.bottleneck = bottleneck
+        self.vocabSize = vocabSize
+        self.spatial = spatial
+        self.threadsPerGroup = min(1024, Int(pso.maxTotalThreadsPerThreadgroup))
+    }
+
+    /// Run fused matmul+argmax on projected ANE output surface.
+    public func run(projectedSurface: IOSurfaceRef) throws(MetalExpansionArgmaxError) -> UnsafeBufferPointer<UInt16> {
+        let length = bottleneck * spatial * MemoryLayout<Float16>.stride
+
+        let status = IOSurfaceLock(projectedSurface, [.readOnly], nil)
+        guard status == 0 else { throw .surfaceLockFailed(status) }
+        memcpy(projBuffer.contents(), IOSurfaceGetBaseAddress(projectedSurface), length)
+        IOSurfaceUnlock(projectedSurface, [.readOnly], nil)
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw .commandBufferUnavailable
+        }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw .commandEncoderUnavailable
+        }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(projBuffer, offset: 0, index: 0)
+        encoder.setBuffer(wBuffer, offset: 0, index: 1)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        var dims = (UInt32(vocabSize), UInt32(spatial))
+        withUnsafeBytes(of: &dims) { raw in
+            encoder.setBytes(raw.baseAddress!, length: raw.count, index: 3)
+        }
+        encoder.dispatchThreadgroups(
+            MTLSize(width: spatial, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1))
+        encoder.endEncoding()
+
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        if commandBuffer.status != .completed {
+            throw .commandExecutionFailed(
+                commandBuffer.error?.localizedDescription ?? "status=\(commandBuffer.status.rawValue)")
+        }
+
+        let ptr = outputBuffer.contents().assumingMemoryBound(to: UInt16.self)
+        return UnsafeBufferPointer(start: ptr, count: spatial)
+    }
+
+    // MARK: - Fused Shader
+
+    private static func shaderSource(bneck: Int) -> String {
+        """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        #define BNECK \(bneck)
+
+        /// Fused matmul+argmax: one threadgroup per spatial row.
+        /// Loads projection vector into shared memory, each thread handles a stripe
+        /// of vocab entries computing dot product + tracking max. Cooperative reduction
+        /// finds the global argmax. Never materializes full [spatial,vocab] logits.
+        ///
+        /// proj layout: channel-first [1, bneck, 1, spatial] → proj[k * spatial + row]
+        /// wExpand layout: row-major [vocab, bneck] → wExpand[v * bneck + k]
+        kernel void fused_expansion_argmax(
+            const device half *proj [[buffer(0)]],
+            const device half *wExpand [[buffer(1)]],
+            device ushort *tokenIds [[buffer(2)]],
+            constant uint2 &dims [[buffer(3)]],
+            uint row [[threadgroup_position_in_grid]],
+            uint tid [[thread_index_in_threadgroup]],
+            uint tpg [[threads_per_threadgroup]]
+        ) {
+            uint vocab = dims.x;
+            uint spatial = dims.y;
+
+            // Load projection vector into threadgroup shared memory (all threads cooperate)
+            threadgroup float sharedProj[BNECK];
+            if (tid < BNECK) {
+                sharedProj[tid] = float(proj[tid * spatial + row]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Each thread handles a stripe of vocab entries
+            float localMax = -INFINITY;
+            uint localIdx = 0;
+
+            for (uint v = tid; v < vocab; v += tpg) {
+                float dot = 0.0f;
+                const device half *wRow = wExpand + v * BNECK;
+                for (uint k = 0; k < BNECK; k++) {
+                    dot = fma(sharedProj[k], float(wRow[k]), dot);
+                }
+                if (dot > localMax) {
+                    localMax = dot;
+                    localIdx = v;
+                }
+            }
+
+            // SIMD reduction within each simd_group
+            for (ushort offset = 16; offset > 0; offset >>= 1) {
+                float otherVal = simd_shuffle_down(localMax, offset);
+                uint otherIdx = simd_shuffle_down(localIdx, offset);
+                if (otherVal > localMax) {
+                    localMax = otherVal;
+                    localIdx = otherIdx;
+                }
+            }
+
+            // Threadgroup reduction: lane 0 of each simd_group writes to shared mem
+            threadgroup float sharedMax[32];  // up to 1024 threads / 32 = 32 simd groups
+            threadgroup uint sharedArgmax[32];
+
+            uint simdGroupId = tid / 32;
+            uint laneInSimd = tid % 32;
+
+            if (laneInSimd == 0) {
+                sharedMax[simdGroupId] = localMax;
+                sharedArgmax[simdGroupId] = localIdx;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Final reduction by thread 0
+            if (tid == 0) {
+                float bestVal = sharedMax[0];
+                uint bestIdx = sharedArgmax[0];
+                uint numSimdGroups = (tpg + 31) / 32;
+                for (uint s = 1; s < numSimdGroups; s++) {
+                    if (sharedMax[s] > bestVal) {
+                        bestVal = sharedMax[s];
+                        bestIdx = sharedArgmax[s];
+                    }
+                }
+                tokenIds[row] = ushort(bestIdx);
+            }
+        }
+        """
+    }
 }
 
 /// Metal GPU expansion [bneck→vocab] + argmax on projected ANE output (single-pass, legacy).

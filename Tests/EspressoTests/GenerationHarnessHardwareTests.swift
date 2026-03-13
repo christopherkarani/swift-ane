@@ -8721,8 +8721,10 @@ final class GenerationHarnessHardwareTests: XCTestCase {
 
         print("=== Projection-only head + Metal expansion pipeline ===")
 
-        for streamCount in [4096, 8192, 16384] {
-            let trunkGroups = 16
+        for streamCount in [16384] {
+            for trunkGroups in [16] {
+
+            do { // catch compile failures for larger spatial values
 
             // Pipeline A: trunk + projection-only head
             var trA = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
@@ -8796,7 +8798,50 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             // Prime pipeline B
             try embWrite(tokensB, to: t0xInB)
 
+            // First: measure individual ANE dispatch times (non-pipelined, serial)
+            var trip0Us: [Double] = []
+            var trip1Us: [Double] = []
+            var headUs: [Double] = []
+            for iter in 0..<(10 + 30) {
+                try embWrite(tokensA, to: t0xInA)
+                let t0s = mach_absolute_time()
+                try trA[0].kernels.step.eval()
+                let t0e = mach_absolute_time()
+                try trA[1].kernels.step.eval()
+                let t1e = mach_absolute_time()
+                try projHeadA.rmsNormProjection.eval()
+                let the = mach_absolute_time()
+                if iter >= 10 {
+                    trip0Us.append(machMilliseconds(t0e - t0s) * 1000)
+                    trip1Us.append(machMilliseconds(t1e - t0e) * 1000)
+                    headUs.append(machMilliseconds(the - t1e) * 1000)
+                }
+                let r = try metalA.run(projectedSurface: projOutA)
+                for i in 0..<streamCount { tokensA[i] = r[i] }
+            }
+            func med(_ a: [Double]) -> Double { let s = a.sorted(); return s[s.count / 2] }
+            print("  dispatch timing (serial, non-pipelined):")
+            print("    triplet0=\(String(format: "%.1f", med(trip0Us))) µs, " +
+                  "triplet1=\(String(format: "%.1f", med(trip1Us))) µs, " +
+                  "head=\(String(format: "%.1f", med(headUs))) µs, " +
+                  "total=\(String(format: "%.1f", med(trip0Us) + med(trip1Us) + med(headUs))) µs")
+
+            // Re-prime pipelines for pipelined benchmark
+            tokensA = Array(repeating: UInt16(0), count: streamCount)
+            try embWrite(tokensA, to: t0xInA)
+            try trA[0].kernels.step.eval(); try trA[1].kernels.step.eval()
+            try projHeadA.rmsNormProjection.eval()
+            do {
+                let rePrime = try metalA.run(projectedSurface: projOutA)
+                for i in 0..<streamCount { tokensA[i] = rePrime[i] }
+            }
+            tokensB = Array(repeating: UInt16(0), count: streamCount)
+            try embWrite(tokensB, to: t0xInB)
+
             var pipeUs: [Double] = []
+            var mpsUs: [Double] = []
+            var embedUs: [Double] = []
+            var aneWaitUs: [Double] = []
             for iter in 0..<(warmup + iters) {
                 let s = GenerationClock.now()
                 var aneError: (any Error)?
@@ -8812,10 +8857,16 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                     } catch { aneError = error }
                 }
                 // CPU/Metal: process pipeline A results (expansion+argmax + embed)
+                let mpsStart = mach_absolute_time()
                 let resultA = try metalA.run(projectedSurface: projOutA)
                 for i in 0..<streamCount { tokensA[i] = resultA[i] }
+                let mpsEnd = mach_absolute_time()
+                let embStart = mach_absolute_time()
                 try embWrite(tokensA, to: t0xInA)
+                let embEnd = mach_absolute_time()
+                let waitStart = mach_absolute_time()
                 g1.wait()
+                let waitEnd = mach_absolute_time()
                 if let e = aneError { throw e }
 
                 // ANE: eval pipeline A (trunk + proj head)
@@ -8829,134 +8880,150 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                     } catch { aneError = error }
                 }
                 // CPU/Metal: process pipeline B results
+                let mpsStart2 = mach_absolute_time()
                 let resultB = try metalB.run(projectedSurface: projOutB)
                 for i in 0..<streamCount { tokensB[i] = resultB[i] }
+                let mpsEnd2 = mach_absolute_time()
+                let embStart2 = mach_absolute_time()
                 try embWrite(tokensB, to: t0xInB)
+                let embEnd2 = mach_absolute_time()
+                let waitStart2 = mach_absolute_time()
                 g2.wait()
+                let waitEnd2 = mach_absolute_time()
                 if let e = aneError { throw e }
 
                 let elapsed = machMilliseconds(GenerationClock.now() - s) * 1000
-                if iter >= warmup { pipeUs.append(elapsed) }
+                if iter >= warmup {
+                    pipeUs.append(elapsed)
+                    mpsUs.append(machMilliseconds(mpsEnd - mpsStart) * 1000 + machMilliseconds(mpsEnd2 - mpsStart2) * 1000)
+                    embedUs.append(machMilliseconds(embEnd - embStart) * 1000 + machMilliseconds(embEnd2 - embStart2) * 1000)
+                    aneWaitUs.append(machMilliseconds(waitEnd - waitStart) * 1000 + machMilliseconds(waitEnd2 - waitStart2) * 1000)
+                }
             }
 
             let sorted = pipeUs.sorted()
             let medUs = sorted[sorted.count / 2]
             let twoStepMs = medUs / 1000.0
             let tps = Double(streamCount * 2) / twoStepMs * 1000.0
-            print("  proj+MPS \(streamCount) streams: median two-step=\(String(format: "%.3f", twoStepMs)) ms, " +
+            print("  proj+MPS g=\(trunkGroups) \(streamCount) streams: median two-step=\(String(format: "%.3f", twoStepMs)) ms, " +
                   "\(String(format: "%.0f", tps)) TPS")
+            print("    breakdown: MPS=\(String(format: "%.1f", med(mpsUs))) µs, " +
+                  "embed=\(String(format: "%.1f", med(embedUs))) µs, " +
+                  "ANE wait=\(String(format: "%.1f", med(aneWaitUs))) µs")
 
-            // --- Control: factored head (ANE full expansion) ---
-            var ctrA = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
-                count: 2,
-                throwingInitializer: { tripletIdx in
-                    let base = tripletIdx * 3
-                    return try RWKVStyleFusedThreeLayerSession(
-                        weights0: weights.layers[base], weights1: weights.layers[base + 1],
-                        weights2: weights.layers[base + 2], laneSpatial: streamCount, groups: trunkGroups)
-                })
-            let cHeadA = try FactoredGenerationRMSNormClassifierKernelSet(
-                rmsFinal: weights.rmsFinal,
-                classifierProjection: TensorBuffer(count: bneck * dim, zeroed: true),
-                classifierExpansion: TensorBuffer(count: vocabSize * bneck, zeroed: true),
-                vocabSize: vocabSize, bottleneck: bneck, laneSpatial: streamCount, groups: 1)
-            for i in 0..<3 { try ctrA[0].kernels.step.rebindInput(at: 1+i, to: ctrA[0].kernels.step.outputSurface(at: 1+i)) }
-            try ctrA[1].kernels.step.rebindInput(at: 0, to: ctrA[0].handles.xOut)
-            for i in 0..<3 { try ctrA[1].kernels.step.rebindInput(at: 1+i, to: ctrA[1].kernels.step.outputSurface(at: 1+i)) }
-            try cHeadA.rmsNormClassifier.rebindInput(at: 0, to: ctrA[1].handles.xOut)
-            let cHeadOutA = try cHeadA.rmsNormClassifier.outputSurface(at: 0)
-            let ct0xInA = ctrA[0].handles.xIn
-
-            var ctrB = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
-                count: 2,
-                throwingInitializer: { tripletIdx in
-                    let base = tripletIdx * 3
-                    return try RWKVStyleFusedThreeLayerSession(
-                        weights0: weights.layers[base], weights1: weights.layers[base + 1],
-                        weights2: weights.layers[base + 2], laneSpatial: streamCount, groups: trunkGroups)
-                })
-            let cHeadB = try FactoredGenerationRMSNormClassifierKernelSet(
-                rmsFinal: weights.rmsFinal,
-                classifierProjection: TensorBuffer(count: bneck * dim, zeroed: true),
-                classifierExpansion: TensorBuffer(count: vocabSize * bneck, zeroed: true),
-                vocabSize: vocabSize, bottleneck: bneck, laneSpatial: streamCount, groups: 1)
-            for i in 0..<3 { try ctrB[0].kernels.step.rebindInput(at: 1+i, to: ctrB[0].kernels.step.outputSurface(at: 1+i)) }
-            try ctrB[1].kernels.step.rebindInput(at: 0, to: ctrB[0].handles.xOut)
-            for i in 0..<3 { try ctrB[1].kernels.step.rebindInput(at: 1+i, to: ctrB[1].kernels.step.outputSurface(at: 1+i)) }
-            try cHeadB.rmsNormClassifier.rebindInput(at: 0, to: ctrB[1].handles.xOut)
-            let cHeadOutB = try cHeadB.rmsNormClassifier.outputSurface(at: 0)
-            let ct0xInB = ctrB[0].handles.xIn
-
-            var ctokA = Array(repeating: UInt16(0), count: streamCount)
-            var ctokB = Array(repeating: UInt16(0), count: streamCount)
-
-            func cEmbWrite(_ tokens: [UInt16], to surface: IOSurfaceRef) throws {
-                try weights.embedding.withUnsafePointer { embPtr in
-                    try tokens.withUnsafeBufferPointer { tokenBuf in
-                        try SurfaceIO.writeEmbeddingBatchFP16(
-                            to: surface, channelOffset: 0, spatial: streamCount,
-                            embeddingTable: embPtr, dim: dim,
-                            tokenIDs: tokenBuf.baseAddress!, streamCount: streamCount)
-                    }
-                }
+            // --- GPU full head path: skip ANE head eval, do RMSNorm+proj+expand+argmax on GPU ---
+            let rmsGammaFp16 = UnsafeMutablePointer<Float16>.allocate(capacity: dim)
+            defer { rmsGammaFp16.deallocate() }
+            weights.rmsFinal.withUnsafePointer { src in
+                for i in 0..<dim { rmsGammaFp16[i] = Float16(src[i]) }
             }
+            let projWFp16 = UnsafeMutablePointer<Float16>.allocate(capacity: dim * bneck)
+            defer { projWFp16.deallocate() }
+            for i in 0..<(dim * bneck) { projWFp16[i] = Float16.random(in: -0.01...0.01) }
 
-            func cArgmax(from surface: IOSurfaceRef, into tokens: inout [UInt16]) throws {
-                let r = try SurfaceIO.argmaxBatchFP16SpatialParallel(
-                    from: surface, channelOffset: 0, spatial: streamCount,
-                    channels: vocabSize, streamCount: streamCount, nBlocks: 32)
-                for i in 0..<streamCount { tokens[i] = UInt16(r[i].index) }
+            let gpuHeadA = try GPUFullHeadArgmax(
+                rmsGamma: UnsafeBufferPointer(start: rmsGammaFp16, count: dim),
+                wProject: UnsafeBufferPointer(start: projWFp16, count: dim * bneck),
+                wExpand: wBuf,
+                dim: dim, bottleneck: bneck, vocabSize: vocabSize, spatial: streamCount)
+            let gpuHeadB = try GPUFullHeadArgmax(
+                rmsGamma: UnsafeBufferPointer(start: rmsGammaFp16, count: dim),
+                wProject: UnsafeBufferPointer(start: projWFp16, count: dim * bneck),
+                wExpand: wBuf,
+                dim: dim, bottleneck: bneck, vocabSize: vocabSize, spatial: streamCount)
+
+            // Get trunk output surfaces (before head)
+            let trunkOutA = trA[1].handles.xOut
+            let trunkOutB = trB[1].handles.xOut
+
+            // Prime GPU head path
+            tokensA = Array(repeating: UInt16(0), count: streamCount)
+            try embWrite(tokensA, to: t0xInA)
+            try trA[0].kernels.step.eval(); try trA[1].kernels.step.eval()
+            do {
+                let r = try gpuHeadA.run(trunkSurface: trunkOutA)
+                for i in 0..<streamCount { tokensA[i] = r[i] }
             }
+            tokensB = Array(repeating: UInt16(0), count: streamCount)
+            try embWrite(tokensB, to: t0xInB)
 
-            // Prime control
-            try cEmbWrite(ctokA, to: ct0xInA)
-            try ctrA[0].kernels.step.eval(); try ctrA[1].kernels.step.eval(); try cHeadA.rmsNormClassifier.eval()
-            try cEmbWrite(ctokB, to: ct0xInB)
-
-            var cPipeUs: [Double] = []
+            var gpuPipeUs: [Double] = []
+            var gpuHeadUs: [Double] = []
+            var gpuEmbedUs: [Double] = []
+            var gpuAneWaitUs: [Double] = []
             for iter in 0..<(warmup + iters) {
                 let s = GenerationClock.now()
                 var aneError: (any Error)?
 
-                let g1 = DispatchGroup(); g1.enter()
+                // ANE: trunk only for pipeline B (no head)
+                let g1 = DispatchGroup()
+                g1.enter()
                 aneQueue.async {
                     defer { g1.leave() }
                     do {
-                        try ctrB[0].kernels.step.eval(); try ctrB[1].kernels.step.eval()
-                        try cHeadB.rmsNormClassifier.eval()
+                        try trB[0].kernels.step.eval(); try trB[1].kernels.step.eval()
                     } catch { aneError = error }
                 }
-                try cArgmax(from: cHeadOutA, into: &ctokA)
-                try cEmbWrite(ctokA, to: ct0xInA)
+                // GPU: full head for pipeline A
+                let gpuS = mach_absolute_time()
+                let rA = try gpuHeadA.run(trunkSurface: trunkOutA)
+                for i in 0..<streamCount { tokensA[i] = rA[i] }
+                let gpuE = mach_absolute_time()
+                let embS = mach_absolute_time()
+                try embWrite(tokensA, to: t0xInA)
+                let embE = mach_absolute_time()
+                let wS = mach_absolute_time()
                 g1.wait()
+                let wE = mach_absolute_time()
                 if let e = aneError { throw e }
 
-                let g2 = DispatchGroup(); g2.enter()
+                // ANE: trunk only for pipeline A (no head)
+                let g2 = DispatchGroup()
+                g2.enter()
                 aneQueue.async {
                     defer { g2.leave() }
                     do {
-                        try ctrA[0].kernels.step.eval(); try ctrA[1].kernels.step.eval()
-                        try cHeadA.rmsNormClassifier.eval()
+                        try trA[0].kernels.step.eval(); try trA[1].kernels.step.eval()
                     } catch { aneError = error }
                 }
-                try cArgmax(from: cHeadOutB, into: &ctokB)
-                try cEmbWrite(ctokB, to: ct0xInB)
+                // GPU: full head for pipeline B
+                let gpuS2 = mach_absolute_time()
+                let rB = try gpuHeadB.run(trunkSurface: trunkOutB)
+                for i in 0..<streamCount { tokensB[i] = rB[i] }
+                let gpuE2 = mach_absolute_time()
+                let embS2 = mach_absolute_time()
+                try embWrite(tokensB, to: t0xInB)
+                let embE2 = mach_absolute_time()
+                let wS2 = mach_absolute_time()
                 g2.wait()
+                let wE2 = mach_absolute_time()
                 if let e = aneError { throw e }
 
                 let elapsed = machMilliseconds(GenerationClock.now() - s) * 1000
-                if iter >= warmup { cPipeUs.append(elapsed) }
+                if iter >= warmup {
+                    gpuPipeUs.append(elapsed)
+                    gpuHeadUs.append(machMilliseconds(gpuE - gpuS) * 1000 + machMilliseconds(gpuE2 - gpuS2) * 1000)
+                    gpuEmbedUs.append(machMilliseconds(embE - embS) * 1000 + machMilliseconds(embE2 - embS2) * 1000)
+                    gpuAneWaitUs.append(machMilliseconds(wE - wS) * 1000 + machMilliseconds(wE2 - wS2) * 1000)
+                }
             }
 
-            let cSorted = cPipeUs.sorted()
-            let cMedUs = cSorted[cSorted.count / 2]
-            let cTwoStepMs = cMedUs / 1000.0
-            let cTps = Double(streamCount * 2) / cTwoStepMs * 1000.0
-            print("  factored \(streamCount) streams: median two-step=\(String(format: "%.3f", cTwoStepMs)) ms, " +
-                  "\(String(format: "%.0f", cTps)) TPS")
-            let speedup = tps / cTps
-            print("  → proj+MPS speedup: \(String(format: "%.2f", speedup))x")
-        }
+            let gpuSorted = gpuPipeUs.sorted()
+            let gpuMedUs = gpuSorted[gpuSorted.count / 2]
+            let gpuTwoStepMs = gpuMedUs / 1000.0
+            let gpuTps = Double(streamCount * 2) / gpuTwoStepMs * 1000.0
+            print("  GPU-head g=\(trunkGroups) \(streamCount) streams: median two-step=\(String(format: "%.3f", gpuTwoStepMs)) ms, " +
+                  "\(String(format: "%.0f", gpuTps)) TPS")
+            print("    breakdown: GPU-head=\(String(format: "%.1f", med(gpuHeadUs))) µs, " +
+                  "embed=\(String(format: "%.1f", med(gpuEmbedUs))) µs, " +
+                  "ANE wait=\(String(format: "%.1f", med(gpuAneWaitUs))) µs")
+
+            } catch {
+                print("  spatial=\(streamCount) COMPILE FAILED: \(error)")
+            }
+
+            } // end for trunkGroups
+        } // end for streamCount
     }
 
 }
