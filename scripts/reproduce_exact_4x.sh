@@ -485,6 +485,7 @@ jq -s \
   per_run_control_backends: (map(.control_backend // null)),
   per_run_two_step_backends: (map(.two_step_backend // null)),
   per_run_output_head_backends: (map(.output_head_backend // null)),
+  per_run_layer_counts: (map(.layer_count // null)),
   results_dir: $dir,
   timestamp: $ts,
   git_commit: $commit,
@@ -673,6 +674,15 @@ for backend_field in control_backend two_step_backend output_head_backend; do
     gate_warnings="${gate_warnings}BACKEND_MISMATCH: ${backend_field} inconsistent with contract (${expected}): ${backend_mismatch}\n"
   fi
 done
+
+# Layer count consistency check
+layer_count_mismatch="$(jq -s --argjson expected "$LAYER_COUNT" \
+  'map(.layer_count // null) | map(select(. != $expected)) | if length > 0 then . else empty end' \
+  "${valid_runs[@]}" 2>/dev/null || echo "")"
+if [[ -n "$layer_count_mismatch" ]]; then
+  gate_status="fail"
+  gate_warnings="${gate_warnings}LAYER_COUNT_MISMATCH: runs reported layer counts inconsistent with contract ($LAYER_COUNT): ${layer_count_mismatch}\n"
+fi
 
 if [[ "$all_parity_match" != "true" ]]; then
   gate_status="fail"
