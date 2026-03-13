@@ -584,6 +584,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         "probe_timestamp": probeTimestamp,
         "probe_wall_elapsed_s": probeElapsedS,
         "hostname": ProcessInfo.processInfo.hostName,
+        "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
         "mode": options.mode.rawValue,
         "control_backend": describe(options.controlBackend),
         "two_step_backend": describe(options.twoStepBackend),
