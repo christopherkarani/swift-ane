@@ -596,6 +596,7 @@ private func comparePayload(options: Options) throws -> [String: Any] {
         "trunk_lane_spatial": options.trunkLaneSpatial,
         "output_head_lane_spatial": options.outputHeadLaneSpatial,
         "prompt_tokens": prompt.map(Int.init),
+        "measured_iteration_count": controlRawLatencies.count,
         "parity_status": exactParity ? "match" : "mismatch",
         "parity_match_count": parityMatchCount,
         "parity_total": options.maxNewTokens,
