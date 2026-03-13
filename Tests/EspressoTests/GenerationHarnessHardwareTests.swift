@@ -1588,10 +1588,23 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         XCTAssertTrue(ane.samples.allSatisfy { $0.medianMsPerToken > 0 })
         XCTAssertTrue(coreml.samples.allSatisfy { $0.medianMsPerToken > 0 })
 
+        // Pipelined double-buffer at 1024 streams (2×1024 = 2048 total)
+        let pipelined = try benchmarkPipelinedGeneration(
+            layerCount: 6,
+            maxNewTokens: maxNewTokens,
+            warmup: warmup,
+            iterations: iterations,
+            streamCount: 1024,
+            groups: 8,
+            headGroups: 1
+        )
+
         print("=== ANE Batched (g=16, headG=16) ===")
         for sample in ane.samples {
             print("  batched ane streams=\(sample.streamCount) median_ms_token=\(String(format: "%.4f", sample.medianMsPerToken)) aggregate_tps=\(String(format: "%.1f", sample.aggregateTokensPerSecond)) per_stream_tps=\(String(format: "%.1f", sample.perStreamTokensPerSecond)) compile=\(String(format: "%.0f", sample.compileTimeMs)) round_ms=\(String(format: "%.3f", sample.medianRoundLatencyMs))")
         }
+        print("=== ANE Pipelined (2x1024, g=8, headG=1) ===")
+        print("  pipelined ane streams=\(pipelined.streamCount) median_ms_token=\(String(format: "%.4f", pipelined.medianMsPerToken)) aggregate_tps=\(String(format: "%.1f", pipelined.aggregateTokensPerSecond)) per_stream_tps=\(String(format: "%.1f", pipelined.perStreamTokensPerSecond)) compile=\(String(format: "%.0f", pipelined.compileTimeMs)) round_ms=\(String(format: "%.3f", pipelined.medianRoundLatencyMs))")
         print("=== CoreML Concurrent ===")
         for sample in coreml.samples {
             print("  concurrent coreml streams=\(sample.streamCount) median_ms_token=\(String(format: "%.4f", sample.medianMsPerToken)) aggregate_tps=\(String(format: "%.1f", sample.aggregateTokensPerSecond)) per_stream_tps=\(String(format: "%.1f", sample.perStreamTokensPerSecond)) compile=\(String(format: "%.0f", sample.compileTimeMs)) round_ms=\(String(format: "%.3f", sample.medianRoundLatencyMs))")
@@ -1607,6 +1620,16 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                 print("  streams=\(sc) ane=\(String(format: "%.1f", a.aggregateTokensPerSecond)) coreml=\(String(format: "%.1f", c.aggregateTokensPerSecond)) speedup=\(String(format: "%.1fx", speedup))")
             }
         }
+        // Peak comparison
+        let peakANE = max(
+            ane.samples.map(\.aggregateTokensPerSecond).max() ?? 0,
+            pipelined.aggregateTokensPerSecond
+        )
+        let peakCoreML = coreml.samples.map(\.aggregateTokensPerSecond).max() ?? 1
+        print("=== Peak ===")
+        print("  ANE peak: \(String(format: "%.1f", peakANE)) TPS")
+        print("  CoreML peak: \(String(format: "%.1f", peakCoreML)) TPS")
+        print("  Peak speedup: \(String(format: "%.1fx", peakANE / peakCoreML))")
     }
 
     func test_batched_multistream_scaling_reports_aggregate_throughput_on_hardware() throws {
@@ -2416,6 +2439,153 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         for streamIdx in 0..<streamCount {
             tokens[streamIdx] = UInt16(argmaxResults[streamIdx].index)
         }
+    }
+
+    /// Pipelined double-buffer generation: 2 independent pipeline halves, CPU argmax+embed overlaps ANE eval.
+    /// Returns results as a ConcurrentGenerationScalingReport for comparison with batched/concurrent.
+    private func benchmarkPipelinedGeneration(
+        layerCount: Int,
+        maxNewTokens: Int,
+        warmup: Int,
+        iterations: Int,
+        streamCount: Int,
+        groups: Int = 8,
+        headGroups: Int = 1,
+        bottleneck: Int = 64
+    ) throws -> ConcurrentGenerationScalingSample {
+        let dim = ModelConfig.dim
+        let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount)
+        let vocabSize = weights.vocabSize
+        let tripletCount = layerCount / 3
+
+        let compileStart = GenerationClock.now()
+
+        // Pipeline A
+        var trA = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+            count: tripletCount,
+            throwingInitializer: { tripletIdx in
+                let base = tripletIdx * 3
+                return try RWKVStyleFusedThreeLayerSession(
+                    weights0: weights.layers[base], weights1: weights.layers[base + 1],
+                    weights2: weights.layers[base + 2], laneSpatial: streamCount, groups: groups)
+            })
+        let headA = try FactoredGenerationRMSNormClassifierKernelSet(
+            rmsFinal: weights.rmsFinal,
+            classifierProjection: TensorBuffer(count: bottleneck * dim, zeroed: true),
+            classifierExpansion: TensorBuffer(count: vocabSize * bottleneck, zeroed: true),
+            vocabSize: vocabSize, bottleneck: bottleneck, laneSpatial: streamCount, groups: headGroups)
+        // Zero-copy rebinding for A
+        for i in 0..<3 { try trA[0].kernels.step.rebindInput(at: 1+i, to: trA[0].kernels.step.outputSurface(at: 1+i)) }
+        if tripletCount > 1 {
+            try trA[1].kernels.step.rebindInput(at: 0, to: trA[0].handles.xOut)
+            for i in 0..<3 { try trA[1].kernels.step.rebindInput(at: 1+i, to: trA[1].kernels.step.outputSurface(at: 1+i)) }
+            try headA.rmsNormClassifier.rebindInput(at: 0, to: trA[tripletCount - 1].handles.xOut)
+        } else {
+            try headA.rmsNormClassifier.rebindInput(at: 0, to: trA[0].handles.xOut)
+        }
+        let headOutA = try headA.rmsNormClassifier.outputSurface(at: 0)
+        let t0xInA = trA[0].handles.xIn
+
+        // Pipeline B
+        var trB = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
+            count: tripletCount,
+            throwingInitializer: { tripletIdx in
+                let base = tripletIdx * 3
+                return try RWKVStyleFusedThreeLayerSession(
+                    weights0: weights.layers[base], weights1: weights.layers[base + 1],
+                    weights2: weights.layers[base + 2], laneSpatial: streamCount, groups: groups)
+            })
+        let headB = try FactoredGenerationRMSNormClassifierKernelSet(
+            rmsFinal: weights.rmsFinal,
+            classifierProjection: TensorBuffer(count: bottleneck * dim, zeroed: true),
+            classifierExpansion: TensorBuffer(count: vocabSize * bottleneck, zeroed: true),
+            vocabSize: vocabSize, bottleneck: bottleneck, laneSpatial: streamCount, groups: headGroups)
+        for i in 0..<3 { try trB[0].kernels.step.rebindInput(at: 1+i, to: trB[0].kernels.step.outputSurface(at: 1+i)) }
+        if tripletCount > 1 {
+            try trB[1].kernels.step.rebindInput(at: 0, to: trB[0].handles.xOut)
+            for i in 0..<3 { try trB[1].kernels.step.rebindInput(at: 1+i, to: trB[1].kernels.step.outputSurface(at: 1+i)) }
+            try headB.rmsNormClassifier.rebindInput(at: 0, to: trB[tripletCount - 1].handles.xOut)
+        } else {
+            try headB.rmsNormClassifier.rebindInput(at: 0, to: trB[0].handles.xOut)
+        }
+        let headOutB = try headB.rmsNormClassifier.outputSurface(at: 0)
+        let t0xInB = trB[0].handles.xIn
+
+        let compileTimeMs = machMilliseconds(GenerationClock.now() - compileStart)
+
+        var tokensA = Array(repeating: UInt16(0), count: streamCount)
+        var tokensB = Array(repeating: UInt16(0), count: streamCount)
+
+        func embWrite(_ tokens: [UInt16], to surface: IOSurfaceRef) throws {
+            try weights.embedding.withUnsafePointer { embPtr in
+                try tokens.withUnsafeBufferPointer { tokenBuf in
+                    try SurfaceIO.writeEmbeddingBatchFP16(
+                        to: surface, channelOffset: 0, spatial: streamCount,
+                        embeddingTable: embPtr, dim: dim,
+                        tokenIDs: tokenBuf.baseAddress!, streamCount: streamCount)
+                }
+            }
+        }
+
+        func argmax(from surface: IOSurfaceRef, into tokens: inout [UInt16]) throws {
+            let r = try SurfaceIO.argmaxBatchFP16SpatialParallel(
+                from: surface, channelOffset: 0, spatial: streamCount,
+                channels: vocabSize, streamCount: streamCount, nBlocks: 32)
+            for i in 0..<streamCount { tokens[i] = UInt16(r[i].index) }
+        }
+
+        func evalAll(_ tr: inout LayerStorage<RWKVStyleFusedThreeLayerSession>, head: borrowing FactoredGenerationRMSNormClassifierKernelSet) throws {
+            for t in 0..<tripletCount { try tr[t].kernels.step.eval() }
+            try head.rmsNormClassifier.eval()
+        }
+
+        // Prime pipeline A
+        try embWrite(tokensA, to: t0xInA)
+        try evalAll(&trA, head: headA)
+        try embWrite(tokensB, to: t0xInB)
+
+        // Pipelined loop: each iteration does 2 half-cycles (A+B), generating maxNewTokens per pipeline
+        var roundLatenciesMs: [Double] = []
+        roundLatenciesMs.reserveCapacity(iterations)
+        for iter in 0..<(warmup + iterations) {
+            let s = GenerationClock.now()
+
+            for _ in 0..<maxNewTokens {
+                // Half 1: eval B on background, CPU processes A
+                var aneError: (any Error)?
+                let sem1 = DispatchSemaphore(value: 0)
+                DispatchQueue.global(qos: .userInteractive).async { [self] in
+                    do { try evalAll(&trB, head: headB) } catch { aneError = error }
+                    sem1.signal()
+                }
+                try argmax(from: headOutA, into: &tokensA)
+                try embWrite(tokensA, to: t0xInA)
+                sem1.wait()
+                if let e = aneError { throw e }
+
+                // Half 2: eval A on background, CPU processes B
+                let sem2 = DispatchSemaphore(value: 0)
+                DispatchQueue.global(qos: .userInteractive).async { [self] in
+                    do { try evalAll(&trA, head: headA) } catch { aneError = error }
+                    sem2.signal()
+                }
+                try argmax(from: headOutB, into: &tokensB)
+                try embWrite(tokensB, to: t0xInB)
+                sem2.wait()
+                if let e = aneError { throw e }
+            }
+
+            if iter >= warmup {
+                roundLatenciesMs.append(machMilliseconds(GenerationClock.now() - s))
+            }
+        }
+
+        return ConcurrentGenerationScalingSample(
+            streamCount: streamCount * 2,  // 2 pipeline halves
+            tokensPerStream: maxNewTokens,
+            compileTimeMs: compileTimeMs,
+            roundLatenciesMs: roundLatenciesMs
+        )
     }
 
     // MARK: - Component timing probe
