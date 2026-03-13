@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Bump this when the harness summary.json contract changes (new fields, renamed keys, etc.).
+HARNESS_VERSION=3
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH_PATH="${SCRATCH_PATH:-/tmp/espresso-ane-multitoken-release}"
 RESULTS_DIR="${RESULTS_DIR:-$ROOT/results/exact-4x-$(date +%Y%m%d-%H%M%S)}"
@@ -395,6 +398,7 @@ speedup_stddev="$(jq -s 'map(.two_step_speedup_vs_coreml) | (length) as $n | (ad
 
 # Machine-readable aggregate JSON combining all per-run data with summary stats
 jq -s \
+  --argjson harness_version "$HARNESS_VERSION" \
   --arg dir "$RESULTS_DIR" \
   --arg ts "$(date -Iseconds)" \
   --arg commit "$(git -C "$ROOT" rev-parse HEAD)" \
@@ -432,6 +436,7 @@ jq -s \
   --arg generation_sha256 "${GENERATION_MODEL_SHA256:-}" \
   --argjson run_files "$(printf '%s\n' "${valid_runs[@]}" | while read -r f; do basename "$f"; done | jq -nR '[inputs | select(length > 0)]')" \
 '{
+  harness_version: $harness_version,
   probe_version: (map(.probe_version // null) | .[0]),
   results_dir: $dir,
   timestamp: $ts,
