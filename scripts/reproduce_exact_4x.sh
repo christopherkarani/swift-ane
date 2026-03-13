@@ -367,8 +367,9 @@ for f in "$RESULTS_DIR"/run-*.json; do
   fi
 done
 
-# Capture disk free at end of benchmark runs (before aggregation, so summary.json gets the real value)
+# Capture end-of-benchmark environment (before aggregation, so summary.json gets real values)
 DISK_FREE_MB_END="$(df -m "$RESULTS_DIR" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)"
+POWER_SOURCE_END="$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)"
 
 # Collect valid run JSONs (skip empty or malformed files from failed runs)
 valid_runs=()
@@ -526,6 +527,7 @@ jq -s \
   --arg macos_version "$(sw_vers -productVersion 2>/dev/null || echo unknown)" \
   --arg macos_build "$(sw_vers -buildVersion 2>/dev/null || echo unknown)" \
   --arg power_source "$(pmset -g batt 2>/dev/null | head -1 | sed "s/.*'\(.*\)'.*/\1/" || echo unknown)" \
+  --arg power_source_end "$POWER_SOURCE_END" \
   --arg chip "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)" \
   --argjson ncpu "$(sysctl -n hw.ncpu 2>/dev/null || echo null)" \
   --argjson physical_memory_gb "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))" \
@@ -572,7 +574,7 @@ jq -s \
   timestamp: $ts,
   git_commit: $commit,
   git_branch: $branch,
-  host: {hw_model: $hw_model, chip: $chip, ncpu: $ncpu, physical_memory_gb: $physical_memory_gb, thermal_pressure: $thermal_pressure, thermal_pressure_end: $thermal_pressure_end, load_average: $load_avg, load_average_end: $load_avg_end, memory_free_pct: $memory_free_pct, disk_free_mb_start: $disk_free_mb_start, disk_free_mb_end: $disk_free_mb_end, macos_version: $macos_version, macos_build: $macos_build, power_source: $power_source},
+  host: {hw_model: $hw_model, chip: $chip, ncpu: $ncpu, physical_memory_gb: $physical_memory_gb, thermal_pressure: $thermal_pressure, thermal_pressure_end: $thermal_pressure_end, load_average: $load_avg, load_average_end: $load_avg_end, memory_free_pct: $memory_free_pct, disk_free_mb_start: $disk_free_mb_start, disk_free_mb_end: $disk_free_mb_end, macos_version: $macos_version, macos_build: $macos_build, power_source: $power_source, power_source_end: $power_source_end},
   toolchain: {swift_version: $swift_version, jq_version: $jq_version},
   benchmark_contract: {
     contract_hash: $contract_hash,

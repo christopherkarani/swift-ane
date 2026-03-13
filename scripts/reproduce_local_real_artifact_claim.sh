@@ -392,6 +392,7 @@ fi
       "harness_load_average=\(.host.load_average | na)",
       "harness_load_average_end=\(.host.load_average_end | na)",
       "harness_power_source=\(.host.power_source | na)",
+      "harness_power_source_end=\(.host.power_source_end | na)",
       "harness_swift_version=\(.toolchain.swift_version | na)",
       "harness_jq_version=\(.toolchain.jq_version | na)",
       "harness_ncpu=\(.host.ncpu | na)",
