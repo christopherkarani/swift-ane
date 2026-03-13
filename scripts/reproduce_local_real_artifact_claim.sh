@@ -199,6 +199,11 @@ if [[ -f "$PUBLIC_RESULTS_DIR/summary.json" ]]; then
   elif [[ "$actual_hv" != "$EXPECTED_HARNESS_VERSION" ]]; then
     echo "WARNING: harness version mismatch: expected=$EXPECTED_HARNESS_VERSION actual=$actual_hv" >&2
   fi
+  # Also validate probe version
+  actual_pv="$(jq -r '.probe_version // empty' "$PUBLIC_RESULTS_DIR/summary.json" 2>/dev/null || true)"
+  if [[ -n "$actual_pv" && "$actual_pv" != "7" ]]; then
+    echo "WARNING: probe version mismatch: expected=7 actual=$actual_pv" >&2
+  fi
 fi
 
 {
