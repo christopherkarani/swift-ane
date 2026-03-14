@@ -6,7 +6,7 @@
 
 #if defined(__aarch64__) || defined(__arm64__)
 #include <arm_neon.h>
-#define ARGMAX_MAX_NVECS 4096  /* supports up to spatial=32768 */
+#define ARGMAX_MAX_NVECS 64  /* supports up to spatial=512 (512/8=64) */
 #endif
 
 #include "ane_interop.h"
@@ -506,6 +506,7 @@ bool ane_interop_io_argmax_batch_fp16_spatial(
     if (!surface || !out_indices || !out_values) return false;
     if (ch_off < 0 || spatial <= 0 || channels <= 0 || stream_count <= 0) return false;
     if (stream_count > spatial) return false;
+    if (channels > 65535) return false;  /* uint16_t index overflow guard */
     if (channels > INT_MAX - ch_off) return false;
 
     size_t spatialSz = (size_t)spatial;
@@ -999,9 +1000,10 @@ typedef struct {
     int ch_end;
     _Float16 *partial_values;   /* [spatial] */
     uint16_t *partial_indices;  /* [spatial] */
+    bool ok;
 } argmax_block_ctx;
 
-static void neon_partial_argmax(void *ctx_ptr) {
+static bool neon_partial_argmax(void *ctx_ptr) {
     argmax_block_ctx *ctx = (argmax_block_ctx *)ctx_ptr;
     const _Float16 *base = ctx->base;
     const int spatial = ctx->spatial;
@@ -1009,9 +1011,24 @@ static void neon_partial_argmax(void *ctx_ptr) {
     const int ch_end = ctx->ch_end;
     const int nvecs = spatial / 8;
     const size_t spatialSz = (size_t)spatial;
+    float16x8_t stackBestV[ARGMAX_MAX_NVECS];
+    uint16x8_t stackBestI[ARGMAX_MAX_NVECS];
+    float16x8_t *bestV = stackBestV;
+    uint16x8_t *bestI = stackBestI;
+    bool usesHeap = false;
 
-    float16x8_t bestV[ARGMAX_MAX_NVECS];
-    uint16x8_t bestI[ARGMAX_MAX_NVECS];
+    if (nvecs <= 0 || ch_start >= ch_end) return false;
+
+    if (nvecs > ARGMAX_MAX_NVECS) {
+        bestV = (float16x8_t *)malloc((size_t)nvecs * sizeof(*bestV));
+        bestI = (uint16x8_t *)malloc((size_t)nvecs * sizeof(*bestI));
+        if (!bestV || !bestI) {
+            free(bestV);
+            free(bestI);
+            return false;
+        }
+        usesHeap = true;
+    }
 
     const _Float16 *row0 = base + (size_t)ch_start * spatialSz;
     for (int v = 0; v < nvecs; v++) {
@@ -1034,6 +1051,11 @@ static void neon_partial_argmax(void *ctx_ptr) {
         vst1q_f16(ctx->partial_values + v * 8, bestV[v]);
         vst1q_u16(ctx->partial_indices + v * 8, bestI[v]);
     }
+    if (usesHeap) {
+        free(bestV);
+        free(bestI);
+    }
+    return true;
 }
 
 #endif /* __aarch64__ */
@@ -1059,6 +1081,7 @@ bool ane_interop_io_argmax_batch_fp16_spatial_parallel(
     if (!surface || !out_indices || !out_values) return false;
     if (ch_off < 0 || spatial <= 0 || channels <= 0 || stream_count <= 0) return false;
     if (stream_count > spatial) return false;
+    if (channels > 65535) return false;  /* uint16_t index overflow guard */
     if (spatial > 32768 || (spatial % 8) != 0) {
         return ane_interop_io_argmax_batch_fp16_spatial(
             surface, ch_off, spatial, channels, stream_count,
@@ -1104,13 +1127,23 @@ bool ane_interop_io_argmax_batch_fp16_spatial_parallel(
             ctxs[b].ch_end = (b == n_blocks - 1) ? channels : (b + 1) * chPerBlock;
             ctxs[b].partial_values = all_values + b * spatial;
             ctxs[b].partial_indices = all_indices + b * spatial;
+            ctxs[b].ok = false;
         }
 
         /* Dispatch parallel partial argmax */
         dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
         dispatch_apply((size_t)n_blocks, queue, ^(size_t block_idx) {
-            neon_partial_argmax(&ctxs[block_idx]);
+            ctxs[block_idx].ok = neon_partial_argmax(&ctxs[block_idx]);
         });
+
+        for (int b = 0; b < n_blocks; b++) {
+            if (!ctxs[b].ok) {
+                free(all_values);
+                free(all_indices);
+                free(ctxs);
+                goto cleanup;
+            }
+        }
 
         /* Merge: for each lane, find global best across all blocks */
         for (int s = 0; s < stream_count; s++) {
@@ -1160,7 +1193,7 @@ bool ane_interop_io_argmax_batch_fp16_spatial_nolock(
     if (ch_off < 0 || spatial <= 0 || channels <= 0 || stream_count <= 0) return false;
     if (stream_count > spatial) return false;
     if (channels > INT_MAX - ch_off) return false;
-    if (channels > (int)UINT16_MAX + 1) return false;
+    if (channels > (int)UINT16_MAX + 1) return false;  /* uint16_t index overflow guard */
     if (n_blocks <= 1) n_blocks = 1;
     if (n_blocks > 32) n_blocks = 32;
     if (channels < n_blocks * 2) n_blocks = 1;
@@ -1189,29 +1222,33 @@ bool ane_interop_io_argmax_batch_fp16_spatial_nolock(
 
     if (n_blocks <= 1) {
         /* Serial path */
-        int nvecs = spatial / 8;
-        float16x8_t bestV[ARGMAX_MAX_NVECS];
-        uint16x8_t bestI[ARGMAX_MAX_NVECS];
-        const _Float16 *row0 = src_offset;
-        for (int v = 0; v < nvecs; v++) {
-            bestV[v] = vld1q_f16(row0 + v * 8);
-            bestI[v] = vdupq_n_u16(0);
+        _Float16 *values = (_Float16 *)malloc(spatialSz * sizeof(_Float16));
+        uint16_t *indices = (uint16_t *)malloc(spatialSz * sizeof(uint16_t));
+        if (!values || !indices) {
+            free(values);
+            free(indices);
+            return false;
         }
-        for (int c = 1; c < channels; c++) {
-            const _Float16 *row = src_offset + (size_t)c * (size_t)spatial;
-            uint16x8_t cidx = vdupq_n_u16((uint16_t)c);
-            for (int v = 0; v < nvecs; v++) {
-                float16x8_t vals = vld1q_f16(row + v * 8);
-                uint16x8_t gt = vcgtq_f16(vals, bestV[v]);
-                bestV[v] = vbslq_f16(gt, vals, bestV[v]);
-                bestI[v] = vbslq_u16(gt, cidx, bestI[v]);
-            }
+        argmax_block_ctx ctx = {
+            .base = src_offset,
+            .spatial = spatial,
+            .ch_start = 0,
+            .ch_end = channels,
+            .partial_values = values,
+            .partial_indices = indices,
+            .ok = false,
+        };
+        if (!neon_partial_argmax(&ctx)) {
+            free(values);
+            free(indices);
+            return false;
         }
         for (int s = 0; s < stream_count; s++) {
-            int vec = s / 8, lane = s % 8;
-            out_indices[s] = (int)bestI[vec][lane];
-            out_values[s] = (float)bestV[vec][lane];
+            out_indices[s] = (int)indices[s];
+            out_values[s] = (float)values[s];
         }
+        free(values);
+        free(indices);
         return true;
     }
 
@@ -1232,12 +1269,22 @@ bool ane_interop_io_argmax_batch_fp16_spatial_nolock(
         ctxs[b].ch_end = (b == n_blocks - 1) ? channels : (b + 1) * chPerBlock;
         ctxs[b].partial_values = all_values + b * spatial;
         ctxs[b].partial_indices = all_indices + b * spatial;
+        ctxs[b].ok = false;
     }
 
     dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
     dispatch_apply((size_t)n_blocks, queue, ^(size_t block_idx) {
-        neon_partial_argmax(&ctxs[block_idx]);
+        ctxs[block_idx].ok = neon_partial_argmax(&ctxs[block_idx]);
     });
+
+    for (int b = 0; b < n_blocks; b++) {
+        if (!ctxs[b].ok) {
+            free(all_values);
+            free(all_indices);
+            free(ctxs);
+            return false;
+        }
+    }
 
     for (int s = 0; s < stream_count; s++) {
         _Float16 bestVal = all_values[s];
@@ -1276,9 +1323,10 @@ typedef struct {
     int ch_end;                 /* one past last output channel */
     _Float16 *partial_values;   /* [spatial] best values */
     uint16_t *partial_indices;  /* [spatial] best indices */
+    bool ok;
 } fused_exp_argmax_ctx;
 
-static void neon_fused_expansion_argmax(fused_exp_argmax_ctx *ctx) {
+static bool neon_fused_expansion_argmax(fused_exp_argmax_ctx *ctx) {
     const int spatial = ctx->spatial;
     const int groups = ctx->groups;
     const int cols_per_group = ctx->cols_per_group;
@@ -1287,9 +1335,29 @@ static void neon_fused_expansion_argmax(fused_exp_argmax_ctx *ctx) {
     const int nvecs = spatial / 8;
     const _Float16 *proj = ctx->proj;
     const _Float16 *weights = ctx->weights;
+    if (vocab_size > 65535) return false;
+    if (nvecs <= 0 || ctx->ch_start >= ctx->ch_end) return false;
 
-    float16x8_t bestV[ARGMAX_MAX_NVECS];
-    uint16x8_t bestI[ARGMAX_MAX_NVECS];
+    float16x8_t stackBestV[ARGMAX_MAX_NVECS];
+    uint16x8_t stackBestI[ARGMAX_MAX_NVECS];
+    float16x8_t stackAccum[ARGMAX_MAX_NVECS];
+    float16x8_t *bestV = stackBestV;
+    uint16x8_t *bestI = stackBestI;
+    float16x8_t *accum = stackAccum;
+    bool usesHeap = false;
+
+    if (nvecs > ARGMAX_MAX_NVECS) {
+        bestV = (float16x8_t *)malloc((size_t)nvecs * sizeof(*bestV));
+        bestI = (uint16x8_t *)malloc((size_t)nvecs * sizeof(*bestI));
+        accum = (float16x8_t *)malloc((size_t)nvecs * sizeof(*accum));
+        if (!bestV || !bestI || !accum) {
+            free(bestV);
+            free(bestI);
+            free(accum);
+            return false;
+        }
+        usesHeap = true;
+    }
 
     /* Initialize with -inf */
     float16x8_t neg_inf = vdupq_n_f16((_Float16)(-65504.0f));
@@ -1308,7 +1376,6 @@ static void neon_fused_expansion_argmax(fused_exp_argmax_ctx *ctx) {
         int proj_ch_base = g * cols_per_group;
 
         /* Compute logit[s] = sum_k(proj[proj_ch_base+k][s] * w_row[k]) for all s */
-        float16x8_t accum[ARGMAX_MAX_NVECS];
         for (int v = 0; v < nvecs; v++) accum[v] = vdupq_n_f16(0);
 
         for (int k = 0; k < cols_per_group; k++) {
@@ -1332,6 +1399,12 @@ static void neon_fused_expansion_argmax(fused_exp_argmax_ctx *ctx) {
         vst1q_f16(ctx->partial_values + v * 8, bestV[v]);
         vst1q_u16(ctx->partial_indices + v * 8, bestI[v]);
     }
+    if (usesHeap) {
+        free(bestV);
+        free(bestI);
+        free(accum);
+    }
+    return true;
 }
 
 #endif /* __aarch64__ */
@@ -1353,6 +1426,7 @@ bool ane_interop_fused_expansion_argmax_fp16(
     if (!proj_surface || !expansion_weights_fp16 || !out_indices || !out_values) return false;
     if (proj_ch_off < 0 || spatial <= 0 || bottleneck <= 0 || groups <= 0 || vocab_size <= 0) return false;
     if (stream_count <= 0 || stream_count > spatial) return false;
+    if (vocab_size > 65535) return false;  /* uint16_t index overflow guard */
     if (spatial > 32768 || (spatial % 8) != 0) return false;
     if (bottleneck % groups != 0 || vocab_size % groups != 0) return false;
     if (vocab_size > (int)UINT16_MAX + 1) return false;
@@ -1419,6 +1493,7 @@ bool ane_interop_fused_expansion_argmax_fp16(
         ctx.cols_per_group = cols_per_group;
         ctx.ch_start = 0;
         ctx.ch_end = vocab_size;
+        ctx.ok = false;
 
         _Float16 *values = (_Float16 *)malloc((size_t)spatial * sizeof(_Float16));
         uint16_t *indices = (uint16_t *)malloc((size_t)spatial * sizeof(uint16_t));
@@ -1426,7 +1501,12 @@ bool ane_interop_fused_expansion_argmax_fp16(
         ctx.partial_values = values;
         ctx.partial_indices = indices;
 
-        neon_fused_expansion_argmax(&ctx);
+        if (!neon_fused_expansion_argmax(&ctx)) {
+            free(values);
+            free(indices);
+            free(proj_local);
+            return false;
+        }
 
         for (int s = 0; s < stream_count; s++) {
             out_indices[s] = (int)indices[s];
@@ -1457,12 +1537,23 @@ bool ane_interop_fused_expansion_argmax_fp16(
             ctxs[b].ch_end = (b == n_blocks - 1) ? vocab_size : (b + 1) * chPerBlock;
             ctxs[b].partial_values = all_values + b * spatial;
             ctxs[b].partial_indices = all_indices + b * spatial;
+            ctxs[b].ok = false;
         }
 
         dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
         dispatch_apply((size_t)n_blocks, queue, ^(size_t block_idx) {
-            neon_fused_expansion_argmax(&ctxs[block_idx]);
+            ctxs[block_idx].ok = neon_fused_expansion_argmax(&ctxs[block_idx]);
         });
+
+        for (int b = 0; b < n_blocks; b++) {
+            if (!ctxs[b].ok) {
+                free(all_values);
+                free(all_indices);
+                free(ctxs);
+                free(proj_local);
+                return false;
+            }
+        }
 
         /* Merge */
         for (int s = 0; s < stream_count; s++) {
