@@ -2,6 +2,67 @@ import Foundation
 import ANETypes
 import MILGenerator
 
+internal enum RWKVStyleFusedThreeLayerWeightValidation {
+    @inline(__always)
+    internal static func validateDenseWeight(
+        _ buffer: borrowing TensorBuffer,
+        rows: Int,
+        cols: Int,
+        label: String
+    ) throws(ANEError) {
+        let expectedCount = rows * cols
+        guard buffer.count == expectedCount else {
+            throw .invalidArguments(
+                "\(label) count \(buffer.count) must equal \(expectedCount) (\(rows)x\(cols))"
+            )
+        }
+    }
+
+    @inline(__always)
+    internal static func validateGroupedWeight(
+        _ buffer: borrowing TensorBuffer,
+        rows: Int,
+        colsPerGroup: Int,
+        groups: Int,
+        label: String
+    ) throws(ANEError) {
+        let groupedCount = rows * colsPerGroup
+        if groups == 1 {
+            guard buffer.count == groupedCount else {
+                throw .invalidArguments(
+                    "\(label) count \(buffer.count) must equal \(groupedCount) (\(rows)x\(colsPerGroup))"
+                )
+            }
+            return
+        }
+
+        let denseCount = groupedCount * groups
+        guard buffer.count == groupedCount || buffer.count == denseCount else {
+            throw .invalidArguments(
+                "\(label) count \(buffer.count) must equal grouped \(groupedCount) or dense \(denseCount) for groups \(groups)"
+            )
+        }
+    }
+
+    internal static func validateLayer(
+        _ weights: borrowing RWKVStyleRecurrentWeights,
+        layerIndex: Int,
+        dim: Int,
+        colsPerGroup: Int,
+        groups: Int,
+        includeRMSNorm: Bool
+    ) throws(ANEError) {
+        let prefix = "weights\(layerIndex)"
+        if includeRMSNorm {
+            try validateDenseWeight(weights.rms, rows: 1, cols: dim, label: "\(prefix).rms")
+        }
+        try validateGroupedWeight(weights.Wx, rows: dim, colsPerGroup: colsPerGroup, groups: groups, label: "\(prefix).Wx")
+        try validateGroupedWeight(weights.Ws, rows: dim, colsPerGroup: colsPerGroup, groups: groups, label: "\(prefix).Ws")
+        try validateGroupedWeight(weights.Wd, rows: dim, colsPerGroup: colsPerGroup, groups: groups, label: "\(prefix).Wd")
+        try validateGroupedWeight(weights.Wo, rows: dim, colsPerGroup: colsPerGroup, groups: groups, label: "\(prefix).Wo")
+    }
+}
+
 public struct RWKVStyleFusedThreeLayerKernelSet: ~Copyable {
     public static let defaultLaneSpatial = 32
 
@@ -77,6 +138,33 @@ public struct RWKVStyleFusedThreeLayerKernelSet: ~Copyable {
         groups: Int = 1,
         includeRMSNorm: Bool = true
     ) throws(ANEError) -> ANEKernel {
+        let dim = ModelConfig.dim
+        let colsPerConv = dim / groups
+        try RWKVStyleFusedThreeLayerWeightValidation.validateLayer(
+            weights0,
+            layerIndex: 0,
+            dim: dim,
+            colsPerGroup: colsPerConv,
+            groups: groups,
+            includeRMSNorm: includeRMSNorm
+        )
+        try RWKVStyleFusedThreeLayerWeightValidation.validateLayer(
+            weights1,
+            layerIndex: 1,
+            dim: dim,
+            colsPerGroup: colsPerConv,
+            groups: groups,
+            includeRMSNorm: includeRMSNorm
+        )
+        try RWKVStyleFusedThreeLayerWeightValidation.validateLayer(
+            weights2,
+            layerIndex: 2,
+            dim: dim,
+            colsPerGroup: colsPerConv,
+            groups: groups,
+            includeRMSNorm: includeRMSNorm
+        )
+
         let spec = makeFusedStepSpec(weights0: weights0, weights1: weights1, weights2: weights2, laneSpatial: laneSpatial, groups: groups, includeRMSNorm: includeRMSNorm)
         return try ANEKernel(
             milText: spec.milText,
