@@ -41,10 +41,55 @@ public struct RWKVStyleFusedThreeLayerFactoredClassifierKernelSet: ~Copyable {
         guard dim.isMultiple(of: groups) else {
             throw .invalidArguments("dim \(dim) must be divisible by groups \(groups)")
         }
+        guard bottleneck.isMultiple(of: groups) else {
+            throw .invalidArguments("bottleneck \(bottleneck) must be divisible by groups \(groups)")
+        }
         let colsPerConv = dim / groups
         // Head convs are always dense (groups=1), so cols = full dim / bottleneck
         let projCols = dim
         let expCols = bottleneck
+        try RWKVStyleFusedThreeLayerWeightValidation.validateLayer(
+            weights0,
+            layerIndex: 0,
+            dim: dim,
+            colsPerGroup: colsPerConv,
+            groups: groups,
+            includeRMSNorm: true
+        )
+        try RWKVStyleFusedThreeLayerWeightValidation.validateLayer(
+            weights1,
+            layerIndex: 1,
+            dim: dim,
+            colsPerGroup: colsPerConv,
+            groups: groups,
+            includeRMSNorm: true
+        )
+        try RWKVStyleFusedThreeLayerWeightValidation.validateLayer(
+            weights2,
+            layerIndex: 2,
+            dim: dim,
+            colsPerGroup: colsPerConv,
+            groups: groups,
+            includeRMSNorm: true
+        )
+        try RWKVStyleFusedThreeLayerWeightValidation.validateDenseWeight(
+            rmsFinal,
+            rows: 1,
+            cols: dim,
+            label: "rmsFinal"
+        )
+        try RWKVStyleFusedThreeLayerWeightValidation.validateDenseWeight(
+            classifierProjection,
+            rows: bottleneck,
+            cols: projCols,
+            label: "classifierProjection"
+        )
+        try RWKVStyleFusedThreeLayerWeightValidation.validateDenseWeight(
+            classifierExpansion,
+            rows: vocabSize,
+            cols: expCols,
+            label: "classifierExpansion"
+        )
         let generator = RWKVStyleFusedThreeLayerFactoredClassifierGenerator(
             vocabSize: vocabSize,
             bottleneck: bottleneck,

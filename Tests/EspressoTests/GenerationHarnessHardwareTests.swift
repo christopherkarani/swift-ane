@@ -68,6 +68,91 @@ private func fill(_ buffer: borrowing TensorBuffer, value: Float) {
     }
 }
 
+private enum BenchmarkHarnessConfigurationError: LocalizedError {
+    case invalidConfiguration(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration(let message):
+            return message
+        }
+    }
+}
+
+private func fillBenchmarkEmbeddingTable(_ embedding: borrowing TensorBuffer, vocabSize: Int) {
+    let dim = ModelConfig.dim
+    let tapCount = min(8, dim)
+    embedding.withUnsafeMutableBufferPointer { ptr in
+        for token in 0..<vocabSize {
+            let rowBase = token * dim
+            for tap in 0..<tapCount {
+                let dimIdx = (token * 31 + tap * 17) % dim
+                let phase = ((token + tap) % 7) - 3
+                let signedPhase = phase == 0 ? 1 : phase
+                ptr[rowBase + dimIdx] = Float(signedPhase) * 0.0625
+            }
+            ptr[rowBase + (token % dim)] += 0.5
+        }
+    }
+}
+
+private func makeBenchmarkGenerationWeights(layerCount: Int, vocabSize: Int = ModelConfig.vocab) -> GenerationWeights {
+    let layers = LayerStorage<LayerWeights>(count: layerCount) { _ in
+        let weights = LayerWeights()
+        fill(weights.Wq, value: 0)
+        fill(weights.Wk, value: 0)
+        fill(weights.Wv, value: 0)
+        fill(weights.Wo, value: 0)
+        fill(weights.W1, value: 0)
+        fill(weights.W2, value: 0)
+        fill(weights.W3, value: 0)
+        fill(weights.rmsAtt, value: 1)
+        fill(weights.rmsFfn, value: 1)
+        return weights
+    }
+
+    let rmsFinal = TensorBuffer(count: ModelConfig.dim, zeroed: false)
+    fill(rmsFinal, value: 1)
+
+    let embedding = TensorBuffer(count: vocabSize * ModelConfig.dim, zeroed: true)
+    fillBenchmarkEmbeddingTable(embedding, vocabSize: vocabSize)
+
+    return GenerationWeights(
+        layers: layers,
+        rmsFinal: rmsFinal,
+        embedding: embedding,
+        classifier: TensorBuffer(count: 0, zeroed: true),
+        sharedClassifier: true
+    )
+}
+
+private func makeBenchmarkRecurrentGenerationWeights(layerCount: Int, vocabSize: Int = ModelConfig.vocab) -> RecurrentGenerationWeights {
+    let layers = LayerStorage<RWKVStyleRecurrentWeights>(count: layerCount) { _ in
+        let weights = RWKVStyleRecurrentWeights()
+        fill(weights.rms, value: 1)
+        fill(weights.Wx, value: 0)
+        fill(weights.Ws, value: 0)
+        fill(weights.Wd, value: 0)
+        fill(weights.Wo, value: 0)
+        return weights
+    }
+
+    let rmsFinal = TensorBuffer(count: ModelConfig.dim, zeroed: false)
+    fill(rmsFinal, value: 1)
+
+    let embedding = TensorBuffer(count: vocabSize * ModelConfig.dim, zeroed: true)
+    fillBenchmarkEmbeddingTable(embedding, vocabSize: vocabSize)
+
+    return RecurrentGenerationWeights(
+        layers: layers,
+        rmsFinal: rmsFinal,
+        embedding: embedding,
+        classifier: TensorBuffer(count: 0, zeroed: true),
+        sharedClassifier: true,
+        vocabSize: vocabSize
+    )
+}
+
 private func makeEchoGenerationWeights(layerCount: Int) -> GenerationWeights {
     let layers = LayerStorage<LayerWeights>(count: layerCount) { _ in
         let weights = LayerWeights()
@@ -131,6 +216,99 @@ private func makeEchoRecurrentGenerationWeights(layerCount: Int, vocabSize: Int 
         sharedClassifier: true,
         vocabSize: vocabSize
     )
+}
+
+private struct BenchmarkFactoredHeadWeights: ~Copyable {
+    let projection: TensorBuffer
+    let expansion: TensorBuffer
+
+    init(projection: consuming TensorBuffer, expansion: consuming TensorBuffer) {
+        self.projection = projection
+        self.expansion = expansion
+    }
+}
+
+private func makeBenchmarkFactoredHeadWeights(
+    vocabSize: Int,
+    bottleneck: Int,
+    groups: Int
+) -> BenchmarkFactoredHeadWeights {
+    precondition(vocabSize > 0)
+    precondition(groups > 0)
+    precondition(ModelConfig.dim.isMultiple(of: groups))
+    precondition(bottleneck.isMultiple(of: groups))
+    precondition(vocabSize.isMultiple(of: groups))
+
+    let dim = ModelConfig.dim
+    let projection = TensorBuffer(count: bottleneck * dim, zeroed: true)
+    let projectionRowsPerGroup = bottleneck / groups
+    let dimPerGroup = dim / groups
+    projection.withUnsafeMutableBufferPointer { ptr in
+        let tapCount = min(8, dimPerGroup)
+        for row in 0..<bottleneck {
+            let group = row / projectionRowsPerGroup
+            let localRow = row % projectionRowsPerGroup
+            let rowOffset = row * dim
+            let colBase = group * dimPerGroup
+            for tap in 0..<tapCount {
+                let localCol = (localRow * 19 + tap * 11) % dimPerGroup
+                let phase = ((localRow + tap) % 9) - 4
+                let signedPhase = phase == 0 ? 1 : phase
+                ptr[rowOffset + colBase + localCol] = Float(signedPhase) * 0.03125
+            }
+        }
+    }
+
+    let expansion = TensorBuffer(count: vocabSize * bottleneck, zeroed: true)
+    let expansionRowsPerGroup = vocabSize / groups
+    let bottleneckPerGroup = bottleneck / groups
+    expansion.withUnsafeMutableBufferPointer { ptr in
+        let tapCount = min(8, bottleneckPerGroup)
+        for row in 0..<vocabSize {
+            let group = row / expansionRowsPerGroup
+            let localRow = row % expansionRowsPerGroup
+            let rowOffset = row * bottleneck
+            let colBase = group * bottleneckPerGroup
+            for tap in 0..<tapCount {
+                let localCol = (localRow * 13 + tap * 7) % bottleneckPerGroup
+                let phase = ((row + tap) % 11) - 5
+                let signedPhase = phase == 0 ? 2 : phase
+                ptr[rowOffset + colBase + localCol] = Float(signedPhase) * 0.03125
+            }
+        }
+    }
+
+    return BenchmarkFactoredHeadWeights(projection: projection, expansion: expansion)
+}
+
+private func requireTripletLayerCount(_ layerCount: Int) throws {
+    guard layerCount > 0, layerCount.isMultiple(of: 3) else {
+        throw BenchmarkHarnessConfigurationError.invalidConfiguration(
+            "layerCount \(layerCount) must be a positive multiple of 3 for three-layer fused benchmarks"
+        )
+    }
+}
+
+private func repeatedPromptSeed(_ promptTokens: [UInt16], streamCount: Int) throws -> [UInt16] {
+    guard let seed = promptTokens.first else {
+        throw GenerationError.invalidArguments("promptTokens must not be empty")
+    }
+    return Array(repeating: seed, count: streamCount)
+}
+
+private func resetTripletStatesZeroCopy(
+    tripletSessions: borrowing LayerStorage<RWKVStyleFusedThreeLayerSession>,
+    tripletCount: Int,
+    dim: Int,
+    laneSpatial: Int
+) throws {
+    for tripletIdx in 0..<tripletCount {
+        let handles = tripletSessions[tripletIdx].handles
+        let zeroLane = handles.zeroLane
+        try SurfaceIO.copyFP16(dst: handles.stateOut0, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        try SurfaceIO.copyFP16(dst: handles.stateOut1, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+        try SurfaceIO.copyFP16(dst: handles.stateOut2, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
+    }
 }
 
 private struct CoreMLGenerationBenchmarkModel: ~Copyable, AutoregressiveLanguageModel, GenerationPerformanceTrackable {
@@ -1592,19 +1770,21 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         // Pipelined double-buffer at 1024 streams (2×1024 = 2048 total)
         let pipelined = try benchmarkPipelinedGeneration(
             layerCount: 6,
+            promptTokens: prompt,
             maxNewTokens: maxNewTokens,
             warmup: warmup,
             iterations: iterations,
             streamCount: 1024,
             groups: 8,
-            headGroups: 1
+            headGroups: 16,
+            bottleneck: 128
         )
 
         print("=== ANE Batched (g=16, headG=16) ===")
         for sample in ane.samples {
             print("  batched ane streams=\(sample.streamCount) median_ms_token=\(String(format: "%.4f", sample.medianMsPerToken)) aggregate_tps=\(String(format: "%.1f", sample.aggregateTokensPerSecond)) per_stream_tps=\(String(format: "%.1f", sample.perStreamTokensPerSecond)) compile=\(String(format: "%.0f", sample.compileTimeMs)) round_ms=\(String(format: "%.3f", sample.medianRoundLatencyMs))")
         }
-        print("=== ANE Pipelined (2x1024, g=8, headG=1) ===")
+        print("=== ANE Pipelined (2x1024, g=8, headG=16) ===")
         print("  pipelined ane streams=\(pipelined.streamCount) median_ms_token=\(String(format: "%.4f", pipelined.medianMsPerToken)) aggregate_tps=\(String(format: "%.1f", pipelined.aggregateTokensPerSecond)) per_stream_tps=\(String(format: "%.1f", pipelined.perStreamTokensPerSecond)) compile=\(String(format: "%.0f", pipelined.compileTimeMs)) round_ms=\(String(format: "%.3f", pipelined.medianRoundLatencyMs))")
         print("=== CoreML Concurrent ===")
         for sample in coreml.samples {
@@ -1699,9 +1879,11 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         streamCounts: [Int],
         groups: Int = 1,
         headGroups: Int = 1,
+        bottleneck: Int = 128,
         vocabSize: Int = ModelConfig.vocab
     ) throws -> ConcurrentGenerationScalingReport {
         let dim = ModelConfig.dim
+        try requireTripletLayerCount(layerCount)
         var samples: [ConcurrentGenerationScalingSample] = []
         samples.reserveCapacity(streamCounts.count)
 
@@ -1716,8 +1898,13 @@ final class GenerationHarnessHardwareTests: XCTestCase {
 
             let compileStart = GenerationClock.now()
 
-            let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount, vocabSize: vocabSize)
+            let weights = makeBenchmarkRecurrentGenerationWeights(layerCount: layerCount, vocabSize: vocabSize)
             let tripletCount = layerCount / 3
+            let factoredHeadWeights = makeBenchmarkFactoredHeadWeights(
+                vocabSize: weights.vocabSize,
+                bottleneck: bottleneck,
+                groups: headGroups
+            )
 
             var tripletSessions = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
                 count: tripletCount,
@@ -1736,10 +1923,10 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             // Head kernel — use factored classifier for lower weight-loading latency
             let factoredHead = try FactoredGenerationRMSNormClassifierKernelSet(
                 rmsFinal: weights.rmsFinal,
-                classifierProjection: TensorBuffer(count: 128 * ModelConfig.dim, zeroed: true),
-                classifierExpansion: TensorBuffer(count: weights.vocabSize * 128, zeroed: true),
+                classifierProjection: factoredHeadWeights.projection,
+                classifierExpansion: factoredHeadWeights.expansion,
                 vocabSize: weights.vocabSize,
-                bottleneck: 128,
+                bottleneck: bottleneck,
                 laneSpatial: laneSpatial,
                 groups: headGroups
             )
@@ -1748,34 +1935,16 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             let vocabSize = weights.vocabSize
 
             // === ZERO-COPY REBINDING ===
-            // Rebind T0 state inputs → T0 state outputs (in-place state)
-            let t0sOut0 = tripletSessions[0].handles.stateOut0
-            let t0sOut1 = tripletSessions[0].handles.stateOut1
-            let t0sOut2 = tripletSessions[0].handles.stateOut2
-            try tripletSessions[0].kernels.step.rebindInput(at: 1, to: t0sOut0)
-            try tripletSessions[0].kernels.step.rebindInput(at: 2, to: t0sOut1)
-            try tripletSessions[0].kernels.step.rebindInput(at: 3, to: t0sOut2)
-
-            if tripletCount > 1 {
-                // Rebind T1 xIn → T0 xOut (zero-copy transfer)
-                let t0xOut = tripletSessions[0].handles.xOut
-                try tripletSessions[1].kernels.step.rebindInput(at: 0, to: t0xOut)
-
-                // Rebind T1 state inputs → T1 state outputs (in-place state)
-                let t1sOut0 = tripletSessions[1].handles.stateOut0
-                let t1sOut1 = tripletSessions[1].handles.stateOut1
-                let t1sOut2 = tripletSessions[1].handles.stateOut2
-                try tripletSessions[1].kernels.step.rebindInput(at: 1, to: t1sOut0)
-                try tripletSessions[1].kernels.step.rebindInput(at: 2, to: t1sOut1)
-                try tripletSessions[1].kernels.step.rebindInput(at: 3, to: t1sOut2)
-
-                // Rebind head input → T1 xOut (zero-copy transfer)
-                let t1xOut = tripletSessions[1].handles.xOut
-                try factoredHead.rmsNormClassifier.rebindInput(at: 0, to: t1xOut)
-            } else {
-                let t0xOut = tripletSessions[0].handles.xOut
-                try factoredHead.rmsNormClassifier.rebindInput(at: 0, to: t0xOut)
+            for tripletIdx in 0..<tripletCount {
+                let handles = tripletSessions[tripletIdx].handles
+                try tripletSessions[tripletIdx].kernels.step.rebindInput(at: 1, to: handles.stateOut0)
+                try tripletSessions[tripletIdx].kernels.step.rebindInput(at: 2, to: handles.stateOut1)
+                try tripletSessions[tripletIdx].kernels.step.rebindInput(at: 3, to: handles.stateOut2)
+                if tripletIdx > 0 {
+                    try tripletSessions[tripletIdx].kernels.step.rebindInput(at: 0, to: tripletSessions[tripletIdx - 1].handles.xOut)
+                }
             }
+            try factoredHead.rmsNormClassifier.rebindInput(at: 0, to: tripletSessions[tripletCount - 1].handles.xOut)
 
             let t0xIn = tripletSessions[0].handles.xIn
             let headOut = headOutputSurface
@@ -1783,25 +1952,18 @@ final class GenerationHarnessHardwareTests: XCTestCase {
 
             // Zero-copy reset: zero the shared state surfaces directly
             func resetZeroCopy() throws {
-                let zeroLane = tripletSessions[0].handles.zeroLane
-                try SurfaceIO.copyFP16(dst: t0sOut0, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
-                try SurfaceIO.copyFP16(dst: t0sOut1, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
-                try SurfaceIO.copyFP16(dst: t0sOut2, dstChannelOffset: 0, src: zeroLane, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
-                if tripletCount > 1 {
-                    let zl1 = tripletSessions[1].handles.zeroLane
-                    let s10 = tripletSessions[1].handles.stateOut0
-                    let s11 = tripletSessions[1].handles.stateOut1
-                    let s12 = tripletSessions[1].handles.stateOut2
-                    try SurfaceIO.copyFP16(dst: s10, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
-                    try SurfaceIO.copyFP16(dst: s11, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
-                    try SurfaceIO.copyFP16(dst: s12, dstChannelOffset: 0, src: zl1, srcChannelOffset: 0, channels: dim, spatial: laneSpatial)
-                }
+                try resetTripletStatesZeroCopy(
+                    tripletSessions: tripletSessions,
+                    tripletCount: tripletCount,
+                    dim: dim,
+                    laneSpatial: laneSpatial
+                )
             }
 
             // Warmup
             for _ in 0..<warmup {
                 try resetZeroCopy()
-                var tokens = Array(repeating: promptTokens[0], count: streamCount)
+                var tokens = try repeatedPromptSeed(promptTokens, streamCount: streamCount)
                 for _ in 0..<maxNewTokens {
                     try batchedTokenStepZeroCopy(
                         tokens: &tokens,
@@ -1824,7 +1986,7 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             roundLatenciesMs.reserveCapacity(iterations)
             for _ in 0..<iterations {
                 try resetZeroCopy()
-                var tokens = Array(repeating: promptTokens[0], count: streamCount)
+                var tokens = try repeatedPromptSeed(promptTokens, streamCount: streamCount)
 
                 let start = GenerationClock.now()
                 for _ in 0..<maxNewTokens {
@@ -2423,11 +2585,8 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             }
         }
 
-        try tripletSessions[0].kernels.step.eval()
-
-        if tripletCount > 1 {
-            // T1.xIn is already rebound to T0.xOut — no copy needed
-            try tripletSessions[1].kernels.step.eval()
+        for tripletIdx in 0..<tripletCount {
+            try tripletSessions[tripletIdx].kernels.step.eval()
         }
 
         // headIn is already rebound to lastXOut — no copy needed
@@ -2446,20 +2605,24 @@ final class GenerationHarnessHardwareTests: XCTestCase {
     /// Returns results as a ConcurrentGenerationScalingReport for comparison with batched/concurrent.
     private func benchmarkPipelinedGeneration(
         layerCount: Int,
+        promptTokens: [UInt16],
         maxNewTokens: Int,
         warmup: Int,
         iterations: Int,
         streamCount: Int,
         groups: Int = 8,
         headGroups: Int = 1,
-        bottleneck: Int = 64
+        bottleneck: Int = 128
     ) throws -> ConcurrentGenerationScalingSample {
         let dim = ModelConfig.dim
-        let weights = makeEchoRecurrentGenerationWeights(layerCount: layerCount)
+        try requireTripletLayerCount(layerCount)
+        let weights = makeBenchmarkRecurrentGenerationWeights(layerCount: layerCount)
         let vocabSize = weights.vocabSize
         let tripletCount = layerCount / 3
 
         let compileStart = GenerationClock.now()
+        let headWeightsA = makeBenchmarkFactoredHeadWeights(vocabSize: vocabSize, bottleneck: bottleneck, groups: headGroups)
+        let headWeightsB = makeBenchmarkFactoredHeadWeights(vocabSize: vocabSize, bottleneck: bottleneck, groups: headGroups)
 
         // Pipeline A
         var trA = try LayerStorage<RWKVStyleFusedThreeLayerSession>(
@@ -2472,18 +2635,20 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             })
         let headA = try FactoredGenerationRMSNormClassifierKernelSet(
             rmsFinal: weights.rmsFinal,
-            classifierProjection: TensorBuffer(count: bottleneck * dim, zeroed: true),
-            classifierExpansion: TensorBuffer(count: vocabSize * bottleneck, zeroed: true),
+            classifierProjection: headWeightsA.projection,
+            classifierExpansion: headWeightsA.expansion,
             vocabSize: vocabSize, bottleneck: bottleneck, laneSpatial: streamCount, groups: headGroups)
         // Zero-copy rebinding for A
-        for i in 0..<3 { try trA[0].kernels.step.rebindInput(at: 1+i, to: trA[0].kernels.step.outputSurface(at: 1+i)) }
-        if tripletCount > 1 {
-            try trA[1].kernels.step.rebindInput(at: 0, to: trA[0].handles.xOut)
-            for i in 0..<3 { try trA[1].kernels.step.rebindInput(at: 1+i, to: trA[1].kernels.step.outputSurface(at: 1+i)) }
-            try headA.rmsNormClassifier.rebindInput(at: 0, to: trA[tripletCount - 1].handles.xOut)
-        } else {
-            try headA.rmsNormClassifier.rebindInput(at: 0, to: trA[0].handles.xOut)
+        for tripletIdx in 0..<tripletCount {
+            let handles = trA[tripletIdx].handles
+            try trA[tripletIdx].kernels.step.rebindInput(at: 1, to: handles.stateOut0)
+            try trA[tripletIdx].kernels.step.rebindInput(at: 2, to: handles.stateOut1)
+            try trA[tripletIdx].kernels.step.rebindInput(at: 3, to: handles.stateOut2)
+            if tripletIdx > 0 {
+                try trA[tripletIdx].kernels.step.rebindInput(at: 0, to: trA[tripletIdx - 1].handles.xOut)
+            }
         }
+        try headA.rmsNormClassifier.rebindInput(at: 0, to: trA[tripletCount - 1].handles.xOut)
         let headOutA = try headA.rmsNormClassifier.outputSurface(at: 0)
         let t0xInA = trA[0].handles.xIn
 
@@ -2498,24 +2663,24 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             })
         let headB = try FactoredGenerationRMSNormClassifierKernelSet(
             rmsFinal: weights.rmsFinal,
-            classifierProjection: TensorBuffer(count: bottleneck * dim, zeroed: true),
-            classifierExpansion: TensorBuffer(count: vocabSize * bottleneck, zeroed: true),
+            classifierProjection: headWeightsB.projection,
+            classifierExpansion: headWeightsB.expansion,
             vocabSize: vocabSize, bottleneck: bottleneck, laneSpatial: streamCount, groups: headGroups)
-        for i in 0..<3 { try trB[0].kernels.step.rebindInput(at: 1+i, to: trB[0].kernels.step.outputSurface(at: 1+i)) }
-        if tripletCount > 1 {
-            try trB[1].kernels.step.rebindInput(at: 0, to: trB[0].handles.xOut)
-            for i in 0..<3 { try trB[1].kernels.step.rebindInput(at: 1+i, to: trB[1].kernels.step.outputSurface(at: 1+i)) }
-            try headB.rmsNormClassifier.rebindInput(at: 0, to: trB[tripletCount - 1].handles.xOut)
-        } else {
-            try headB.rmsNormClassifier.rebindInput(at: 0, to: trB[0].handles.xOut)
+        for tripletIdx in 0..<tripletCount {
+            let handles = trB[tripletIdx].handles
+            try trB[tripletIdx].kernels.step.rebindInput(at: 1, to: handles.stateOut0)
+            try trB[tripletIdx].kernels.step.rebindInput(at: 2, to: handles.stateOut1)
+            try trB[tripletIdx].kernels.step.rebindInput(at: 3, to: handles.stateOut2)
+            if tripletIdx > 0 {
+                try trB[tripletIdx].kernels.step.rebindInput(at: 0, to: trB[tripletIdx - 1].handles.xOut)
+            }
         }
+        try headB.rmsNormClassifier.rebindInput(at: 0, to: trB[tripletCount - 1].handles.xOut)
         let headOutB = try headB.rmsNormClassifier.outputSurface(at: 0)
         let t0xInB = trB[0].handles.xIn
 
         let compileTimeMs = machMilliseconds(GenerationClock.now() - compileStart)
-
-        var tokensA = Array(repeating: UInt16(0), count: streamCount)
-        var tokensB = Array(repeating: UInt16(0), count: streamCount)
+        let aneQueue = DispatchQueue(label: "com.espresso.concurrent.ane.pipeline", qos: .userInteractive)
 
         func embWrite(_ tokens: [UInt16], to surface: IOSurfaceRef) throws {
             try weights.embedding.withUnsafePointer { embPtr in
@@ -2540,45 +2705,70 @@ final class GenerationHarnessHardwareTests: XCTestCase {
             try head.rmsNormClassifier.eval()
         }
 
-        // Prime pipeline A
-        try embWrite(tokensA, to: t0xInA)
-        try evalAll(&trA, head: headA)
-        try embWrite(tokensB, to: t0xInB)
+        func runFreshRound() throws -> Double {
+            try resetTripletStatesZeroCopy(
+                tripletSessions: trA,
+                tripletCount: tripletCount,
+                dim: dim,
+                laneSpatial: streamCount
+            )
+            try resetTripletStatesZeroCopy(
+                tripletSessions: trB,
+                tripletCount: tripletCount,
+                dim: dim,
+                laneSpatial: streamCount
+            )
+            var tokensA = try repeatedPromptSeed(promptTokens, streamCount: streamCount)
+            var tokensB = try repeatedPromptSeed(promptTokens, streamCount: streamCount)
 
-        // Pipelined loop: each iteration does 2 half-cycles (A+B), generating maxNewTokens per pipeline
-        var roundLatenciesMs: [Double] = []
-        roundLatenciesMs.reserveCapacity(iterations)
-        for iter in 0..<(warmup + iterations) {
             let s = GenerationClock.now()
 
-            for _ in 0..<maxNewTokens {
+            try embWrite(tokensA, to: t0xInA)
+            try evalAll(&trA, head: headA)
+            try embWrite(tokensB, to: t0xInB)
+
+            for tokenIndex in 0..<maxNewTokens {
                 // Half 1: eval B on background, CPU processes A
                 let aneErrorBox = LockedBox<(any Error)?>(nil)
                 let sem1 = DispatchSemaphore(value: 0)
-                DispatchQueue.global(qos: .userInteractive).async { [self] in
+                aneQueue.async {
                     do { try evalAll(&trB, head: headB) } catch { aneErrorBox.withValue { $0 = error } }
                     sem1.signal()
                 }
                 try argmax(from: headOutA, into: &tokensA)
-                try embWrite(tokensA, to: t0xInA)
+                if tokenIndex + 1 < maxNewTokens {
+                    try embWrite(tokensA, to: t0xInA)
+                }
                 sem1.wait()
                 if let e = aneErrorBox.withValue({ $0 }) { throw e }
 
-                // Half 2: eval A on background, CPU processes B
+                // Half 2: only schedule A when another token round still needs its next output.
                 let sem2 = DispatchSemaphore(value: 0)
-                DispatchQueue.global(qos: .userInteractive).async { [self] in
-                    do { try evalAll(&trA, head: headA) } catch { aneErrorBox.withValue { $0 = error } }
-                    sem2.signal()
+                if tokenIndex + 1 < maxNewTokens {
+                    aneQueue.async {
+                        do { try evalAll(&trA, head: headA) } catch { aneErrorBox.withValue { $0 = error } }
+                        sem2.signal()
+                    }
                 }
                 try argmax(from: headOutB, into: &tokensB)
-                try embWrite(tokensB, to: t0xInB)
-                sem2.wait()
-                if let e = aneErrorBox.withValue({ $0 }) { throw e }
+                if tokenIndex + 1 < maxNewTokens {
+                    try embWrite(tokensB, to: t0xInB)
+                    sem2.wait()
+                    if let e = aneErrorBox.withValue({ $0 }) { throw e }
+                }
             }
 
-            if iter >= warmup {
-                roundLatenciesMs.append(machMilliseconds(GenerationClock.now() - s))
-            }
+            return machMilliseconds(GenerationClock.now() - s)
+        }
+
+        for _ in 0..<warmup {
+            _ = try runFreshRound()
+        }
+
+        var roundLatenciesMs: [Double] = []
+        roundLatenciesMs.reserveCapacity(iterations)
+        for _ in 0..<iterations {
+            roundLatenciesMs.append(try runFreshRound())
         }
 
         return ConcurrentGenerationScalingSample(
@@ -5835,7 +6025,7 @@ final class GenerationHarnessHardwareTests: XCTestCase {
                 queue.async {
                     defer { exitGroup.leave() }
                     do {
-                        let headWeights = makeEchoGenerationWeights(layerCount: 1)
+                        let headWeights = makeBenchmarkGenerationWeights(layerCount: 1)
                         let model = try CoreMLGenerationBenchmarkModel(
                             modelPath: modelPath,
                             headWeights: headWeights,
@@ -6239,7 +6429,7 @@ final class GenerationHarnessHardwareTests: XCTestCase {
         warmup: Int,
         iterations: Int
     ) throws -> GenerationBenchmarkSample {
-        let headWeights = makeEchoGenerationWeights(layerCount: 1)
+        let headWeights = makeBenchmarkGenerationWeights(layerCount: 1)
         let model = try CoreMLGenerationBenchmarkModel(
             modelPath: modelPath,
             headWeights: headWeights,
