@@ -39,10 +39,6 @@ benchmarks/models/*.mlpackage
 artifacts/*
 !artifacts/benchmarks/
 artifacts/benchmarks/*
-!artifacts/benchmarks/exact-decode-non-echo/
-!artifacts/benchmarks/exact-decode-non-echo/latest.json
-!artifacts/benchmarks/exact-decode-non-echo/latest.csv
-!artifacts/benchmarks/exact-decode-non-echo/latest.md
 scripts/__pycache__/
 .codex/skills/**/__pycache__/
 

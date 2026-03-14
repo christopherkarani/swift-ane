@@ -47,7 +47,7 @@ REPEATS=5 WARMUP=3 ITERATIONS=20 \
 ./scripts/reproduce_local_real_artifact_claim.sh
 ```
 
-Machine-readable results: [`artifacts/benchmarks/exact-decode-non-echo/`](artifacts/benchmarks/exact-decode-non-echo/)
+Machine-readable benchmark output is generated locally under `artifacts/benchmarks/` and kept out of git.
 
 </details>
 
