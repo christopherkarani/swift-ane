@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/christopherkarani/Espresso/actions"><img src="https://github.com/christopherkarani/Espresso/actions/workflows/ci.yml/badge.svg" alt="Build"></a>
+  <a href="https://github.com/christopherkarani/Espresso/actions/workflows/phase8-matrix.yml"><img src="https://github.com/christopherkarani/Espresso/actions/workflows/phase8-matrix.yml/badge.svg" alt="Build"></a>
   <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-6.2-orange.svg" alt="Swift 6.2"></a>
   <a href="https://github.com/christopherkarani/Espresso/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/Platform-macOS_15+-lightgrey.svg" alt="macOS 15+">
@@ -188,7 +188,6 @@ This project uses undocumented private Apple APIs discovered through runtime int
 ## Further Reading
 
 - [Reproduce the benchmark](scripts/reproduce_local_real_artifact_claim.sh) — end-to-end exact-claim workflow
-- [ANE vs CoreML script](scripts/reproduce_exact_4x.sh) — matched measurement entry point
 - [Benchmark artifacts](artifacts/benchmarks/exact-decode-non-echo/) — machine-readable evidence
 
 ## Contributing
