@@ -9,6 +9,7 @@ let package = Package(
         .executable(name: "espresso-bench", targets: ["EspressoBench"]),
         .executable(name: "espresso-multitoken-probe", targets: ["EspressoMultitokenProbe"]),
         .library(name: "Espresso", targets: ["Espresso"]),
+        .library(name: "ModelSupport", targets: ["ModelSupport"]),
     ],
     targets: [
         .target(
@@ -165,6 +166,18 @@ let package = Package(
             name: "ANEBuilderTests",
             dependencies: ["ANEBuilder", "ANEGraphIR"],
             path: "Tests/ANEBuilderTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "ModelSupport",
+            dependencies: ["ANEGraphIR", "ANEBuilder", "ANECodegen", "ANEPasses", "ANETypes"],
+            path: "Sources/ModelSupport",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "ModelSupportTests",
+            dependencies: ["ModelSupport", "ANEGraphIR", "ANETypes", "ANEPasses"],
+            path: "Tests/ModelSupportTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]
