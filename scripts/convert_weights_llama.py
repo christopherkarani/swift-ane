@@ -53,7 +53,7 @@ def expand_gqa_projection(weight: torch.Tensor, n_head: int, n_kv_head: int, hea
 def write_causal_masks(output_dir: Path, max_seq: int) -> None:
     mask_dir = output_dir / "masks"
     mask_dir.mkdir(parents=True, exist_ok=True)
-    size = 32
+    size = 1
     while size <= max_seq:
         mask = torch.full((size, size), 0.0, dtype=torch.float16)
         mask = torch.triu(mask.fill_(-1e4), diagonal=1) + torch.tril(torch.zeros_like(mask))

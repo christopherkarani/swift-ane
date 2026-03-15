@@ -1,5 +1,13 @@
 import Foundation
 
+public enum SentencePieceTokenizerError: Error, Sendable, Equatable {
+    case truncatedModel
+    case invalidMaxTokenLength(Int)
+    case truncatedEntry(index: Int)
+    case invalidUTF8Entry(index: Int)
+    case emptyVocabulary
+}
+
 public struct SentencePieceTokenizer: Tokenizer {
     public let vocabSize: Int
 
@@ -11,33 +19,44 @@ public struct SentencePieceTokenizer: Tokenizer {
     public init(modelURL: URL) throws {
         let data = try Data(contentsOf: modelURL)
         guard data.count >= 4 else {
-            self.pieces = []
-            self.scores = []
-            self.pieceToID = [:]
-            self.maxTokenLength = 0
-            self.vocabSize = 0
-            return
+            throw SentencePieceTokenizerError.truncatedModel
         }
 
         var cursor = 0
         self.maxTokenLength = Int(data.readLittleEndian(Int32.self, at: &cursor))
+        guard maxTokenLength > 0 else {
+            throw SentencePieceTokenizerError.invalidMaxTokenLength(maxTokenLength)
+        }
 
         var pieces: [String] = []
         var scores: [Float] = []
         var pieceToID: [String: Int] = [:]
+        var entryIndex = 0
 
-        while cursor + 8 <= data.count {
+        while cursor < data.count {
+            guard cursor + 8 <= data.count else {
+                throw SentencePieceTokenizerError.truncatedEntry(index: entryIndex)
+            }
             let score = data.readLittleEndian(Float.self, at: &cursor)
             let length = Int(data.readLittleEndian(Int32.self, at: &cursor))
-            guard length >= 0, cursor + length <= data.count else { break }
+            guard length >= 0, cursor + length <= data.count else {
+                throw SentencePieceTokenizerError.truncatedEntry(index: entryIndex)
+            }
             let pieceData = data.subdata(in: cursor..<(cursor + length))
             cursor += length
-            let piece = String(decoding: pieceData, as: UTF8.self)
+            guard let piece = String(data: pieceData, encoding: .utf8) else {
+                throw SentencePieceTokenizerError.invalidUTF8Entry(index: entryIndex)
+            }
 
             let id = pieces.count
             pieces.append(piece)
             scores.append(score)
             pieceToID[piece] = id
+            entryIndex += 1
+        }
+
+        guard !pieces.isEmpty else {
+            throw SentencePieceTokenizerError.emptyVocabulary
         }
 
         self.pieces = pieces

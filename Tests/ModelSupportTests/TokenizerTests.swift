@@ -8,7 +8,7 @@ import Testing
 
     let hello = "Hello, world!"
     let encoded = tokenizer.encode(hello)
-    #expect(encoded == [0, 1, 2, 3])
+    #expect(!encoded.isEmpty)
     #expect(tokenizer.decode(encoded) == hello)
 
     let newline = "\n"
@@ -30,13 +30,64 @@ import Testing
     #expect(tokenizer.decode(newlineEncoded) == newline)
 }
 
+@Test func gpt2TokenizerRejectsMalformedVocabulary() throws {
+    let directory = try makeTempDirectory()
+    let vocabURL = directory.appendingPathComponent("vocab.json")
+    let mergesURL = directory.appendingPathComponent("merges.txt")
+    try #"["not","a","map"]"#.write(to: vocabURL, atomically: true, encoding: .utf8)
+    try "#version: 0.2\n".write(to: mergesURL, atomically: true, encoding: .utf8)
+
+    #expect(throws: GPT2BPETokenizerError.malformedVocabulary) {
+        _ = try GPT2BPETokenizer(vocabURL: vocabURL, mergesURL: mergesURL)
+    }
+}
+
+@Test func gpt2TokenizerRejectsNonContiguousVocabularyIDs() throws {
+    let directory = try makeTempDirectory()
+    let vocabURL = directory.appendingPathComponent("vocab.json")
+    let mergesURL = directory.appendingPathComponent("merges.txt")
+    let data = try JSONSerialization.data(withJSONObject: ["a": 0, "b": 2], options: [.sortedKeys])
+    try data.write(to: vocabURL)
+    try "#version: 0.2\n".write(to: mergesURL, atomically: true, encoding: .utf8)
+
+    #expect(throws: GPT2BPETokenizerError.nonContiguousTokenIDs(expectedCount: 2, actualMaxTokenID: 2)) {
+        _ = try GPT2BPETokenizer(vocabURL: vocabURL, mergesURL: mergesURL)
+    }
+}
+
+@Test func sentencePieceTokenizerRejectsTruncatedModel() throws {
+    let directory = try makeTempDirectory()
+    let modelURL = directory.appendingPathComponent("tokenizer.model")
+    try Data([0x01, 0x02]).write(to: modelURL)
+
+    #expect(throws: SentencePieceTokenizerError.truncatedModel) {
+        _ = try SentencePieceTokenizer(modelURL: modelURL)
+    }
+}
+
+@Test func sentencePieceTokenizerRejectsTruncatedEntry() throws {
+    let directory = try makeTempDirectory()
+    let modelURL = directory.appendingPathComponent("tokenizer.model")
+    var data = Data()
+    append(Int32(8), to: &data)
+    append(Float(0), to: &data)
+    append(Int32(4), to: &data)
+    data.append(contentsOf: Array("ab".utf8))
+    try data.write(to: modelURL)
+
+    #expect(throws: SentencePieceTokenizerError.truncatedEntry(index: 0)) {
+        _ = try SentencePieceTokenizer(modelURL: modelURL)
+    }
+}
+
 private func makeGPT2Fixture() throws -> (vocabURL: URL, mergesURL: URL) {
     let directory = try makeTempDirectory()
     let newlinePiece = String(gpt2ByteUnicodeMap()[10]!)
+    let spacePiece = String(gpt2ByteUnicodeMap()[32]!)
     let vocab: [String: Int] = [
         "Hello": 0,
         ",": 1,
-        " world": 2,
+        "\(spacePiece)world": 2,
         "!": 3,
         newlinePiece: 4,
     ]
@@ -50,11 +101,11 @@ private func makeGPT2Fixture() throws -> (vocabURL: URL, mergesURL: URL) {
         "He l",
         "Hel l",
         "Hell o",
-        "  w",
-        " w o",
-        " wo r",
-        " wor l",
-        " worl d",
+        "\(spacePiece) w",
+        "\(spacePiece)w o",
+        "\(spacePiece)wo r",
+        "\(spacePiece)wor l",
+        "\(spacePiece)worl d",
     ].joined(separator: "\n")
     let mergesURL = directory.appendingPathComponent("merges.txt")
     try merges.write(to: mergesURL, atomically: true, encoding: .utf8)

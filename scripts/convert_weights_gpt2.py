@@ -45,7 +45,7 @@ def write_blob(tensor: torch.Tensor, path: Path, transpose: bool = False) -> Non
 def write_causal_masks(output_dir: Path, max_seq: int) -> None:
     mask_dir = output_dir / "masks"
     mask_dir.mkdir(parents=True, exist_ok=True)
-    size = 32
+    size = 1
     while size <= max_seq:
         mask = torch.zeros((size, size), dtype=torch.float16)
         mask = torch.triu(mask.fill_(-1e4), diagonal=1) + torch.tril(torch.zeros_like(mask))

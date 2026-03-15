@@ -6,7 +6,7 @@ import ANEPasses
 @Test func gpt2LayerGraphUsesLayerNormGeluAndBiases() throws {
     let config = ModelRegistry.gpt2_124m
     let paths = LayerWeightPaths.forLayer(0, config: config, blobDir: "/tmp/gpt2")
-    let graph = try TransformerLayerGraphBuilder.forwardLayer(
+    let graph = TransformerLayerGraphBuilder.forwardLayer(
         layer: 0,
         config: config,
         paths: paths,
@@ -19,7 +19,7 @@ import ANEPasses
     #expect(graph.nodes.contains { $0.name == "layer0_ln1_beta" && $0.op == .const })
     #expect(graph.nodes.contains { $0.name == "layer0_ffn_act_tanh" && $0.op == .tanh })
     #expect(graph.nodes.contains { $0.name == "layer0_q_bias" })
-    #expect(graph.nodes.contains { $0.name == "layer0_proj_bias" })
+    #expect(graph.nodes.contains { $0.name == "layer0_attn_proj_bias" })
     #expect(graph.nodes.contains { $0.name == "layer0_ffn_up_bias" })
     #expect(graph.nodes.contains { $0.name == "layer0_ffn_down_bias" })
     #expect(allWeightOffsets(in: graph).allSatisfy { $0 == 128 })
@@ -29,7 +29,7 @@ import ANEPasses
 @Test func llamaLayerGraphUsesRmsNormSwiGLUAndNoBiases() throws {
     let config = ModelRegistry.stories110m
     let paths = LayerWeightPaths.forLayer(0, config: config, blobDir: "/tmp/llama")
-    let graph = try TransformerLayerGraphBuilder.forwardLayer(
+    let graph = TransformerLayerGraphBuilder.forwardLayer(
         layer: 0,
         config: config,
         paths: paths,
@@ -42,6 +42,14 @@ import ANEPasses
     #expect(!graph.nodes.contains { $0.name.contains("bias") })
     #expect(allWeightOffsets(in: graph).allSatisfy { $0 == 128 })
     #expect(!ANEOptimizationPipeline.validate(graph).contains { $0.severity == .error })
+}
+
+@Test func supportedMaskBucketsMatchConverterContract() {
+    #expect(TransformerLayerGraphBuilder.isSupportedMaskBucket(spatial: 1, maxSeq: 256))
+    #expect(TransformerLayerGraphBuilder.isSupportedMaskBucket(spatial: 16, maxSeq: 256))
+    #expect(TransformerLayerGraphBuilder.isSupportedMaskBucket(spatial: 256, maxSeq: 256))
+    #expect(!TransformerLayerGraphBuilder.isSupportedMaskBucket(spatial: 17, maxSeq: 256))
+    #expect(!TransformerLayerGraphBuilder.isSupportedMaskBucket(spatial: 512, maxSeq: 256))
 }
 
 private func allWeightOffsets(in graph: ANEGraph) -> [UInt64] {
