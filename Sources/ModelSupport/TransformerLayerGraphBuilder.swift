@@ -2,6 +2,11 @@ import ANEBuilder
 import ANEGraphIR
 
 public struct TransformerLayerGraphBuilder {
+    static func isSupportedMaskBucket(spatial: Int, maxSeq: Int) -> Bool {
+        guard spatial > 0, spatial <= maxSeq else { return false }
+        return (spatial & (spatial - 1)) == 0
+    }
+
     public static func forwardLayer(
         layer: Int,
         config: MultiModelConfig,
@@ -9,7 +14,10 @@ public struct TransformerLayerGraphBuilder {
         spatial: Int
     ) -> ANEGraph {
         precondition(config.dModel == config.nHead * config.headDim, "dModel must equal nHead * headDim")
-        precondition(spatial > 0 && spatial <= config.maxSeq, "spatial must be within model context")
+        precondition(
+            isSupportedMaskBucket(spatial: spatial, maxSeq: config.maxSeq),
+            "spatial must be a power-of-two mask bucket within model context"
+        )
 
         var graph = ANEGraph()
         let input = try! graph.input(
@@ -181,11 +189,6 @@ public struct TransformerLayerGraphBuilder {
 }
 
 private extension ANEGraph {
-    func weight128(_ path: String, shape: ANEShape, name: String) throws -> Int {
-        var copy = self
-        return try copy.constWeight(name, shape: shape, blobPath: path, offset: 128)
-    }
-
     mutating func constWeight128(_ name: String, shape: ANEShape, blobPath: String) throws -> Int {
         try constWeight(name, shape: shape, blobPath: blobPath, offset: 128)
     }

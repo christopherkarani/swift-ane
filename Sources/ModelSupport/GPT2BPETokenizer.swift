@@ -1,5 +1,11 @@
 import Foundation
 
+public enum GPT2BPETokenizerError: Error, Sendable, Equatable {
+    case malformedVocabulary
+    case emptyVocabulary
+    case nonContiguousTokenIDs(expectedCount: Int, actualMaxTokenID: Int)
+}
+
 public final class GPT2BPETokenizer: Tokenizer, @unchecked Sendable {
     public let vocabSize: Int
 
@@ -14,12 +20,34 @@ public final class GPT2BPETokenizer: Tokenizer, @unchecked Sendable {
 
     public init(vocabURL: URL, mergesURL: URL) throws {
         let vocabData = try Data(contentsOf: vocabURL)
-        let rawVocab = try JSONSerialization.jsonObject(with: vocabData) as? [String: NSNumber] ?? [:]
-        self.encoder = rawVocab.reduce(into: [:]) { partialResult, entry in
-            partialResult[entry.key] = entry.value.intValue
+        let rawObject = try JSONSerialization.jsonObject(with: vocabData)
+        guard let rawVocab = rawObject as? [String: Any] else {
+            throw GPT2BPETokenizerError.malformedVocabulary
+        }
+        guard !rawVocab.isEmpty else {
+            throw GPT2BPETokenizerError.emptyVocabulary
         }
 
-        let maxTokenID = rawVocab.values.map(\.intValue).max() ?? -1
+        var encoder: [String: Int] = [:]
+        encoder.reserveCapacity(rawVocab.count)
+        for (token, value) in rawVocab {
+            guard let number = value as? NSNumber else {
+                throw GPT2BPETokenizerError.malformedVocabulary
+            }
+            encoder[token] = number.intValue
+        }
+        self.encoder = encoder
+
+        let maxTokenID = encoder.values.max() ?? -1
+        guard maxTokenID >= 0 else {
+            throw GPT2BPETokenizerError.emptyVocabulary
+        }
+        guard maxTokenID + 1 == encoder.count else {
+            throw GPT2BPETokenizerError.nonContiguousTokenIDs(
+                expectedCount: encoder.count,
+                actualMaxTokenID: maxTokenID
+            )
+        }
         var decoder = Array(repeating: "", count: maxTokenID + 1)
         for (token, id) in encoder where decoder.indices.contains(id) {
             decoder[id] = token
@@ -58,9 +86,8 @@ public final class GPT2BPETokenizer: Tokenizer, @unchecked Sendable {
             let chunk = nsText.substring(with: match.range)
             let encoded = encodeBytes(of: chunk)
             for piece in bpe(encoded) {
-                if let token = encoder[piece] {
-                    tokens.append(token)
-                }
+                guard let token = encoder[piece] else { continue }
+                tokens.append(token)
             }
         }
 
