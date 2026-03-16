@@ -189,11 +189,18 @@ public struct RealModelInferenceEngine: ~Copyable {
         let kernel: ANEKernel
         let inputSurface: IOSurfaceRef
         let outputSurface: IOSurfaceRef
+        let maxValueSurface: IOSurfaceRef
 
-        init(kernel: consuming ANEKernel, inputSurface: IOSurfaceRef, outputSurface: IOSurfaceRef) {
+        init(
+            kernel: consuming ANEKernel,
+            inputSurface: IOSurfaceRef,
+            outputSurface: IOSurfaceRef,
+            maxValueSurface: IOSurfaceRef
+        ) {
             self.kernel = kernel
             self.inputSurface = inputSurface
             self.outputSurface = outputSurface
+            self.maxValueSurface = maxValueSurface
         }
     }
 
@@ -1183,12 +1190,15 @@ public struct RealModelInferenceEngine: ~Copyable {
                 do {
                     try compiledHybridGreedyNorm[0].kernel.eval()
                     try compiledHybridGreedyClassifier[0].kernel.eval()
-                    let argmax = try SurfaceIO.argmaxFP16SpatialSlice(
+                    let argmax = try SurfaceIO.argmaxFP16SpatialSliceWithHint(
                         from: compiledHybridGreedyClassifier[0].outputSurface,
                         channelOffset: 0,
                         spatialIndex: 0,
                         spatial: headSpatial,
-                        channels: config.vocab
+                        channels: config.vocab,
+                        hintSurface: compiledHybridGreedyClassifier[0].maxValueSurface,
+                        hintSpatialIndex: 0,
+                        hintSpatial: headSpatial
                     )
                     guard let token = UInt16(exactly: argmax.index) else {
                         throw RealModelInferenceError.runtimeFailure(
@@ -1668,7 +1678,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         assets: GPT2TopLevelAssets,
         spatial: Int
     ) throws -> CompiledClassifier {
-        let generator = GenerationClassifierGenerator(vocabSize: config.vocab, laneSpatial: spatial)
+        let generator = GenerationClassifierWithMaxGenerator(vocabSize: config.vocab, laneSpatial: spatial)
         let classifierBlob = WeightBlob.build(from: assets.lmHead, rows: config.vocab, cols: config.dModel)
         let kernel: ANEKernel
         do {
@@ -1686,13 +1696,20 @@ public struct RealModelInferenceEngine: ~Copyable {
 
         let inputSurface: IOSurfaceRef
         let outputSurface: IOSurfaceRef
+        let maxValueSurface: IOSurfaceRef
         do {
             inputSurface = try kernel.inputSurface(at: 0)
             outputSurface = try kernel.outputSurface(at: 0)
+            maxValueSurface = try kernel.outputSurface(at: 1)
         } catch {
             throw RealModelInferenceError.runtimeFailure("Hybrid classifier surfaces unavailable: \(error)")
         }
-        return CompiledClassifier(kernel: kernel, inputSurface: inputSurface, outputSurface: outputSurface)
+        return CompiledClassifier(
+            kernel: kernel,
+            inputSurface: inputSurface,
+            outputSurface: outputSurface,
+            maxValueSurface: maxValueSurface
+        )
     }
 
     private static func buildGPT2AttentionBlockGraph(
