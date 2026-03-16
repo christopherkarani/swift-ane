@@ -736,26 +736,23 @@ public extension ForwardPass {
 
             t0 = RuntimeClock.now()
             do {
-                try SurfaceIO.copyFP16SpatialSlice(
-                    dst: handles.kCacheFull,
-                    dstChannelOffset: 0,
-                    dstSpatialIndex: tokenIndex,
-                    dstSpatial: maxSeq,
-                    src: handles.kOut,
-                    srcChannelOffset: 0,
-                    srcSpatialIndex: 0,
-                    srcSpatial: laneSpatial,
-                    channels: dim
-                )
-                try SurfaceIO.copyFP16SpatialSlice(
-                    dst: handles.vCacheFull,
-                    dstChannelOffset: 0,
-                    dstSpatialIndex: tokenIndex,
-                    dstSpatial: maxSeq,
-                    src: handles.vOut,
-                    srcChannelOffset: 0,
-                    srcSpatialIndex: 0,
-                    srcSpatial: laneSpatial,
+                try SurfaceIO.copyTwoFP16SpatialSlices(
+                    dst0: handles.kCacheFull,
+                    dst0ChannelOffset: 0,
+                    dst0SpatialIndex: tokenIndex,
+                    dst0Spatial: maxSeq,
+                    src0: handles.kOut,
+                    src0ChannelOffset: 0,
+                    src0SpatialIndex: 0,
+                    src0Spatial: laneSpatial,
+                    dst1: handles.vCacheFull,
+                    dst1ChannelOffset: 0,
+                    dst1SpatialIndex: tokenIndex,
+                    dst1Spatial: maxSeq,
+                    src1: handles.vOut,
+                    src1ChannelOffset: 0,
+                    src1SpatialIndex: 0,
+                    src1Spatial: laneSpatial,
                     channels: dim
                 )
             } catch {
