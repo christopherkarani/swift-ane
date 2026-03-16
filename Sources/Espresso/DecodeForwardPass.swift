@@ -300,15 +300,25 @@ public struct HybridDecodeSurfaceHandles {
     public let laneSpatial: Int
 
     public init(kernels: borrowing HybridDecodeKernelSet, logicalMaxSeq: Int? = nil) throws(ANEError) {
-        self.qkvIn = try kernels.decodeQKVOnly.inputSurface(at: 0)
-        self.kOut = try kernels.decodeQKVOnly.outputSurface(at: 0)
-        self.qOut = try kernels.decodeQKVOnly.outputSurface(at: 1)
-        self.vOut = try kernels.decodeQKVOnly.outputSurface(at: 2)
-        self.projectionContextIn = try kernels.decodeProjection.inputSurface(at: 0)
-        self.projectionResidualIn = try kernels.decodeProjection.inputSurface(at: 1)
-        self.projectionOut = try kernels.decodeProjection.outputSurface(at: 0)
-        self.ffnIn = try kernels.decodeFFN.inputSurface(at: 0)
-        self.ffnOut = try kernels.decodeFFN.outputSurface(at: 0)
+        let qkvIn = try kernels.decodeQKVOnly.inputSurface(at: 0)
+        let kOut = try kernels.decodeQKVOnly.outputSurface(at: 0)
+        let qOut = try kernels.decodeQKVOnly.outputSurface(at: 1)
+        let vOut = try kernels.decodeQKVOnly.outputSurface(at: 2)
+        let projectionContextIn = try kernels.decodeProjection.inputSurface(at: 0)
+        let projectionOut = try kernels.decodeProjection.outputSurface(at: 0)
+        let ffnOut = try kernels.decodeFFN.outputSurface(at: 0)
+        try kernels.decodeProjection.rebindInput(at: 1, to: qkvIn)
+        try kernels.decodeFFN.rebindInput(at: 0, to: projectionOut)
+
+        self.qkvIn = qkvIn
+        self.kOut = kOut
+        self.qOut = qOut
+        self.vOut = vOut
+        self.projectionContextIn = projectionContextIn
+        self.projectionResidualIn = qkvIn
+        self.projectionOut = projectionOut
+        self.ffnIn = projectionOut
+        self.ffnOut = ffnOut
         self.maxSeq = logicalMaxSeq ?? kernels.maxSeq
         self.laneSpatial = kernels.laneSpatial
 
@@ -765,54 +775,19 @@ public extension ForwardPass {
                 throw .invalidArguments("hybrid metal shape invalid: \(error)")
             }
 
-            t0 = RuntimeClock.now()
-            let context: [Float]
             do {
-                context = try metalAttention.runDecodeContext(
+                t0 = RuntimeClock.now()
+                try metalAttention.runDecodeContextIntoSurface(
                     qSurface: handles.qOut,
                     kCacheSurface: handles.kCacheFull,
                     vCacheSurface: handles.vCacheFull,
+                    contextSurface: handles.projectionContextIn,
                     shape: metalShape
                 )
-            } catch {
-                throw .invalidArguments("hybrid metal attention failed at layer \(layerIndex), token \(tokenIndex): \(error)")
-            }
-            timings.tMetal += RuntimeClock.ms(RuntimeClock.now() - t0)
+                timings.tMetal += RuntimeClock.ms(RuntimeClock.now() - t0)
 
-            t0 = RuntimeClock.now()
-            do {
-                try context.withUnsafeBufferPointer { contextBuffer in
-                    try writeFP32SpatialSlice(
-                        to: handles.projectionContextIn,
-                        spatialIndex: 0,
-                        spatial: laneSpatial,
-                        data: contextBuffer,
-                        channels: dim
-                    )
-                }
-                try SurfaceIO.copyFP16SpatialSlice(
-                    dst: handles.projectionResidualIn,
-                    dstChannelOffset: 0,
-                    dstSpatialIndex: 0,
-                    dstSpatial: laneSpatial,
-                    src: handles.qkvIn,
-                    srcChannelOffset: 0,
-                    srcSpatialIndex: 0,
-                    srcSpatial: laneSpatial,
-                    channels: dim
-                )
+                t0 = RuntimeClock.now()
                 try kernels[layerIndex].decodeProjection.eval()
-                try SurfaceIO.copyFP16SpatialSlice(
-                    dst: handles.ffnIn,
-                    dstChannelOffset: 0,
-                    dstSpatialIndex: 0,
-                    dstSpatial: laneSpatial,
-                    src: handles.projectionOut,
-                    srcChannelOffset: 0,
-                    srcSpatialIndex: 0,
-                    srcSpatial: laneSpatial,
-                    channels: dim
-                )
             } catch {
                 throw .invalidArguments("hybrid decodeProjection failed at layer \(layerIndex), token \(tokenIndex): \(error)")
             }
@@ -1506,40 +1481,13 @@ private func writeFP32(
         throw .invalidArguments("IOSurface too small for \(byteCount)-byte fp32 write")
     }
     guard IOSurfaceLock(surface, [], nil) == kIOReturnSuccess else {
-        throw .invalidArguments("IOSurface lock failed for fp32 write")
+            throw .invalidArguments("IOSurface lock failed for fp32 write")
     }
     defer { IOSurfaceUnlock(surface, [], nil) }
     guard let source = data.baseAddress else {
         throw .invalidArguments("IOSurface base address unavailable for fp32 write")
     }
     memcpy(IOSurfaceGetBaseAddress(surface), source, byteCount)
-}
-
-private func writeFP32SpatialSlice(
-    to surface: IOSurfaceRef,
-    spatialIndex: Int,
-    spatial: Int,
-    data: UnsafeBufferPointer<Float>,
-    channels: Int
-) throws(ANEError) {
-    precondition(spatial > 0)
-    precondition(spatialIndex >= 0 && spatialIndex < spatial)
-    precondition(data.count == channels)
-    let requiredBytes = channels * spatial * MemoryLayout<Float>.stride
-    guard IOSurfaceGetAllocSize(surface) >= requiredBytes else {
-        throw .invalidArguments("IOSurface too small for fp32 spatial-slice write")
-    }
-    guard IOSurfaceLock(surface, [], nil) == kIOReturnSuccess else {
-        throw .invalidArguments("IOSurface lock failed for fp32 spatial-slice write")
-    }
-    defer { IOSurfaceUnlock(surface, [], nil) }
-    guard let source = data.baseAddress else {
-        throw .invalidArguments("IOSurface base address unavailable for fp32 spatial-slice write")
-    }
-    let baseAddress = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: Float.self)
-    for channel in 0..<channels {
-        baseAddress[channel * spatial + spatialIndex] = source[channel]
-    }
 }
 
 public extension ForwardPass {
