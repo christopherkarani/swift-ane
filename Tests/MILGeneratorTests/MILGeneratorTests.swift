@@ -464,6 +464,18 @@ final class MILGeneratorTests: XCTestCase {
         XCTAssertTrue(mil.contains("add("))
     }
 
+    func test_decode_ffn_generator_gpt2_uses_layernorm_biases_and_gelu() {
+        let mil = DecodeFFNGenerator(architecture: .gpt2).milText
+        XCTAssertEqual(extractMILInputNames(mil), ["x"])
+        XCTAssertEqual(extractMILReturnTuple(mil), ["out"])
+        XCTAssertTrue(mil.contains("rms2.bin"))
+        XCTAssertTrue(mil.contains("rms2_beta.bin"))
+        XCTAssertTrue(mil.contains("b1.bin"))
+        XCTAssertTrue(mil.contains("b2.bin"))
+        XCTAssertTrue(mil.contains("tanh("))
+        XCTAssertFalse(mil.contains("w3.bin"))
+    }
+
     func test_mil_builder_append_fp16_uses_fixed_posix_format() {
         var b = MILBuilder()
         b.appendFP16(0.125)

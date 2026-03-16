@@ -107,22 +107,46 @@ public struct HybridDecodeKernelSet: ~Copyable {
         laneSpatial: Int
     ) -> CompileSpec {
         let dim = ModelConfig.dim
-        let generator = DecodeQKVOnlyGenerator(laneSpatial: laneSpatial)
+        let generator = DecodeQKVOnlyGenerator(
+            laneSpatial: laneSpatial,
+            architecture: weights.architecture
+        )
 
         let rms1Blob = buildBlob(from: weights.rmsAtt, rows: 1, cols: dim)
         let wqBlob = buildBlob(from: weights.Wq, rows: dim, cols: dim)
         let wkBlob = buildBlob(from: weights.Wk, rows: dim, cols: dim)
         let wvBlob = buildBlob(from: weights.Wv, rows: dim, cols: dim)
+        let rms1BetaBlob = buildBlob(from: weights.attentionNormBeta, rows: 1, cols: dim)
+        let bqBlob = buildBlob(from: weights.bq, rows: 1, cols: dim)
+        let bkBlob = buildBlob(from: weights.bk, rows: 1, cols: dim)
+        let bvBlob = buildBlob(from: weights.bv, rows: 1, cols: dim)
 
-        return CompileSpec(
-            kind: .decodeQKVOnly,
-            milText: generator.milText,
-            weights: [
+        let qkvWeights: [(path: String, data: Data)]
+        switch weights.architecture {
+        case .rmsNormSwiGLU:
+            qkvWeights = [
                 (path: "@model_path/weights/rms1.bin", data: rms1Blob),
                 (path: "@model_path/weights/wq.bin", data: wqBlob),
                 (path: "@model_path/weights/wk.bin", data: wkBlob),
                 (path: "@model_path/weights/wv.bin", data: wvBlob),
-            ],
+            ]
+        case .gpt2:
+            qkvWeights = [
+                (path: "@model_path/weights/rms1.bin", data: rms1Blob),
+                (path: "@model_path/weights/rms1_beta.bin", data: rms1BetaBlob),
+                (path: "@model_path/weights/wq.bin", data: wqBlob),
+                (path: "@model_path/weights/wk.bin", data: wkBlob),
+                (path: "@model_path/weights/wv.bin", data: wvBlob),
+                (path: "@model_path/weights/bq.bin", data: bqBlob),
+                (path: "@model_path/weights/bk.bin", data: bkBlob),
+                (path: "@model_path/weights/bv.bin", data: bvBlob),
+            ]
+        }
+
+        return CompileSpec(
+            kind: .decodeQKVOnly,
+            milText: generator.milText,
+            weights: qkvWeights,
             inputSizes: generator.inputByteSizes,
             outputSizes: generator.outputByteSizes
         )
@@ -147,22 +171,43 @@ public struct HybridDecodeKernelSet: ~Copyable {
     ) -> CompileSpec {
         let dim = ModelConfig.dim
         let hidden = ModelConfig.hidden
-        let generator = DecodeFFNGenerator(laneSpatial: laneSpatial)
+        let generator = DecodeFFNGenerator(
+            laneSpatial: laneSpatial,
+            architecture: weights.architecture
+        )
 
         let rms2Blob = buildBlob(from: weights.rmsFfn, rows: 1, cols: dim)
         let w1Blob = buildBlob(from: weights.W1, rows: hidden, cols: dim)
         let w3Blob = buildBlob(from: weights.W3, rows: hidden, cols: dim)
         let w2Blob = buildBlob(from: weights.W2, rows: dim, cols: hidden)
+        let rms2BetaBlob = buildBlob(from: weights.ffnNormBeta, rows: 1, cols: dim)
+        let b1Blob = buildBlob(from: weights.b1, rows: 1, cols: hidden)
+        let b2Blob = buildBlob(from: weights.b2, rows: 1, cols: dim)
 
-        return CompileSpec(
-            kind: .decodeFFN,
-            milText: generator.milText,
-            weights: [
+        let ffnWeights: [(path: String, data: Data)]
+        switch weights.architecture {
+        case .rmsNormSwiGLU:
+            ffnWeights = [
                 (path: "@model_path/weights/rms2.bin", data: rms2Blob),
                 (path: "@model_path/weights/w1.bin", data: w1Blob),
                 (path: "@model_path/weights/w3.bin", data: w3Blob),
                 (path: "@model_path/weights/w2.bin", data: w2Blob),
-            ],
+            ]
+        case .gpt2:
+            ffnWeights = [
+                (path: "@model_path/weights/rms2.bin", data: rms2Blob),
+                (path: "@model_path/weights/rms2_beta.bin", data: rms2BetaBlob),
+                (path: "@model_path/weights/w1.bin", data: w1Blob),
+                (path: "@model_path/weights/w2.bin", data: w2Blob),
+                (path: "@model_path/weights/b1.bin", data: b1Blob),
+                (path: "@model_path/weights/b2.bin", data: b2Blob),
+            ]
+        }
+
+        return CompileSpec(
+            kind: .decodeFFN,
+            milText: generator.milText,
+            weights: ffnWeights,
             inputSizes: [generator.inputBytes],
             outputSizes: generator.outputByteSizes
         )

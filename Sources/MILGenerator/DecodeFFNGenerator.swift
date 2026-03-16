@@ -1,5 +1,7 @@
 import Foundation
 import ANETypes
+import ANEBuilder
+import ANEGraphIR
 
 /// Decode-time FFN kernel with fused residual.
 ///
@@ -10,10 +12,15 @@ import ANETypes
 /// - `x + ffn(x)`: `[1, dim, 1, laneSpatial]`
 public struct DecodeFFNGenerator: MILProgramGenerator {
     public let laneSpatial: Int
+    public let architecture: LayerWeightsArchitecture
 
-    public init(laneSpatial: Int = 32) {
+    public init(
+        laneSpatial: Int = 32,
+        architecture: LayerWeightsArchitecture = .rmsNormSwiGLU
+    ) {
         precondition(laneSpatial > 0)
         self.laneSpatial = laneSpatial
+        self.architecture = architecture
     }
 
     public var inputBytes: Int { ModelConfig.dim * laneSpatial * 2 }
@@ -22,42 +29,52 @@ public struct DecodeFFNGenerator: MILProgramGenerator {
     public var milText: String {
         LegacyGraphSupport.emitGraph { graph in
             let x = try LegacyGraphSupport.input(&graph, name: "x", channels: ModelConfig.dim, spatial: laneSpatial)
-            let xn = try LegacyGraphSupport.rmsNorm(
-                &graph,
-                input: x,
-                dim: ModelConfig.dim,
-                spatial: laneSpatial,
-                sq: "sq",
-                axisName: "rax_ch",
-                keepDimsName: "kd",
-                ss: "ss",
-                invdName: "invd",
-                ss2: "ss2",
-                epsName: "eps",
-                ss3: "ss3",
-                nhalfName: "nhalf",
-                rrms: "rrms",
-                xr: "xr",
-                weightName: "rw",
-                weightPath: "@model_path/weights/rms2.bin",
-                output: "xn"
-            )
-            let y = try LegacyGraphSupport.swigluFFN(
-                &graph,
-                input: xn,
-                dim: ModelConfig.dim,
-                hidden: ModelConfig.hidden,
-                spatial: laneSpatial,
-                w1Path: "@model_path/weights/w1.bin",
-                h1Name: "h1",
-                w3Path: "@model_path/weights/w3.bin",
-                h3Name: "h3",
-                sigName: "sig",
-                siluName: "silu",
-                gateName: "gate",
-                w2Path: "@model_path/weights/w2.bin",
-                outputName: "y"
-            )
+            let normalized: Int
+            let y: Int
+
+            switch architecture {
+            case .rmsNormSwiGLU:
+                normalized = try graph.rmsNorm(
+                    "norm",
+                    input: x,
+                    dim: ModelConfig.dim,
+                    spatial: laneSpatial,
+                    eps: 0.00001,
+                    weightPath: "@model_path/weights/rms2.bin"
+                )
+                y = try graph.swigluFFN(
+                    "ffn",
+                    input: normalized,
+                    inDim: ModelConfig.dim,
+                    hiddenDim: ModelConfig.hidden,
+                    spatial: laneSpatial,
+                    w1Path: "@model_path/weights/w1.bin",
+                    w3Path: "@model_path/weights/w3.bin",
+                    w2Path: "@model_path/weights/w2.bin"
+                )
+            case .gpt2:
+                normalized = try graph.layerNorm(
+                    "norm",
+                    input: x,
+                    dim: ModelConfig.dim,
+                    spatial: laneSpatial,
+                    eps: 0.00001,
+                    gammaPath: "@model_path/weights/rms2.bin",
+                    betaPath: "@model_path/weights/rms2_beta.bin"
+                )
+                y = try graph.ffn(
+                    "ffn",
+                    input: normalized,
+                    inDim: ModelConfig.dim,
+                    hiddenDim: ModelConfig.hidden,
+                    spatial: laneSpatial,
+                    w1Path: "@model_path/weights/w1.bin",
+                    b1Path: "@model_path/weights/b1.bin",
+                    w2Path: "@model_path/weights/w2.bin",
+                    b2Path: "@model_path/weights/b2.bin",
+                    activation: .gelu
+                )
+            }
             let out = try graph.add("out", x: x, y: y)
             try LegacyGraphSupport.setOutputs(&graph, [("out", out)])
         }
