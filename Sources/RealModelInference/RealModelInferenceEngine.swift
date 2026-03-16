@@ -10,6 +10,7 @@ import ANEPasses
 import ANERuntime
 import ANETypes
 import CPUOps
+import Espresso
 import ModelSupport
 
 public struct GenerationResult: Sendable {
@@ -123,6 +124,12 @@ public struct RealModelInferenceEngine: ~Copyable {
         let finalNormBetaData: Data
     }
 
+    struct AttentionTestingOutputs {
+        let hidden: [Float]
+        let kCache: [Float]
+        let vCache: [Float]
+    }
+
     private enum LoadedTokenizer {
         case gpt2(GPT2BPETokenizer)
         case sentencePiece(SentencePieceTokenizer)
@@ -187,6 +194,12 @@ public struct RealModelInferenceEngine: ~Copyable {
     private var compiledLayers: LayerStorage<CompiledLayer>
     private var firstLayerInputSurface: IOSurfaceRef?
     private var compiledHead: LayerStorage<CompiledHead>
+    private var compiledHybridBucket: Int
+    private var compiledHybridLayers: LayerStorage<HybridDecodeKernelSet>
+    private var compiledHybridSurfaceHandles: [HybridDecodeSurfaceHandles]
+    private var compiledHybridHead: LayerStorage<CompiledHead>
+    private var compiledHybridHeadSpatial: Int
+    private var hybridMetalAttention: MetalAttentionKernel?
     private let classifierBlockMaxNorms: [Float]
     private var classifierLogitsScratch: [Float]
 
@@ -212,6 +225,12 @@ public struct RealModelInferenceEngine: ~Copyable {
         self.compiledLayers = Self.emptyStorage(CompiledLayer.self)
         self.firstLayerInputSurface = nil
         self.compiledHead = Self.emptyStorage(CompiledHead.self)
+        self.compiledHybridBucket = 0
+        self.compiledHybridLayers = Self.emptyStorage(HybridDecodeKernelSet.self)
+        self.compiledHybridSurfaceHandles = []
+        self.compiledHybridHead = Self.emptyStorage(CompiledHead.self)
+        self.compiledHybridHeadSpatial = 0
+        self.hybridMetalAttention = nil
         self.classifierBlockMaxNorms = classifierBlockMaxNorms
         self.classifierLogitsScratch = [Float](
             repeating: 0,
@@ -325,7 +344,44 @@ public struct RealModelInferenceEngine: ~Copyable {
         )
 
         let compileStart = DispatchTime.now().uptimeNanoseconds
-        let compileDidRun = try ensureCompiled(bucket: bucket)
+        var compileDidRun = false
+        var useHybridFastPath = false
+
+        do {
+            let hybridDidRun = try ensureHybridCompiled(bucket: bucket)
+            compileDidRun = compileDidRun || hybridDidRun
+            useHybridFastPath =
+                compiledHybridLayers.count == config.nLayer &&
+                compiledHybridSurfaceHandles.count == config.nLayer &&
+                compiledHybridHead.count == 1 &&
+                hybridMetalAttention != nil
+        } catch {
+            useHybridFastPath = false
+        }
+
+        if useHybridFastPath, let metalAttention = hybridMetalAttention {
+            let compileEnd = DispatchTime.now().uptimeNanoseconds
+            let compileTimeMs = compileDidRun ? Self.milliseconds(from: compileEnd - compileStart) : 0
+            do {
+                return try generateIncrementalHybrid(
+                    promptTokens: promptTokens,
+                    effectiveMaxTokens: effectiveMaxTokens,
+                    temperature: temperature,
+                    compileTimeMs: compileTimeMs,
+                    maxSeq: bucket,
+                    metalAttention: metalAttention,
+                    onStep: onStep
+                )
+            } catch {
+                if ProcessInfo.processInfo.environment["ESPRESSO_REALMODEL_DISABLE_HYBRID_FALLBACK"] == "1" {
+                    throw RealModelInferenceError.runtimeFailure("Hybrid fast path failed: \(error)")
+                }
+                useHybridFastPath = false
+            }
+        }
+
+        let baselineDidRun = try ensureCompiled(bucket: bucket)
+        compileDidRun = compileDidRun || baselineDidRun
         let compileEnd = DispatchTime.now().uptimeNanoseconds
         let compileTimeMs = compileDidRun ? Self.milliseconds(from: compileEnd - compileStart) : 0
 
@@ -448,6 +504,10 @@ public struct RealModelInferenceEngine: ~Copyable {
         return bucket
     }
 
+    static func incrementalHeadSpatial(channels: Int) -> Int {
+        minimumCompileSpatial(channels: channels)
+    }
+
     static func resolveTopLevelWeightPaths(
         config: MultiModelConfig,
         weightDir: String
@@ -537,6 +597,282 @@ public struct RealModelInferenceEngine: ~Copyable {
         return output
     }
 
+    static func compileAndEvalSingleLayerAttentionForTesting(
+        config: MultiModelConfig,
+        weightDir: String,
+        layer: Int,
+        spatial: Int,
+        input: [Float]
+    ) throws -> [Float] {
+        try compileAndEvalSingleLayerAttentionOutputsForTesting(
+            config: config,
+            weightDir: weightDir,
+            layer: layer,
+            spatial: spatial,
+            input: input
+        ).hidden
+    }
+
+    static func compileAndEvalSingleLayerAttentionOutputsForTesting(
+        config: MultiModelConfig,
+        weightDir: String,
+        layer: Int,
+        spatial: Int,
+        input: [Float]
+    ) throws -> AttentionTestingOutputs {
+        let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
+        try validateDirectory(weightDirURL)
+        let compiled = try compileLayer(
+            layerIndex: layer,
+            config: config,
+            weightDirURL: weightDirURL,
+            spatial: spatial
+        )
+        let inputSurface: IOSurfaceRef
+        do {
+            inputSurface = try compiled.attentionKernel.inputSurface(at: 0)
+        } catch {
+            throw RealModelInferenceError.runtimeFailure("Layer input surface unavailable: \(error)")
+        }
+
+        guard input.count == config.dModel * spatial else {
+            throw RealModelInferenceError.invalidGenerationParameters(
+                "Single-layer attention test input must have \(config.dModel * spatial) floats"
+            )
+        }
+
+        try input.withUnsafeBufferPointer { buffer in
+            try Self.writeFP32(to: inputSurface, data: buffer)
+        }
+
+        do {
+            try compiled.attentionKernel.eval()
+        } catch {
+            throw RealModelInferenceError.runtimeFailure("Single-layer attention eval failed: \(error)")
+        }
+
+        var hidden = [Float](repeating: 0, count: config.dModel * spatial)
+        try hidden.withUnsafeMutableBufferPointer { buffer in
+            try Self.readFP32(from: compiled.attentionOutputSurface, into: buffer)
+        }
+        let kSurface = try compiled.attentionKernel.outputSurface(at: 1)
+        let vSurface = try compiled.attentionKernel.outputSurface(at: 2)
+        var kCache = [Float](repeating: 0, count: config.dModel * spatial)
+        var vCache = [Float](repeating: 0, count: config.dModel * spatial)
+        try kCache.withUnsafeMutableBufferPointer { buffer in
+            try Self.readFP32(from: kSurface, into: buffer)
+        }
+        try vCache.withUnsafeMutableBufferPointer { buffer in
+            try Self.readFP32(from: vSurface, into: buffer)
+        }
+        return AttentionTestingOutputs(hidden: hidden, kCache: kCache, vCache: vCache)
+    }
+
+    static func composeEmbeddingInputForTesting(
+        config: MultiModelConfig,
+        weightDir: String,
+        tokens: [UInt16]
+    ) throws -> [Float] {
+        let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
+        try validateDirectory(weightDirURL)
+        guard !tokens.isEmpty else {
+            throw RealModelInferenceError.invalidGenerationParameters("Testing token list must not be empty")
+        }
+        guard tokens.count <= config.maxSeq else {
+            throw RealModelInferenceError.invalidGenerationParameters(
+                "Testing token count \(tokens.count) exceeds context \(config.maxSeq)"
+            )
+        }
+
+        let topLevelPaths = try resolveTopLevelWeightPaths(config: config, weightDir: weightDir)
+        let tokenEmbedding = try loadWeightTable(
+            at: topLevelPaths.tokenEmbedding,
+            expectedCount: config.vocab * config.dModel
+        )
+        let positionEmbedding = try loadWeightTable(
+            at: topLevelPaths.positionEmbedding,
+            expectedCount: config.maxSeq * config.dModel
+        )
+
+        return composeTestingEmbeddingInput(
+            config: config,
+            tokens: tokens,
+            tokenEmbedding: tokenEmbedding,
+            positionEmbedding: positionEmbedding
+        )
+    }
+
+    static func evalHybridSingleLayerForTesting(
+        config: MultiModelConfig,
+        weightDir: String,
+        layer: Int,
+        tokens: [UInt16]
+    ) throws -> [Float] {
+        let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
+        try validateDirectory(weightDirURL)
+        guard !tokens.isEmpty else {
+            throw RealModelInferenceError.invalidGenerationParameters("Testing token list must not be empty")
+        }
+        guard tokens.count <= config.maxSeq else {
+            throw RealModelInferenceError.invalidGenerationParameters(
+                "Testing token count \(tokens.count) exceeds context \(config.maxSeq)"
+            )
+        }
+
+        let topLevelPaths = try resolveTopLevelWeightPaths(config: config, weightDir: weightDir)
+        let tokenEmbedding = try loadWeightTable(
+            at: topLevelPaths.tokenEmbedding,
+            expectedCount: config.vocab * config.dModel
+        )
+        let positionEmbedding = try loadWeightTable(
+            at: topLevelPaths.positionEmbedding,
+            expectedCount: config.maxSeq * config.dModel
+        )
+        let paths = LayerWeightPaths.forLayer(layer, config: config, blobDir: weightDirURL.path)
+        let weights = try loadHybridLayerWeights(config: config, paths: paths)
+        let maxSeq = max(tokens.count, 1)
+        let kernels = try LayerStorage<HybridDecodeKernelSet>(count: 1, throwingInitializer: { _ in
+            try HybridDecodeKernelSet(weights: weights, maxSeq: maxSeq)
+        })
+        let handles = [try HybridDecodeSurfaceHandles(kernels: kernels[0], logicalMaxSeq: maxSeq)]
+        let metalAttention = try MetalAttentionKernel()
+        let xCur = TensorBuffer(count: config.dModel, zeroed: true)
+        var decodeState = try DecodeState(maxSeq: maxSeq)
+
+        ForwardPass.initializeHybridDecodeCaches(surfaceHandles: handles, dim: config.dModel)
+
+        for (position, token) in tokens.enumerated() {
+            writeTestingIncrementalEmbedding(
+                config: config,
+                token: token,
+                position: position,
+                tokenEmbedding: tokenEmbedding,
+                positionEmbedding: positionEmbedding,
+                into: xCur
+            )
+            var timings = HybridDecodeTimingBreakdown()
+            try ForwardPass.runHybridDecodeTimed(
+                xCur: xCur,
+                kernels: kernels,
+                surfaceHandles: handles,
+                metalAttention: metalAttention,
+                decodeState: &decodeState,
+                dim: config.dModel,
+                timings: &timings
+            )
+        }
+
+        return xCur.withUnsafeBufferPointer { Array($0) }
+    }
+
+    static func evalHybridSingleLayerAttentionForTesting(
+        config: MultiModelConfig,
+        weightDir: String,
+        layer: Int,
+        tokens: [UInt16]
+    ) throws -> [Float] {
+        try evalHybridSingleLayerAttentionOutputsForTesting(
+            config: config,
+            weightDir: weightDir,
+            layer: layer,
+            tokens: tokens
+        ).hidden
+    }
+
+    static func evalHybridSingleLayerAttentionOutputsForTesting(
+        config: MultiModelConfig,
+        weightDir: String,
+        layer: Int,
+        tokens: [UInt16]
+    ) throws -> AttentionTestingOutputs {
+        let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
+        try validateDirectory(weightDirURL)
+        guard !tokens.isEmpty else {
+            throw RealModelInferenceError.invalidGenerationParameters("Testing token list must not be empty")
+        }
+        guard tokens.count <= config.maxSeq else {
+            throw RealModelInferenceError.invalidGenerationParameters(
+                "Testing token count \(tokens.count) exceeds context \(config.maxSeq)"
+            )
+        }
+
+        let topLevelPaths = try resolveTopLevelWeightPaths(config: config, weightDir: weightDir)
+        let tokenEmbedding = try loadWeightTable(
+            at: topLevelPaths.tokenEmbedding,
+            expectedCount: config.vocab * config.dModel
+        )
+        let positionEmbedding = try loadWeightTable(
+            at: topLevelPaths.positionEmbedding,
+            expectedCount: config.maxSeq * config.dModel
+        )
+        let paths = LayerWeightPaths.forLayer(layer, config: config, blobDir: weightDirURL.path)
+        let weights = try loadHybridLayerWeights(config: config, paths: paths)
+        let maxSeq = max(tokens.count, 1)
+        let kernels = try LayerStorage<HybridDecodeKernelSet>(count: 1, throwingInitializer: { _ in
+            try HybridDecodeKernelSet(weights: weights, maxSeq: maxSeq)
+        })
+        let handles = [try HybridDecodeSurfaceHandles(kernels: kernels[0], logicalMaxSeq: maxSeq)]
+        let metalAttention = try MetalAttentionKernel()
+        let xCur = TensorBuffer(count: config.dModel, zeroed: true)
+        var decodeState = try DecodeState(maxSeq: maxSeq)
+
+        ForwardPass.initializeHybridDecodeCaches(surfaceHandles: handles, dim: config.dModel)
+
+        for (position, token) in tokens.enumerated() {
+            writeTestingIncrementalEmbedding(
+                config: config,
+                token: token,
+                position: position,
+                tokenEmbedding: tokenEmbedding,
+                positionEmbedding: positionEmbedding,
+                into: xCur
+            )
+            var timings = HybridDecodeTimingBreakdown()
+            try ForwardPass.runHybridDecodeTimed(
+                xCur: xCur,
+                kernels: kernels,
+                surfaceHandles: handles,
+                metalAttention: metalAttention,
+                decodeState: &decodeState,
+                dim: config.dModel,
+                timings: &timings
+            )
+        }
+
+        var hidden = [Float](repeating: 0, count: config.dModel)
+        try hidden.withUnsafeMutableBufferPointer { buffer in
+            try SurfaceIO.readFP16SpatialSlice(
+                from: handles[0].ffnIn,
+                channelOffset: 0,
+                spatialIndex: 0,
+                spatial: handles[0].laneSpatial,
+                into: buffer,
+                channels: config.dModel
+            )
+        }
+        var kCache = [Float](repeating: 0, count: config.dModel * maxSeq)
+        var vCache = [Float](repeating: 0, count: config.dModel * maxSeq)
+        kCache.withUnsafeMutableBufferPointer { buffer in
+            SurfaceIO.readFP16(
+                from: handles[0].kCacheFull,
+                into: buffer,
+                channelOffset: 0,
+                channels: config.dModel,
+                spatial: maxSeq
+            )
+        }
+        vCache.withUnsafeMutableBufferPointer { buffer in
+            SurfaceIO.readFP16(
+                from: handles[0].vCacheFull,
+                into: buffer,
+                channelOffset: 0,
+                channels: config.dModel,
+                spatial: maxSeq
+            )
+        }
+        return AttentionTestingOutputs(hidden: hidden, kCache: kCache, vCache: vCache)
+    }
+
     static func compileHeadForTesting(
         config: MultiModelConfig,
         weightDir: String
@@ -614,6 +950,268 @@ public struct RealModelInferenceEngine: ~Copyable {
         return true
     }
 
+    private mutating func ensureHybridCompiled(bucket: Int) throws -> Bool {
+        var didCompile = false
+
+        if compiledHybridBucket < bucket {
+            let newLayers = try Self.compileHybridLayers(
+                config: config,
+                weightDirURL: weightDirURL,
+                maxSeq: bucket
+            )
+            var newSurfaceHandles: [HybridDecodeSurfaceHandles] = []
+            newSurfaceHandles.reserveCapacity(newLayers.count)
+            for layerIndex in 0..<newLayers.count {
+                do {
+                    newSurfaceHandles.append(
+                        try HybridDecodeSurfaceHandles(
+                            kernels: newLayers[layerIndex],
+                            logicalMaxSeq: bucket
+                        )
+                    )
+                } catch {
+                    throw RealModelInferenceError.runtimeFailure(
+                        "Hybrid decode surfaces unavailable for layer \(layerIndex): \(error)"
+                    )
+                }
+            }
+
+            compiledHybridLayers = newLayers
+            compiledHybridSurfaceHandles = newSurfaceHandles
+            compiledHybridBucket = bucket
+            didCompile = true
+        }
+
+        if hybridMetalAttention == nil {
+            do {
+                hybridMetalAttention = try MetalAttentionKernel()
+            } catch {
+                throw RealModelInferenceError.runtimeFailure("Hybrid Metal attention initialization failed: \(error)")
+            }
+            didCompile = true
+        }
+
+        let hybridHeadSpatial = Self.incrementalHeadSpatial(channels: config.dModel)
+        if compiledHybridHead.count != 1 || compiledHybridHeadSpatial != hybridHeadSpatial {
+            compiledHybridHead = try LayerStorage<CompiledHead>(count: 1, throwingInitializer: { _ in
+                try Self.compileHead(
+                    config: config,
+                    weightDirURL: weightDirURL,
+                    assets: gpt2Assets,
+                    spatial: hybridHeadSpatial
+                )
+            })
+            compiledHybridHeadSpatial = hybridHeadSpatial
+            try Self.zeroSurface(compiledHybridHead[0].inputSurface)
+            didCompile = true
+        }
+
+        return didCompile
+    }
+
+    private mutating func generateIncrementalHybrid(
+        promptTokens: [UInt16],
+        effectiveMaxTokens: Int,
+        temperature: Float,
+        compileTimeMs: Double,
+        maxSeq: Int,
+        metalAttention: MetalAttentionKernel,
+        onStep: ((GenerationStep) -> Void)?
+    ) throws -> GenerationResult {
+        guard compiledHybridLayers.count == config.nLayer,
+              compiledHybridSurfaceHandles.count == config.nLayer,
+              compiledHybridHead.count == 1,
+              compiledHybridHeadSpatial > 0 else {
+            throw RealModelInferenceError.runtimeFailure("Hybrid decode state is unavailable")
+        }
+
+        ForwardPass.initializeHybridDecodeCaches(
+            surfaceHandles: compiledHybridSurfaceHandles,
+            dim: config.dModel
+        )
+        if ProcessInfo.processInfo.environment["ESPRESSO_REALMODEL_DEBUG_HYBRID_CACHE"] == "1",
+           let firstHandles = compiledHybridSurfaceHandles.first {
+            fputs(
+                "[hybrid-surface] qkvIn_row=\(IOSurfaceGetBytesPerRow(firstHandles.qkvIn)) qOut_row=\(IOSurfaceGetBytesPerRow(firstHandles.qOut)) ffnIn_row=\(IOSurfaceGetBytesPerRow(firstHandles.ffnIn)) ffnOut_row=\(IOSurfaceGetBytesPerRow(firstHandles.ffnOut)) laneSpatial=\(firstHandles.laneSpatial) maxSeq=\(firstHandles.maxSeq)\n",
+                stderr
+            )
+        }
+        let shouldDebugHybridCache = ProcessInfo.processInfo.environment["ESPRESSO_REALMODEL_DEBUG_HYBRID_CACHE"] == "1"
+
+        let xCur = TensorBuffer(count: config.dModel, zeroed: true)
+        var decodeState: DecodeState
+        do {
+            decodeState = try DecodeState(maxSeq: maxSeq)
+        } catch {
+            throw RealModelInferenceError.runtimeFailure("Hybrid decode state initialization failed: \(error)")
+        }
+        var timings = HybridDecodeTimingBreakdown()
+
+        for (position, token) in promptTokens.enumerated() {
+            try writeIncrementalEmbedding(token: token, position: position, into: xCur)
+            let debugInput: [Float]?
+            if shouldDebugHybridCache, position < 2 {
+                debugInput = xCur.withUnsafeBufferPointer { Array($0) }
+            } else {
+                debugInput = nil
+            }
+            do {
+                try ForwardPass.runHybridDecodeTimed(
+                    xCur: xCur,
+                    kernels: compiledHybridLayers,
+                    surfaceHandles: compiledHybridSurfaceHandles,
+                    metalAttention: metalAttention,
+                    decodeState: &decodeState,
+                    dim: config.dModel,
+                    timings: &timings
+                )
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid prefill failed at prompt position \(position): \(error)"
+                )
+            }
+            if shouldDebugHybridCache,
+               position < 2,
+               let firstHandles = compiledHybridSurfaceHandles.first {
+                try Self.debugLogHybridCache(
+                    label: "prefill_\(position)",
+                    surface: firstHandles.kCacheFull,
+                    maxSeq: maxSeq,
+                    channels: min(8, config.dModel),
+                    tokenCount: min(position + 1, 2)
+                )
+                if let debugInput {
+                    let layer0Paths = LayerWeightPaths.forLayer(0, config: config, blobDir: weightDirURL.path)
+                    let debugLayer0Weights = try Self.loadHybridLayerWeights(config: config, paths: layer0Paths)
+                    let expectedK = Self.debugExpectedGPT2KPrefix(
+                        input: debugInput,
+                        weights: debugLayer0Weights,
+                        eps: config.normEps,
+                        prefixChannels: min(8, config.dModel)
+                    )
+                    let expectedKTransposed = Self.debugExpectedGPT2KPrefixTransposed(
+                        input: debugInput,
+                        weights: debugLayer0Weights,
+                        eps: config.normEps,
+                        prefixChannels: min(8, config.dModel)
+                    )
+                    let values = expectedK.map { String(format: "%.4f", $0) }.joined(separator: ",")
+                    let transposedValues = expectedKTransposed.map { String(format: "%.4f", $0) }.joined(separator: ",")
+                    fputs("[hybrid-kref] prefill_\(position) [\(values)]\n", stderr)
+                    fputs("[hybrid-kref-t] prefill_\(position) [\(transposedValues)]\n", stderr)
+                }
+            }
+        }
+
+        var allTokens = promptTokens
+        var generatedTokens: [UInt16] = []
+        generatedTokens.reserveCapacity(effectiveMaxTokens)
+
+        let generationStart = DispatchTime.now().uptimeNanoseconds
+        var emissionStart = generationStart
+        var firstTokenLatencyMs = 0.0
+        var firstTokenRecorded = false
+        var rng = SystemRandomNumberGenerator()
+        var normalized = [Float](repeating: 0, count: config.dModel)
+        let headSpatial = compiledHybridHeadSpatial
+
+        while generatedTokens.count < effectiveMaxTokens {
+            do {
+                try xCur.withUnsafeBufferPointer { buffer in
+                    try Self.writeFP32SpatialSlice(
+                        to: compiledHybridHead[0].inputSurface,
+                        spatialIndex: 0,
+                        spatial: headSpatial,
+                        data: buffer,
+                        channels: config.dModel
+                    )
+                }
+                try compiledHybridHead[0].kernel.eval()
+                try normalized.withUnsafeMutableBufferPointer { buffer in
+                    try Self.readFP32SpatialSlice(
+                        from: compiledHybridHead[0].outputSurface,
+                        spatialIndex: 0,
+                        spatial: headSpatial,
+                        into: buffer,
+                        channels: config.dModel
+                    )
+                }
+            } catch {
+                throw RealModelInferenceError.runtimeFailure("Hybrid step head evaluation failed: \(error)")
+            }
+
+            let nextToken = selectTokenFromNormalizedHidden(
+                normalized,
+                temperature: temperature,
+                using: &rng
+            )
+            let emissionNow = DispatchTime.now().uptimeNanoseconds
+            let tokenLatencyMs = Self.milliseconds(from: emissionNow - emissionStart)
+
+            if !firstTokenRecorded {
+                firstTokenLatencyMs = Self.milliseconds(from: emissionNow - generationStart)
+                firstTokenRecorded = true
+            }
+
+            if nextToken == Self.gpt2EOSToken {
+                break
+            }
+
+            generatedTokens.append(nextToken)
+            allTokens.append(nextToken)
+            let elapsedMs = Self.milliseconds(from: emissionNow - generationStart)
+            let tokensPerSecond = Double(generatedTokens.count) / max(elapsedMs / 1_000, 1e-9)
+            onStep?(
+                GenerationStep(
+                    token: nextToken,
+                    generatedTokens: generatedTokens,
+                    text: tokenizer.decode(allTokens.map(Int.init)),
+                    tokenLatencyMs: tokenLatencyMs,
+                    elapsedMs: elapsedMs,
+                    firstTokenLatencyMs: firstTokenLatencyMs,
+                    tokensPerSecond: tokensPerSecond
+                )
+            )
+
+            if generatedTokens.count >= effectiveMaxTokens || allTokens.count >= config.maxSeq {
+                break
+            }
+
+            try writeIncrementalEmbedding(token: nextToken, position: allTokens.count - 1, into: xCur)
+            do {
+                try ForwardPass.runHybridDecodeTimed(
+                    xCur: xCur,
+                    kernels: compiledHybridLayers,
+                    surfaceHandles: compiledHybridSurfaceHandles,
+                    metalAttention: metalAttention,
+                    decodeState: &decodeState,
+                    dim: config.dModel,
+                    timings: &timings
+                )
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid decode failed at generated token \(generatedTokens.count - 1): \(error)"
+                )
+            }
+            emissionStart = emissionNow
+        }
+
+        let generationEnd = DispatchTime.now().uptimeNanoseconds
+        let generationTimeMs = Self.milliseconds(from: generationEnd - generationStart)
+        let tokensPerSecond = generatedTokens.isEmpty
+            ? 0
+            : Double(generatedTokens.count) / max(generationTimeMs / 1_000, 1e-9)
+
+        return GenerationResult(
+            text: tokenizer.decode(allTokens.map(Int.init)),
+            tokens: generatedTokens,
+            promptTokens: promptTokens,
+            tokensPerSecond: tokensPerSecond,
+            compileTimeMs: compileTimeMs,
+            firstTokenLatencyMs: firstTokenLatencyMs
+        )
+    }
+
     private func encodePrompt(_ prompt: String) throws -> [UInt16] {
         let rawTokens = tokenizer.encode(prompt)
         guard !rawTokens.isEmpty else {
@@ -645,6 +1243,44 @@ public struct RealModelInferenceEngine: ~Copyable {
         return output
     }
 
+    private func writeIncrementalEmbedding(
+        token: UInt16,
+        position: Int,
+        into buffer: borrowing TensorBuffer
+    ) throws {
+        guard position >= 0, position < config.maxSeq else {
+            throw RealModelInferenceError.runtimeFailure("Position \(position) exceeds context \(config.maxSeq)")
+        }
+
+        let tokenBase = Int(token) * config.dModel
+        let positionBase = position * config.dModel
+        buffer.withUnsafeMutableBufferPointer { dst in
+            for channel in 0..<config.dModel {
+                dst[channel] =
+                    gpt2Assets.tokenEmbedding[tokenBase + channel] +
+                    gpt2Assets.positionEmbedding[positionBase + channel]
+            }
+        }
+    }
+
+    private static func compileHybridLayers(
+        config: MultiModelConfig,
+        weightDirURL: URL,
+        maxSeq: Int
+    ) throws -> LayerStorage<HybridDecodeKernelSet> {
+        try LayerStorage<HybridDecodeKernelSet>(count: config.nLayer, throwingInitializer: { layerIndex in
+            let paths = LayerWeightPaths.forLayer(layerIndex, config: config, blobDir: weightDirURL.path)
+            let weights = try loadHybridLayerWeights(config: config, paths: paths)
+            do {
+                return try HybridDecodeKernelSet(weights: weights, maxSeq: maxSeq)
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid decode compilation failed for layer \(layerIndex): \(error)"
+                )
+            }
+        })
+    }
+
     private static func compileLayers(
         config: MultiModelConfig,
         weightDirURL: URL,
@@ -658,6 +1294,50 @@ public struct RealModelInferenceEngine: ~Copyable {
                 spatial: bucket
             )
         })
+    }
+
+    private static func loadHybridLayerWeights(
+        config: MultiModelConfig,
+        paths: LayerWeightPaths
+    ) throws -> LayerWeights {
+        let weights = LayerWeights(
+            architecture: .gpt2,
+            dim: config.dModel,
+            hiddenDim: config.hiddenDim
+        )
+
+        let layerDirectory = URL(fileURLWithPath: paths.wq).deletingLastPathComponent()
+        let attentionNormBiasPath = replacingGammaSuffix(in: paths.rmsAtt)
+        let ffnNormBiasPath = replacingGammaSuffix(in: paths.rmsFfn)
+
+        try loadTensor(weights.rmsAtt, from: paths.rmsAtt, expectedCount: config.dModel)
+        try loadTensor(weights.attentionNormBeta, from: attentionNormBiasPath, expectedCount: config.dModel)
+        try loadTensor(weights.Wq, from: paths.wq, expectedCount: config.dModel * config.dModel)
+        try loadTensor(weights.Wk, from: paths.wk, expectedCount: config.dModel * config.dModel)
+        try loadTensor(weights.Wv, from: paths.wv, expectedCount: config.dModel * config.dModel)
+        try loadTensor(weights.Wo, from: paths.wo, expectedCount: config.dModel * config.dModel)
+        guard let bqPath = paths.bq,
+              let bkPath = paths.bk,
+              let bvPath = paths.bv,
+              let boPath = paths.bo else {
+            throw RealModelInferenceError.runtimeFailure("Missing GPT-2 QKV bias weights for \(layerDirectory.path)")
+        }
+        try loadTensor(weights.bq, from: bqPath, expectedCount: config.dModel)
+        try loadTensor(weights.bk, from: bkPath, expectedCount: config.dModel)
+        try loadTensor(weights.bv, from: bvPath, expectedCount: config.dModel)
+        try loadTensor(weights.bo, from: boPath, expectedCount: config.dModel)
+
+        try loadTensor(weights.rmsFfn, from: paths.rmsFfn, expectedCount: config.dModel)
+        try loadTensor(weights.ffnNormBeta, from: ffnNormBiasPath, expectedCount: config.dModel)
+        try loadTensor(weights.W1, from: paths.w1, expectedCount: config.hiddenDim * config.dModel)
+        try loadTensor(weights.W2, from: paths.w2, expectedCount: config.dModel * config.hiddenDim)
+        guard let b1Path = paths.b1, let b2Path = paths.b2 else {
+            throw RealModelInferenceError.runtimeFailure("Missing GPT-2 FFN bias weights for \(layerDirectory.path)")
+        }
+        try loadTensor(weights.b1, from: b1Path, expectedCount: config.hiddenDim)
+        try loadTensor(weights.b2, from: b2Path, expectedCount: config.dModel)
+
+        return weights
     }
 
     private enum LayerBlockKind: String {
@@ -1220,6 +1900,22 @@ public struct RealModelInferenceEngine: ~Copyable {
         return values
     }
 
+    private static func loadTensor(
+        _ tensor: borrowing TensorBuffer,
+        from path: String,
+        expectedCount: Int
+    ) throws {
+        let values = try loadWeightTable(at: path, expectedCount: expectedCount)
+        tensor.withUnsafeMutableBufferPointer { dst in
+            values.withUnsafeBufferPointer { src in
+                guard let dstBase = dst.baseAddress, let srcBase = src.baseAddress else {
+                    return
+                }
+                dstBase.update(from: srcBase, count: expectedCount)
+            }
+        }
+    }
+
     private static func compileBlobPath(actualPath: String, rootDir: URL) -> String {
         let rootPath = rootDir.standardizedFileURL.path
         let filePath = URL(fileURLWithPath: actualPath).standardizedFileURL.path
@@ -1523,6 +2219,47 @@ public struct RealModelInferenceEngine: ~Copyable {
         return output
     }
 
+    private static func composeTestingEmbeddingInput(
+        config: MultiModelConfig,
+        tokens: [UInt16],
+        tokenEmbedding: [Float],
+        positionEmbedding: [Float]
+    ) -> [Float] {
+        var output = [Float](repeating: 0, count: config.dModel * tokens.count)
+        for tokenIndex in tokens.indices {
+            let token = Int(tokens[tokenIndex])
+            precondition(token >= 0 && token < config.vocab)
+            let tokenBase = token * config.dModel
+            let positionBase = tokenIndex * config.dModel
+            for channel in 0..<config.dModel {
+                output[channel * tokens.count + tokenIndex] =
+                    tokenEmbedding[tokenBase + channel] +
+                    positionEmbedding[positionBase + channel]
+            }
+        }
+        return output
+    }
+
+    private static func writeTestingIncrementalEmbedding(
+        config: MultiModelConfig,
+        token: UInt16,
+        position: Int,
+        tokenEmbedding: [Float],
+        positionEmbedding: [Float],
+        into buffer: borrowing TensorBuffer
+    ) {
+        precondition(position >= 0 && position < config.maxSeq)
+        let tokenBase = Int(token) * config.dModel
+        let positionBase = position * config.dModel
+        buffer.withUnsafeMutableBufferPointer { dst in
+            for channel in 0..<config.dModel {
+                dst[channel] =
+                    tokenEmbedding[tokenBase + channel] +
+                    positionEmbedding[positionBase + channel]
+            }
+        }
+    }
+
     private static func writeFP32(
         to surface: IOSurfaceRef,
         data: UnsafeBufferPointer<Float>
@@ -1542,6 +2279,33 @@ public struct RealModelInferenceEngine: ~Copyable {
         memcpy(baseAddress, source, byteCount)
     }
 
+    private static func writeFP32SpatialSlice(
+        to surface: IOSurfaceRef,
+        spatialIndex: Int,
+        spatial: Int,
+        data: UnsafeBufferPointer<Float>,
+        channels: Int
+    ) throws {
+        precondition(spatial > 0)
+        precondition(spatialIndex >= 0 && spatialIndex < spatial)
+        precondition(data.count == channels)
+        let requiredBytes = channels * spatial * MemoryLayout<Float>.stride
+        guard IOSurfaceGetAllocSize(surface) >= requiredBytes else {
+            throw RealModelInferenceError.runtimeFailure("IOSurface too small for fp32 spatial-slice write")
+        }
+        guard IOSurfaceLock(surface, [], nil) == kIOReturnSuccess else {
+            throw RealModelInferenceError.runtimeFailure("IOSurface lock failed for fp32 spatial-slice write")
+        }
+        defer { IOSurfaceUnlock(surface, [], nil) }
+        guard let source = data.baseAddress else {
+            throw RealModelInferenceError.runtimeFailure("IOSurface base address unavailable for fp32 spatial-slice write")
+        }
+        let baseAddress = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: Float.self)
+        for channel in 0..<channels {
+            baseAddress[channel * spatial + spatialIndex] = source[channel]
+        }
+    }
+
     private static func readFP32(
         from surface: IOSurfaceRef,
         into buffer: UnsafeMutableBufferPointer<Float>
@@ -1559,6 +2323,154 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
         let baseAddress = IOSurfaceGetBaseAddress(surface)
         memcpy(destination, baseAddress, byteCount)
+    }
+
+    private static func readFP32SpatialSlice(
+        from surface: IOSurfaceRef,
+        spatialIndex: Int,
+        spatial: Int,
+        into buffer: UnsafeMutableBufferPointer<Float>,
+        channels: Int
+    ) throws {
+        precondition(spatial > 0)
+        precondition(spatialIndex >= 0 && spatialIndex < spatial)
+        precondition(buffer.count == channels)
+        let requiredBytes = channels * spatial * MemoryLayout<Float>.stride
+        guard IOSurfaceGetAllocSize(surface) >= requiredBytes else {
+            throw RealModelInferenceError.runtimeFailure("IOSurface too small for fp32 spatial-slice read")
+        }
+        guard IOSurfaceLock(surface, .readOnly, nil) == kIOReturnSuccess else {
+            throw RealModelInferenceError.runtimeFailure("IOSurface lock failed for fp32 spatial-slice read")
+        }
+        defer { IOSurfaceUnlock(surface, .readOnly, nil) }
+        guard let destination = buffer.baseAddress else {
+            throw RealModelInferenceError.runtimeFailure("IOSurface base address unavailable for fp32 spatial-slice read")
+        }
+        let baseAddress = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: Float.self)
+        for channel in 0..<channels {
+            destination[channel] = baseAddress[channel * spatial + spatialIndex]
+        }
+    }
+
+    private static func zeroSurface(_ surface: IOSurfaceRef) throws {
+        guard IOSurfaceLock(surface, [], nil) == kIOReturnSuccess else {
+            throw RealModelInferenceError.runtimeFailure("IOSurface lock failed for zero initialization")
+        }
+        defer { IOSurfaceUnlock(surface, [], nil) }
+        memset(IOSurfaceGetBaseAddress(surface), 0, IOSurfaceGetAllocSize(surface))
+    }
+
+    private static func debugLogHybridCache(
+        label: String,
+        surface: IOSurfaceRef,
+        maxSeq: Int,
+        channels: Int,
+        tokenCount: Int
+    ) throws {
+        var parts: [String] = []
+        for tokenIndex in 0..<tokenCount {
+            var slice = [Float](repeating: 0, count: channels)
+            try slice.withUnsafeMutableBufferPointer { dst in
+                try SurfaceIO.readFP16SpatialSlice(
+                    from: surface,
+                    channelOffset: 0,
+                    spatialIndex: tokenIndex,
+                    spatial: maxSeq,
+                    into: dst,
+                    channels: channels
+                )
+            }
+            let values = slice.map { String(format: "%.4f", $0) }.joined(separator: ",")
+            parts.append("t\(tokenIndex)=[\(values)]")
+        }
+        fputs("[hybrid-cache] \(label) \(parts.joined(separator: " "))\n", stderr)
+    }
+
+    private static func debugExpectedGPT2KPrefix(
+        input: [Float],
+        weights: borrowing LayerWeights,
+        eps: Float,
+        prefixChannels: Int
+    ) -> [Float] {
+        let dim = weights.dim
+        precondition(input.count == dim)
+        precondition(prefixChannels <= dim)
+
+        let mean = input.reduce(0, +) / Float(dim)
+        var variance: Float = 0
+        for value in input {
+            let centered = value - mean
+            variance += centered * centered
+        }
+        variance /= Float(dim)
+        let invStd = 1 / sqrt(variance + eps)
+
+        var normalized = [Float](repeating: 0, count: dim)
+        weights.rmsAtt.withUnsafeBufferPointer { gamma in
+            weights.attentionNormBeta.withUnsafeBufferPointer { beta in
+                for channel in 0..<dim {
+                    normalized[channel] = ((input[channel] - mean) * invStd) * gamma[channel] + beta[channel]
+                }
+            }
+        }
+
+        var output = [Float](repeating: 0, count: prefixChannels)
+        weights.Wk.withUnsafeBufferPointer { wk in
+            weights.bk.withUnsafeBufferPointer { bias in
+                for row in 0..<prefixChannels {
+                    var accum = bias[row]
+                    let rowBase = row * dim
+                    for column in 0..<dim {
+                        accum += wk[rowBase + column] * normalized[column]
+                    }
+                    output[row] = accum
+                }
+            }
+        }
+        return output
+    }
+
+    private static func debugExpectedGPT2KPrefixTransposed(
+        input: [Float],
+        weights: borrowing LayerWeights,
+        eps: Float,
+        prefixChannels: Int
+    ) -> [Float] {
+        let dim = weights.dim
+        precondition(input.count == dim)
+        precondition(prefixChannels <= dim)
+
+        let mean = input.reduce(0, +) / Float(dim)
+        var variance: Float = 0
+        for value in input {
+            let centered = value - mean
+            variance += centered * centered
+        }
+        variance /= Float(dim)
+        let invStd = 1 / sqrt(variance + eps)
+
+        var normalized = [Float](repeating: 0, count: dim)
+        weights.rmsAtt.withUnsafeBufferPointer { gamma in
+            weights.attentionNormBeta.withUnsafeBufferPointer { beta in
+                for channel in 0..<dim {
+                    normalized[channel] = ((input[channel] - mean) * invStd) * gamma[channel] + beta[channel]
+                }
+            }
+        }
+
+        var output = [Float](repeating: 0, count: prefixChannels)
+        weights.Wk.withUnsafeBufferPointer { wk in
+            weights.bk.withUnsafeBufferPointer { bias in
+                for row in 0..<prefixChannels {
+                    var accum = bias[row]
+                    for column in 0..<dim {
+                        accum += wk[column * dim + row] * normalized[column]
+                    }
+                    output[row] = accum
+                }
+            }
+        }
+        return output
     }
 }
 

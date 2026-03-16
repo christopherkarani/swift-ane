@@ -5,10 +5,12 @@ import MILGenerator
 public struct HybridOutputProjectionWeights: Sendable {
     public let cacheKey: String
     public let rowMajorWeights: [Float]
+    public let rowMajorBias: [Float]
 
-    public init(cacheKey: String, rowMajorWeights: [Float]) {
+    public init(cacheKey: String, rowMajorWeights: [Float], rowMajorBias: [Float]) {
         self.cacheKey = cacheKey
         self.rowMajorWeights = rowMajorWeights
+        self.rowMajorBias = rowMajorBias
     }
 }
 
@@ -16,6 +18,7 @@ public struct HybridOutputProjectionWeights: Sendable {
 public struct HybridDecodeKernelSet: ~Copyable {
     internal enum KernelKind: String, CaseIterable {
         case decodeQKVOnly
+        case decodeProjection
         case decodeFFN
     }
 
@@ -28,6 +31,7 @@ public struct HybridDecodeKernelSet: ~Copyable {
     }
 
     public let decodeQKVOnly: ANEKernel
+    public let decodeProjection: ANEKernel
     public let decodeFFN: ANEKernel
     public let outputProjection: HybridOutputProjectionWeights
     public let maxSeq: Int
@@ -46,14 +50,28 @@ public struct HybridDecodeKernelSet: ~Copyable {
         }
     }
 
+    private static func copyTransposedWeights(from buffer: borrowing TensorBuffer, dim: Int) -> [Float] {
+        buffer.withUnsafeBufferPointer { ptr in
+            var result = [Float](repeating: 0, count: dim * dim)
+            for row in 0..<dim {
+                for column in 0..<dim {
+                    result[row * dim + column] = ptr[column * dim + row]
+                }
+            }
+            return result
+        }
+    }
+
     private init(
         decodeQKVOnly: consuming ANEKernel,
+        decodeProjection: consuming ANEKernel,
         decodeFFN: consuming ANEKernel,
         outputProjection: HybridOutputProjectionWeights,
         maxSeq: Int,
         laneSpatial: Int
     ) {
         self.decodeQKVOnly = decodeQKVOnly
+        self.decodeProjection = decodeProjection
         self.decodeFFN = decodeFFN
         self.outputProjection = outputProjection
         self.maxSeq = maxSeq
@@ -66,13 +84,18 @@ public struct HybridDecodeKernelSet: ~Copyable {
         }
         let laneSpatial = Self.resolvedLaneSpatialForCurrentProcess()
         let compiledQKV = try Self.compileDecodeQKVOnly(weights: weights, laneSpatial: laneSpatial)
+        let compiledProjection = try Self.compileDecodeProjection(weights: weights, laneSpatial: laneSpatial)
         let compiledFFN = try Self.compileDecodeFFN(weights: weights, laneSpatial: laneSpatial)
         let outputProjection = HybridOutputProjectionWeights(
             cacheKey: UUID().uuidString,
-            rowMajorWeights: Self.copyRowMajorWeights(from: weights.Wo)
+            rowMajorWeights: Self.copyRowMajorWeights(from: weights.Wo),
+            rowMajorBias: weights.architecture == .gpt2
+                ? Self.copyRowMajorWeights(from: weights.bo)
+                : [Float](repeating: 0, count: weights.dim)
         )
         self.init(
             decodeQKVOnly: compiledQKV,
+            decodeProjection: compiledProjection,
             decodeFFN: compiledFFN,
             outputProjection: outputProjection,
             maxSeq: maxSeq,
@@ -85,6 +108,7 @@ public struct HybridDecodeKernelSet: ~Copyable {
         let laneSpatial = resolvedLaneSpatialForCurrentProcess()
         return [
             makeDecodeQKVOnlySpec(weights: weights, laneSpatial: laneSpatial),
+            makeDecodeProjectionSpec(weights: weights, laneSpatial: laneSpatial),
             makeDecodeFFNSpec(weights: weights, laneSpatial: laneSpatial),
         ]
     }
@@ -106,8 +130,9 @@ public struct HybridDecodeKernelSet: ~Copyable {
         weights: borrowing LayerWeights,
         laneSpatial: Int
     ) -> CompileSpec {
-        let dim = ModelConfig.dim
+        let dim = weights.dim
         let generator = DecodeQKVOnlyGenerator(
+            dim: dim,
             laneSpatial: laneSpatial,
             architecture: weights.architecture
         )
@@ -165,13 +190,63 @@ public struct HybridDecodeKernelSet: ~Copyable {
         )
     }
 
+    private static func compileDecodeProjection(
+        weights: borrowing LayerWeights,
+        laneSpatial: Int
+    ) throws(ANEError) -> ANEKernel {
+        let spec = makeDecodeProjectionSpec(weights: weights, laneSpatial: laneSpatial)
+        return try ANEKernel(
+            milText: spec.milText,
+            weights: spec.weights,
+            inputSizes: spec.inputSizes,
+            outputSizes: spec.outputSizes
+        )
+    }
+
+    private static func makeDecodeProjectionSpec(
+        weights: borrowing LayerWeights,
+        laneSpatial: Int
+    ) -> CompileSpec {
+        let dim = weights.dim
+        let generator = DecodeProjectionGenerator(
+            dim: dim,
+            laneSpatial: laneSpatial,
+            architecture: weights.architecture
+        )
+        let woBlob = buildBlob(from: weights.Wo, rows: dim, cols: dim)
+        let boBlob = buildBlob(from: weights.bo, rows: 1, cols: dim)
+
+        let projectionWeights: [(path: String, data: Data)]
+        switch weights.architecture {
+        case .rmsNormSwiGLU:
+            projectionWeights = [
+                (path: "@model_path/weights/wo.bin", data: woBlob),
+            ]
+        case .gpt2:
+            projectionWeights = [
+                (path: "@model_path/weights/wo.bin", data: woBlob),
+                (path: "@model_path/weights/bo.bin", data: boBlob),
+            ]
+        }
+
+        return CompileSpec(
+            kind: .decodeProjection,
+            milText: generator.milText,
+            weights: projectionWeights,
+            inputSizes: generator.inputByteSizes,
+            outputSizes: generator.outputByteSizes
+        )
+    }
+
     private static func makeDecodeFFNSpec(
         weights: borrowing LayerWeights,
         laneSpatial: Int
     ) -> CompileSpec {
-        let dim = ModelConfig.dim
-        let hidden = ModelConfig.hidden
+        let dim = weights.dim
+        let hidden = weights.hiddenDim
         let generator = DecodeFFNGenerator(
+            dim: dim,
+            hiddenDim: hidden,
             laneSpatial: laneSpatial,
             architecture: weights.architecture
         )

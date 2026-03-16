@@ -100,6 +100,7 @@ import ModelSupport
     #expect(RealModelInferenceEngine.minimumCompileSpatial(channels: 768) == 32)
     #expect(RealModelInferenceEngine.minimumCompileSpatial(channels: 1_536) == 16)
     #expect(RealModelInferenceEngine.minimumCompileSpatial(channels: 4_096) == 8)
+    #expect(RealModelInferenceEngine.incrementalHeadSpatial(channels: 768) == 32)
 }
 
 @Test func test_weightPathResolution() throws {
@@ -206,6 +207,104 @@ import ModelSupport
         config: config,
         weightDir: weightDir.path
     )
+}
+
+@Test func test_hybridSingleLayerMatchesFullSequenceLastTokenForActualGPT2Weights() throws {
+    guard shouldRunANEHardwareTests() else { return }
+    guard let weightsDir = ProcessInfo.processInfo.environment["GPT2_WEIGHTS_DIR"], !weightsDir.isEmpty else {
+        return
+    }
+
+    let config = ModelRegistry.gpt2_124m
+    let tokens: [UInt16] = [15496, 11]
+    let packedInput = try RealModelInferenceEngine.composeEmbeddingInputForTesting(
+        config: config,
+        weightDir: weightsDir,
+        tokens: tokens
+    )
+    let referenceSpatial = max(tokens.count, RealModelInferenceEngine.minimumCompileSpatial(channels: config.dModel))
+    var fullInput = [Float](repeating: 0, count: config.dModel * referenceSpatial)
+    for channel in 0..<config.dModel {
+        for tokenIndex in tokens.indices {
+            fullInput[channel * referenceSpatial + tokenIndex] =
+                packedInput[channel * tokens.count + tokenIndex]
+        }
+    }
+    let fullOutput = try RealModelInferenceEngine.compileAndEvalSingleLayerForTesting(
+        config: config,
+        weightDir: weightsDir,
+        layer: 0,
+        spatial: referenceSpatial,
+        input: fullInput
+    )
+    let fullAttentionOutputs = try RealModelInferenceEngine.compileAndEvalSingleLayerAttentionOutputsForTesting(
+        config: config,
+        weightDir: weightsDir,
+        layer: 0,
+        spatial: referenceSpatial,
+        input: fullInput
+    )
+    let hybridOutput = try RealModelInferenceEngine.evalHybridSingleLayerForTesting(
+        config: config,
+        weightDir: weightsDir,
+        layer: 0,
+        tokens: tokens
+    )
+    let hybridAttentionOutputs = try RealModelInferenceEngine.evalHybridSingleLayerAttentionOutputsForTesting(
+        config: config,
+        weightDir: weightsDir,
+        layer: 0,
+        tokens: tokens
+    )
+
+    let fullLastToken = extractSpatialSlice(
+        from: fullOutput,
+        channels: config.dModel,
+        spatial: referenceSpatial,
+        spatialIndex: tokens.count - 1
+    )
+    let fullAttentionLastToken = extractSpatialSlice(
+        from: fullAttentionOutputs.hidden,
+        channels: config.dModel,
+        spatial: referenceSpatial,
+        spatialIndex: tokens.count - 1
+    )
+    let fullKLastToken = extractSpatialSlice(
+        from: fullAttentionOutputs.kCache,
+        channels: config.dModel,
+        spatial: referenceSpatial,
+        spatialIndex: tokens.count - 1
+    )
+    let fullVLastToken = extractSpatialSlice(
+        from: fullAttentionOutputs.vCache,
+        channels: config.dModel,
+        spatial: referenceSpatial,
+        spatialIndex: tokens.count - 1
+    )
+    let maxDiff = maxAbsoluteDifference(fullLastToken, hybridOutput)
+    let attentionMaxDiff = maxAbsoluteDifference(fullAttentionLastToken, hybridAttentionOutputs.hidden)
+    let kMaxDiff = maxAbsoluteDifference(
+        fullKLastToken,
+        extractSpatialSlice(
+            from: hybridAttentionOutputs.kCache,
+            channels: config.dModel,
+            spatial: tokens.count,
+            spatialIndex: tokens.count - 1
+        )
+    )
+    let vMaxDiff = maxAbsoluteDifference(
+        fullVLastToken,
+        extractSpatialSlice(
+            from: hybridAttentionOutputs.vCache,
+            channels: config.dModel,
+            spatial: tokens.count,
+            spatialIndex: tokens.count - 1
+        )
+    )
+    #expect(kMaxDiff < 0.01)
+    #expect(vMaxDiff < 0.01)
+    #expect(attentionMaxDiff < 0.01)
+    #expect(maxDiff < 0.01)
 }
 
 @Test func test_fullModelGeneration() throws {
@@ -522,6 +621,30 @@ private func gpt2ByteUnicodeMap() -> [UInt8: UnicodeScalar] {
         result[UInt8(byte)] = UnicodeScalar(mapped[index])!
     }
     return result
+}
+
+private func extractSpatialSlice(
+    from values: [Float],
+    channels: Int,
+    spatial: Int,
+    spatialIndex: Int
+) -> [Float] {
+    precondition(values.count == channels * spatial)
+    precondition(spatialIndex >= 0 && spatialIndex < spatial)
+    var output = [Float](repeating: 0, count: channels)
+    for channel in 0..<channels {
+        output[channel] = values[channel * spatial + spatialIndex]
+    }
+    return output
+}
+
+private func maxAbsoluteDifference(_ lhs: [Float], _ rhs: [Float]) -> Float {
+    precondition(lhs.count == rhs.count)
+    var maxValue: Float = 0
+    for index in lhs.indices {
+        maxValue = max(maxValue, abs(lhs[index] - rhs[index]))
+    }
+    return maxValue
 }
 
 private func shouldRunANEHardwareTests() -> Bool {
