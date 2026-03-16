@@ -208,6 +208,26 @@ import ModelSupport
     )
 }
 
+@Test func test_boundedSpeculativeCacheOrderEvictsLeastRecentlyUsed() {
+    let insert = RealModelInferenceEngine.boundedSpeculativeCacheOrder(
+        currentOrder: [1, 2, 3],
+        accessedKey: 4,
+        limit: 3,
+        insertingNewEntry: true
+    )
+    #expect(insert.order == [2, 3, 4])
+    #expect(insert.evictedKey == 1)
+
+    let hit = RealModelInferenceEngine.boundedSpeculativeCacheOrder(
+        currentOrder: insert.order,
+        accessedKey: 3,
+        limit: 3,
+        insertingNewEntry: false
+    )
+    #expect(hit.order == [2, 4, 3])
+    #expect(hit.evictedKey == nil)
+}
+
 @Test func test_weightPathResolution() throws {
     let root = "/tmp/real-model-inference"
 

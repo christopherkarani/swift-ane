@@ -513,6 +513,7 @@ public struct RealModelInferenceEngine: ~Copyable {
     }
 
     private static let gpt2EOSToken: UInt16 = 50_256
+    private static let speculativeRuntimeCacheLimit = 4
 
     private let config: MultiModelConfig
     private let weightDirURL: URL
@@ -532,6 +533,7 @@ public struct RealModelInferenceEngine: ~Copyable {
     private var compiledHybridGreedySpatial: Int
     private var hybridMetalAttention: MetalAttentionKernel?
     private var speculativeRuntimeCache: [SpeculativeRuntimeKey: CachedSpeculativeRuntimePair]
+    private var speculativeRuntimeCacheOrder: [SpeculativeRuntimeKey]
     private let classifierBlockMaxNorms: [Float]
     private var classifierLogitsScratch: [Float]
 
@@ -567,6 +569,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         self.compiledHybridGreedySpatial = 0
         self.hybridMetalAttention = nil
         self.speculativeRuntimeCache = [:]
+        self.speculativeRuntimeCacheOrder = []
         self.classifierBlockMaxNorms = classifierBlockMaxNorms
         self.classifierLogitsScratch = [Float](
             repeating: 0,
@@ -702,20 +705,39 @@ public struct RealModelInferenceEngine: ~Copyable {
                 config: config,
                 temperature: temperature
             ) {
+                var speculativeAttemptCompileTimeMs = 0.0
                 do {
+                    let (cachedRuntimePair, speculativeCompileTimeMs) = try cachedSpeculativeRuntimePair(
+                        draftLayerCount: speculativeDraftLayerCount,
+                        maxSeq: bucket
+                    )
+                    speculativeAttemptCompileTimeMs = speculativeCompileTimeMs
                     return try generateIncrementalHybridSpeculative(
                         promptTokens: promptTokens,
                         effectiveMaxTokens: effectiveMaxTokens,
-                        compileTimeMs: compileTimeMs,
-                        maxSeq: bucket,
+                        compileTimeMs: compileTimeMs + speculativeCompileTimeMs,
                         metalAttention: metalAttention,
-                        draftLayerCount: speculativeDraftLayerCount,
+                        cachedRuntimePair: cachedRuntimePair,
                         onStep: onStep
                     )
                 } catch {
                     if ProcessInfo.processInfo.environment["ESPRESSO_REALMODEL_DISABLE_HYBRID_FALLBACK"] == "1" {
                         throw RealModelInferenceError.runtimeFailure("Hybrid speculative fast path failed: \(error)")
                     }
+                    fputs(
+                        "[RealModelInference] Hybrid speculative fast path failed; falling back to non-speculative hybrid decode: \(String(describing: error))\n",
+                        stderr
+                    )
+                    let fallbackCompileTimeMs = compileTimeMs + speculativeAttemptCompileTimeMs
+                    return try generateIncrementalHybrid(
+                        promptTokens: promptTokens,
+                        effectiveMaxTokens: effectiveMaxTokens,
+                        temperature: temperature,
+                        compileTimeMs: fallbackCompileTimeMs,
+                        maxSeq: bucket,
+                        metalAttention: metalAttention,
+                        onStep: onStep
+                    )
                 }
             }
             do {
@@ -1676,23 +1698,11 @@ public struct RealModelInferenceEngine: ~Copyable {
         promptTokens: [UInt16],
         effectiveMaxTokens: Int,
         compileTimeMs: Double,
-        maxSeq: Int,
         metalAttention: MetalAttentionKernel,
-        draftLayerCount: Int,
+        cachedRuntimePair: CachedSpeculativeRuntimePair,
         onStep: ((GenerationStep) -> Void)?
     ) throws -> GenerationResult {
-        guard draftLayerCount > 0, draftLayerCount < config.nLayer else {
-            throw RealModelInferenceError.runtimeFailure(
-                "Speculative GPT-2 draft layer count \(draftLayerCount) is invalid for \(config.nLayer) layers"
-            )
-        }
-
-        let (cachedRuntimePair, speculativeCompileTimeMs) = try cachedSpeculativeRuntimePair(
-            draftLayerCount: draftLayerCount,
-            maxSeq: maxSeq
-        )
         cachedRuntimePair.resetAll(dim: config.dModel)
-        let totalCompileTimeMs = compileTimeMs + speculativeCompileTimeMs
 
         let xCur = TensorBuffer(count: config.dModel, zeroed: true)
         for (position, token) in promptTokens.enumerated() {
@@ -1889,7 +1899,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             tokens: generatedTokens,
             promptTokens: promptTokens,
             tokensPerSecond: tokensPerSecond,
-            compileTimeMs: totalCompileTimeMs,
+            compileTimeMs: compileTimeMs,
             firstTokenLatencyMs: firstTokenLatencyMs
         )
     }
@@ -1903,6 +1913,13 @@ public struct RealModelInferenceEngine: ~Copyable {
             maxSeq: maxSeq
         )
         if let cached = speculativeRuntimeCache[key] {
+            let orderUpdate = Self.boundedSpeculativeCacheOrder(
+                currentOrder: speculativeRuntimeCacheOrder,
+                accessedKey: key,
+                limit: Self.speculativeRuntimeCacheLimit,
+                insertingNewEntry: false
+            )
+            speculativeRuntimeCacheOrder = orderUpdate.order
             return (cached, 0)
         }
 
@@ -1913,9 +1930,36 @@ public struct RealModelInferenceEngine: ~Copyable {
             weightDirURL: weightDirURL,
             assets: gpt2Assets
         )
+        let orderUpdate = Self.boundedSpeculativeCacheOrder(
+            currentOrder: speculativeRuntimeCacheOrder,
+            accessedKey: key,
+            limit: Self.speculativeRuntimeCacheLimit,
+            insertingNewEntry: true
+        )
+        if let evictedKey = orderUpdate.evictedKey {
+            speculativeRuntimeCache.removeValue(forKey: evictedKey)
+        }
         speculativeRuntimeCache[key] = cached
+        speculativeRuntimeCacheOrder = orderUpdate.order
         let compileTimeMs = Self.milliseconds(from: DispatchTime.now().uptimeNanoseconds - compileStart)
         return (cached, compileTimeMs)
+    }
+
+    static func boundedSpeculativeCacheOrder<Key: Equatable>(
+        currentOrder: [Key],
+        accessedKey: Key,
+        limit: Int,
+        insertingNewEntry: Bool
+    ) -> (order: [Key], evictedKey: Key?) {
+        precondition(limit > 0)
+
+        var order = currentOrder.filter { $0 != accessedKey }
+        var evictedKey: Key?
+        if insertingNewEntry, order.count >= limit {
+            evictedKey = order.removeFirst()
+        }
+        order.append(accessedKey)
+        return (order, evictedKey)
     }
 
     private func encodePrompt(_ prompt: String) throws -> [UInt16] {
