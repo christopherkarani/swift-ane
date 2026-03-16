@@ -55,6 +55,11 @@ docs/*
 !docs/autoresearch/
 !docs/autoresearch/**
 !docs/benchmarks.md
+!docs/index.html
+!docs/blog.html
+!docs/coreml-vs-espresso-benchmarks.html
+!docs/gpt2-926-tokens-per-second.html
+!docs/reverse-engineering-apple-neural-engine.html
 prompts/
 !docs/autoresearch/prompts/
 !docs/autoresearch/prompts/**

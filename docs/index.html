@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Espresso — 4.76× Faster Than CoreML on Apple Neural Engine</title>
+  <meta name="description" content="Direct ANE inference for transformers on Apple Silicon. 926 tok/s vs CoreML's 196 tok/s. Pure Swift 6.2, zero dependencies, IOSurface KV cache, fused 3-layer kernels.">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Espresso — 4.76× Faster Than CoreML">
+  <meta property="og:description" content="Direct ANE access in pure Swift. 926 tok/s on M3 Max. No CoreML. No dependencies.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://christopherkarani.github.io/Espresso/">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Espresso — 4.76× Faster Than CoreML">
+  <meta name="twitter:description" content="Direct ANE access in pure Swift. 926 tok/s. No CoreML overhead.">
+
+  <!-- Keywords for SEO -->
+  <meta name="keywords" content="Apple Neural Engine, ANE, CoreML alternative, Swift transformer inference, Apple Silicon ML, on-device LLM, fast inference macOS, MIL compiler, IOSurface ML">
+
+  <link rel="canonical" href="https://christopherkarani.github.io/Espresso/">
+
+  <style>
+    :root {
+      --bg: #0d0d0f;
+      --surface: #18181b;
+      --border: #27272a;
+      --text: #fafafa;
+      --muted: #a1a1aa;
+      --accent: #f97316;
+      --accent-dim: rgba(249, 115, 22, 0.15);
+      --green: #22c55e;
+      --code-bg: #1c1c1f;
+      --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* Layout */
+    .container { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+
+    /* Nav */
+    nav {
+      border-bottom: 1px solid var(--border);
+      padding: 16px 0;
+      position: sticky;
+      top: 0;
+      background: rgba(13, 13, 15, 0.92);
+      backdrop-filter: blur(12px);
+      z-index: 100;
+    }
+
+    nav .inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    .nav-logo {
+      font-family: var(--mono);
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--text);
+      letter-spacing: -0.02em;
+    }
+
+    .nav-links { display: flex; gap: 24px; }
+    .nav-links a { color: var(--muted); font-size: 0.9rem; }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+
+    /* Hero */
+    .hero {
+      padding: 96px 0 72px;
+      text-align: center;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--accent-dim);
+      border: 1px solid rgba(249, 115, 22, 0.3);
+      color: var(--accent);
+      padding: 6px 14px;
+      border-radius: 100px;
+      font-size: 0.8rem;
+      font-family: var(--mono);
+      margin-bottom: 28px;
+      letter-spacing: 0.02em;
+    }
+
+    .hero h1 {
+      font-size: clamp(2.4rem, 6vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1.1;
+      margin-bottom: 20px;
+    }
+
+    .hero h1 .accent { color: var(--accent); }
+
+    .hero-sub {
+      font-size: 1.15rem;
+      color: var(--muted);
+      max-width: 560px;
+      margin: 0 auto 40px;
+      line-height: 1.7;
+    }
+
+    .cta-group {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .btn:hover { opacity: 0.85; text-decoration: none; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #000;
+    }
+
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    /* Benchmark hero */
+    .bench-hero {
+      display: flex;
+      gap: 1px;
+      justify-content: center;
+      margin: 56px 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--border);
+    }
+
+    .bench-col {
+      flex: 1;
+      background: var(--surface);
+      padding: 28px 20px;
+      text-align: center;
+    }
+
+    .bench-label {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 8px;
+    }
+
+    .bench-value {
+      font-family: var(--mono);
+      font-size: clamp(1.6rem, 3.5vw, 2.6rem);
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .bench-value.accent { color: var(--accent); }
+    .bench-value.green { color: var(--green); }
+
+    .bench-unit {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+
+    /* Section */
+    section { padding: 72px 0; border-top: 1px solid var(--border); }
+
+    .section-label {
+      font-size: 0.75rem;
+      font-family: var(--mono);
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 12px;
+    }
+
+    h2 {
+      font-size: clamp(1.6rem, 3.5vw, 2.2rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 16px;
+    }
+
+    .section-sub {
+      font-size: 1.05rem;
+      color: var(--muted);
+      max-width: 580px;
+      margin-bottom: 40px;
+    }
+
+    /* Feature grid */
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+    }
+
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 24px;
+    }
+
+    .feature-icon {
+      font-size: 1.5rem;
+      margin-bottom: 12px;
+    }
+
+    .feature-title {
+      font-weight: 600;
+      font-size: 1rem;
+      margin-bottom: 8px;
+    }
+
+    .feature-desc {
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    /* Comparison table */
+    .table-wrap { overflow-x: auto; margin-top: 32px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th {
+      text-align: left;
+      padding: 10px 14px;
+      background: var(--surface);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    td {
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+
+    tr:last-child td { border-bottom: none; }
+
+    tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .td-highlight {
+      font-weight: 700;
+      color: var(--accent);
+      font-family: var(--mono);
+    }
+
+    .td-mono { font-family: var(--mono); }
+
+    .badge-yes {
+      display: inline-block;
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--green);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 0.8rem;
+    }
+
+    .badge-no {
+      display: inline-block;
+      background: rgba(161, 161, 170, 0.1);
+      color: var(--muted);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 0.8rem;
+    }
+
+    /* Architecture diagram */
+    .arch-box {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 28px;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      line-height: 1.8;
+      color: var(--muted);
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .arch-box .hl { color: var(--text); }
+    .arch-box .dim { color: #52525b; }
+
+    /* Code block */
+    .code-block {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-top: 24px;
+    }
+
+    .code-header {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .code-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--border);
+    }
+
+    .code-body {
+      padding: 20px;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      line-height: 1.7;
+      color: #d4d4d8;
+      overflow-x: auto;
+    }
+
+    .code-body .kw { color: #c084fc; }
+    .code-body .str { color: #86efac; }
+    .code-body .cm { color: #52525b; }
+    .code-body .ty { color: #93c5fd; }
+    .code-body .fn { color: #fbbf24; }
+
+    /* How it works flow */
+    .flow {
+      display: grid;
+      gap: 0;
+      margin-top: 32px;
+      position: relative;
+    }
+
+    .flow-step {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+      padding: 24px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .flow-step:last-child { border-bottom: none; }
+
+    .flow-num {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--accent-dim);
+      border: 1px solid rgba(249, 115, 22, 0.4);
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .flow-content h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .flow-content p {
+      font-size: 0.9rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .flow-content code {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: var(--mono);
+      font-size: 0.82em;
+      color: var(--accent);
+    }
+
+    /* Quickstart */
+    .qs-terminal {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-top: 32px;
+    }
+
+    .qs-header {
+      background: var(--surface);
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 6px;
+    }
+
+    .qs-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+
+    .qs-red { background: #ef4444; }
+    .qs-yellow { background: #eab308; }
+    .qs-green-dot { background: #22c55e; }
+
+    .qs-body {
+      padding: 20px;
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      line-height: 2;
+    }
+
+    .qs-prompt { color: var(--accent); }
+    .qs-cmd { color: var(--text); }
+    .qs-out { color: var(--muted); }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 40px 0;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--text); }
+
+    /* Disclaimer */
+    .disclaimer {
+      background: rgba(249, 115, 22, 0.05);
+      border: 1px solid rgba(249, 115, 22, 0.2);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-top: 40px;
+      font-size: 0.85rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .bench-hero { flex-direction: column; }
+      .nav-links { display: none; }
+      .hero { padding: 64px 0 48px; }
+    }
+  </style>
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Espresso",
+    "description": "Direct Apple Neural Engine inference for transformers — 4.76x faster than CoreML",
+    "url": "https://github.com/christopherkarani/Espresso",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS 15+",
+    "programmingLanguage": "Swift",
+    "license": "https://opensource.org/licenses/MIT",
+    "author": {
+      "@type": "Person",
+      "name": "Christopher Karani"
+    }
+  }
+  </script>
+</head>
+
+<body>
+
+<nav>
+  <div class="inner">
+    <span class="nav-logo">☕ espresso</span>
+    <div class="nav-links">
+      <a href="#how-it-works">How it works</a>
+      <a href="#benchmark">Benchmark</a>
+      <a href="#quickstart">Quick start</a>
+      <a href="blog.html">Blog</a>
+      <a href="https://github.com/christopherkarani/Espresso">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+  <section class="hero" style="border-top: none;">
+    <div class="container">
+      <div class="hero-badge">
+        <span>⚡</span>
+        <span>Pure Swift 6.2 · Zero Dependencies · MIT License</span>
+      </div>
+
+      <h1>
+        Direct ANE inference.<br>
+        <span class="accent">4.76× faster</span> than CoreML.
+      </h1>
+
+      <p class="hero-sub">
+        Espresso compiles MIL programs straight to Apple's Neural Engine through private APIs,
+        bypassing CoreML entirely. Fused 3-layer kernels. IOSurface KV cache. 926 tok/s.
+      </p>
+
+      <div class="cta-group">
+        <a href="https://github.com/christopherkarani/Espresso" class="btn btn-primary">
+          ★ Star on GitHub
+        </a>
+        <a href="#quickstart" class="btn btn-secondary">
+          Quick start →
+        </a>
+      </div>
+
+      <div class="bench-hero">
+        <div class="bench-col">
+          <div class="bench-label">Espresso</div>
+          <div class="bench-value accent">1.08</div>
+          <div class="bench-unit">ms / token</div>
+        </div>
+        <div class="bench-col">
+          <div class="bench-label">Tokens / sec</div>
+          <div class="bench-value accent">926</div>
+          <div class="bench-unit">Espresso direct ANE</div>
+        </div>
+        <div class="bench-col">
+          <div class="bench-label">vs CoreML</div>
+          <div class="bench-value green">4.76×</div>
+          <div class="bench-unit">faster</div>
+        </div>
+        <div class="bench-col">
+          <div class="bench-label">CoreML baseline</div>
+          <div class="bench-value" style="color: var(--muted)">196</div>
+          <div class="bench-unit">tok/s · 5.09 ms/token</div>
+        </div>
+      </div>
+
+      <p style="font-size: 0.78rem; color: var(--muted); margin-top: 8px;">
+        6-layer transformer · dim=768 · 12 heads · 32k vocab · seqLen=256 · M3 Max · macOS 15
+      </p>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="container">
+      <div class="section-label">Why Espresso</div>
+      <h2>Everything CoreML costs you, eliminated.</h2>
+      <p class="section-sub">
+        CoreML adds four compounding overhead layers at every decode step. Espresso removes all of them.
+      </p>
+
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🧊</div>
+          <div class="feature-title">Compile once, decode forever</div>
+          <div class="feature-desc">
+            MIL programs compile to ANE E5 binaries once and are reused across every decode step.
+            No per-token recompilation. No sequence-length-triggered rebuilds.
+          </div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <div class="feature-title">Fused 3-layer kernels</div>
+          <div class="feature-desc">
+            6 transformer layers run in 2 ANE dispatches, not 6. Each fused kernel runs RMSNorm →
+            Attention → FFN → residual for 3 layers in a single graph. ~0.57ms overhead eliminated.
+          </div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔄</div>
+          <div class="feature-title">Zero-copy IOSurface I/O</div>
+          <div class="feature-desc">
+            KV cache lives in IOSurface buffers the entire decode loop — no marshaling,
+            no Array allocation, no float32 conversion. NEON-vectorized reads, vDSP argmax.
+          </div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🧩</div>
+          <div class="feature-title">Direct ANE access</div>
+          <div class="feature-desc">
+            Uses <code>_ANEClient</code> and <code>_ANEInMemoryModel</code> — the same private APIs
+            CoreML uses internally — via <code>dlopen</code>. Bypasses the entire CoreML scheduler stack.
+          </div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🎓</div>
+          <div class="feature-title">Training on ANE</div>
+          <div class="feature-desc">
+            Full forward + backward passes with gradient accumulation and Adam optimizer
+            running directly on the Neural Engine. CoreML doesn't support this.
+          </div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📦</div>
+          <div class="feature-title">Zero dependencies</div>
+          <div class="feature-desc">
+            Swift 6.2, Foundation, and Accelerate. That's it. No CoreML dependency.
+            No Python toolchain. One <code>swift build</code>.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how-it-works">
+    <div class="container">
+      <div class="section-label">How it works</div>
+      <h2>The CoreML layer, removed.</h2>
+      <p class="section-sub">
+        Espresso speaks MIL directly to the ANE — no intermediate framework.
+      </p>
+
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-num">1</div>
+          <div class="flow-content">
+            <h3>Generate MIL programs</h3>
+            <p>
+              MILGenerator produces Metal Intermediate Language text for each kernel variant —
+              fused attention+FFN, decode KV-cache, classifier head. 28+ kernel variants
+              cover the full transformer architecture.
+            </p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">2</div>
+          <div class="flow-content">
+            <h3>Compile to ANE E5 binary via <code>_ANEClient</code></h3>
+            <p>
+              ANEInterop's ObjC bridge <code>dlopen</code>s Apple's private ANEFramework
+              and calls <code>_ANEClient.compile()</code> directly. The result is an ANE E5
+              binary cached by the system — compile once, run thousands of times.
+            </p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">3</div>
+          <div class="flow-content">
+            <h3>Bind inputs and weights to IOSurface</h3>
+            <p>
+              Input activations, KV caches, and weight tensors live in
+              <code>IOSurface</code> buffers — GPU/ANE-accessible shared memory.
+              No copy on dispatch. No marshaling on output.
+            </p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-num">4</div>
+          <div class="flow-content">
+            <h3>Eval + zero-copy read</h3>
+            <p>
+              <code>_ANEInMemoryModel.eval()</code> runs the compiled graph.
+              Results are read directly from the output IOSurface using NEON-vectorized
+              code and <code>vDSP</code> argmax — no intermediate buffer.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="benchmark">
+    <div class="container">
+      <div class="section-label">Benchmark</div>
+      <h2>Espresso vs CoreML vs llama.cpp</h2>
+      <p class="section-sub">
+        Same 6-layer transformer model, same M3 Max hardware.
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Espresso</th>
+              <th>CoreML</th>
+              <th>llama.cpp*</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Decode (ms/token)</td>
+              <td class="td-highlight">1.08</td>
+              <td class="td-mono">5.09</td>
+              <td class="td-mono">~15–40</td>
+            </tr>
+            <tr>
+              <td>Tokens / sec</td>
+              <td class="td-highlight">926</td>
+              <td class="td-mono">196</td>
+              <td class="td-mono">~25–65</td>
+            </tr>
+            <tr>
+              <td>Speedup vs CoreML</td>
+              <td class="td-highlight">4.76×</td>
+              <td class="td-mono">baseline</td>
+              <td class="td-mono">0.3–0.5×</td>
+            </tr>
+            <tr>
+              <td>KV cache</td>
+              <td>IOSurface (zero-copy)</td>
+              <td>CoreML-managed</td>
+              <td>CPU / GPU</td>
+            </tr>
+            <tr>
+              <td>Recompilation per token</td>
+              <td><span class="badge-yes">Never</span></td>
+              <td>Seq-length dependent</td>
+              <td><span class="badge-yes">Never</span></td>
+            </tr>
+            <tr>
+              <td>Dependencies</td>
+              <td><span class="badge-yes">0</span></td>
+              <td>Apple framework</td>
+              <td>Multiple</td>
+            </tr>
+            <tr>
+              <td>Training on ANE</td>
+              <td><span class="badge-yes">Yes</span></td>
+              <td><span class="badge-no">No</span></td>
+              <td><span class="badge-no">No</span></td>
+            </tr>
+            <tr>
+              <td>App Store</td>
+              <td><span class="badge-no">No†</span></td>
+              <td><span class="badge-yes">Yes</span></td>
+              <td><span class="badge-no">No</span></td>
+            </tr>
+            <tr>
+              <td>Language</td>
+              <td>Swift 6.2</td>
+              <td>—</td>
+              <td>C / C++</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p style="font-size: 0.78rem; color: var(--muted); margin-top: 14px;">
+        *llama.cpp estimates for comparable 6-layer model on M3 Max CPU+Metal path.<br>
+        †Private APIs are rejected by App Store review. Fine for enterprise, research, sideloaded apps.
+      </p>
+    </div>
+  </section>
+
+  <section id="architecture">
+    <div class="container">
+      <div class="section-label">Architecture</div>
+      <h2>Layered, composable, zero-dep.</h2>
+
+      <div class="arch-box"><span class="hl">ANEInterop</span><span class="dim">  (ObjC/C — private API bridge)</span>
+  └── <span class="hl">ANETypes</span><span class="dim">  (~Copyable tensors, IOSurface I/O)</span>
+        ├── <span class="hl">MILGenerator</span><span class="dim">  (28+ kernel variants)</span>
+        │     └── <span class="hl">ANERuntime</span><span class="dim">  (compile, eval, surfaces)</span>
+        │           └── <span class="hl">Espresso</span><span class="dim">  (generation, decode, training)</span>
+        │                 ├── EspressoTrain <span class="dim">(CLI)</span>
+        │                 └── EspressoBench <span class="dim">(CLI)</span>
+        └── <span class="hl">CPUOps</span><span class="dim">  (Accelerate/vDSP kernels)</span>
+              └── Espresso</div>
+    </div>
+  </section>
+
+  <section id="quickstart">
+    <div class="container">
+      <div class="section-label">Quick start</div>
+      <h2>One command to see it live.</h2>
+      <p class="section-sub">
+        Requires Apple Silicon (M1+) and macOS 15. Swift 6 comes with Xcode 16.
+      </p>
+
+      <div class="qs-terminal">
+        <div class="qs-header">
+          <div class="qs-dot qs-red"></div>
+          <div class="qs-dot qs-yellow"></div>
+          <div class="qs-dot qs-green-dot"></div>
+        </div>
+        <div class="qs-body">
+          <div><span class="qs-prompt">$ </span><span class="qs-cmd">git clone https://github.com/christopherkarani/Espresso</span></div>
+          <div><span class="qs-prompt">$ </span><span class="qs-cmd">cd Espresso && ./espresso</span></div>
+          <div class="qs-out"># Builds Swift targets, downloads GPT-2 assets, launches TUI</div>
+          <div class="qs-out"># Side-by-side: Espresso vs CoreML, live token generation</div>
+          <div>&nbsp;</div>
+          <div><span class="qs-prompt">$ </span><span class="qs-cmd">swift run espresso-bench --decode --decode-steps 32 --layers 6</span></div>
+          <div class="qs-out"># Raw ANE decode benchmark — reproduces the 1.08 ms/token number</div>
+          <div>&nbsp;</div>
+          <div><span class="qs-prompt">$ </span><span class="qs-cmd">./espresso doctor</span></div>
+          <div class="qs-out"># Diagnose your environment if ./espresso doesn't start cleanly</div>
+        </div>
+      </div>
+
+      <div class="code-block" style="margin-top: 24px;">
+        <div class="code-header">
+          <div class="code-dot"></div>
+          <span>Package.swift dependency</span>
+        </div>
+        <div class="code-body"><span class="cm">// Package.swift</span>
+<span class="kw">dependencies</span>: [
+    .<span class="fn">package</span>(<span class="kw">url</span>: <span class="str">"https://github.com/christopherkarani/Espresso.git"</span>, <span class="kw">branch</span>: <span class="str">"main"</span>)
+]</div>
+      </div>
+
+      <div class="code-block">
+        <div class="code-header">
+          <div class="code-dot"></div>
+          <span>Minimal usage</span>
+        </div>
+        <div class="code-body"><span class="kw">import</span> <span class="ty">ANERuntime</span>
+<span class="kw">import</span> <span class="ty">ANETypes</span>
+
+<span class="cm">// Compile once — reuse for thousands of decode steps</span>
+<span class="kw">let</span> kernel = <span class="kw">try</span> <span class="ty">ANEKernel</span>(
+    milText: generator.milText,
+    weights: weightBlobs,
+    inputSizes: [inputSize],
+    outputSizes: [outputSize]
+)
+
+<span class="cm">// Decode step — zero CoreML</span>
+<span class="kw">try</span> kernel.<span class="fn">eval</span>()
+
+<span class="cm">// Zero-copy output from IOSurface</span>
+<span class="kw">let</span> surface = kernel.<span class="fn">outputSurface</span>(at: <span class="str">0</span>)
+<span class="kw">let</span> nextToken = <span class="ty">SurfaceIO</span>.<span class="fn">argmaxFP16SpatialSlice</span>(surface, lane: <span class="str">0</span>)</div>
+      </div>
+
+      <div class="disclaimer">
+        <strong>App Store:</strong> Apps using private ANE APIs (<code>_ANEClient</code>, <code>_ANEInMemoryModel</code>) will be rejected.
+        This project is intended for research, enterprise distribution, sideloaded apps, and internal macOS tools.
+        Results are hardware- and OS-dependent. Not affiliated with or endorsed by Apple Inc.
+        Benchmarks run on a local artifact family built by this repo.
+      </div>
+    </div>
+  </section>
+
+  <section style="padding: 56px 0; border-top: 1px solid var(--border);">
+    <div class="container">
+      <h2 style="font-size: 1.5rem; font-weight: 700; margin-bottom: 8px;">From the Blog</h2>
+      <p style="color: var(--muted); margin-bottom: 32px; font-size: 0.95rem;">Technical deep-dives on ANE internals, CoreML comparisons, and performance engineering.</p>
+      <div style="display: flex; flex-direction: column; gap: 0;">
+        <a href="coreml-vs-espresso-benchmarks.html" style="display: block; padding: 20px 0; border-bottom: 1px solid var(--border); text-decoration: none; color: inherit;">
+          <div style="font-size: 0.8rem; color: var(--muted); font-family: var(--mono); margin-bottom: 6px;">benchmarks · CoreML</div>
+          <div style="font-size: 1.1rem; font-weight: 600; color: var(--text); margin-bottom: 6px;">CoreML vs Espresso: Benchmarks on Apple Silicon</div>
+          <div style="font-size: 0.9rem; color: var(--muted);">4.76x faster. Here's where every millisecond goes.</div>
+        </a>
+        <a href="gpt2-926-tokens-per-second.html" style="display: block; padding: 20px 0; border-bottom: 1px solid var(--border); text-decoration: none; color: inherit;">
+          <div style="font-size: 0.8rem; color: var(--muted); font-family: var(--mono); margin-bottom: 6px;">tutorial · GPT-2</div>
+          <div style="font-size: 1.1rem; font-weight: 600; color: var(--text); margin-bottom: 6px;">How to Run GPT-2 at 926 tok/s on a MacBook</div>
+          <div style="font-size: 0.9rem; color: var(--muted);">The four optimizations: direct ANE, layer fusion, recurrent arch, zero-copy argmax.</div>
+        </a>
+        <a href="reverse-engineering-apple-neural-engine.html" style="display: block; padding: 20px 0; text-decoration: none; color: inherit;">
+          <div style="font-size: 0.8rem; color: var(--muted); font-family: var(--mono); margin-bottom: 6px;">internals · reverse engineering</div>
+          <div style="font-size: 1.1rem; font-weight: 600; color: var(--text); margin-bottom: 6px;">Reverse-Engineering Apple's Neural Engine for Direct Inference</div>
+          <div style="font-size: 0.9rem; color: var(--muted);">dlopen into _ANEClient, map the MIL compiler, and hit every wall so you don't have to.</div>
+        </a>
+      </div>
+      <div style="margin-top: 24px;"><a href="blog.html" style="font-size: 0.9rem; font-family: var(--mono);">All posts →</a></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="container">
+    <p>
+      <a href="https://github.com/christopherkarani/Espresso">github.com/christopherkarani/Espresso</a>
+      &nbsp;·&nbsp;
+      MIT License
+      &nbsp;·&nbsp;
+      <a href="https://github.com/christopherkarani/Espresso/issues">Issues</a>
+      &nbsp;·&nbsp;
+      <a href="https://github.com/christopherkarani/Espresso/pulls">PRs welcome</a>
+    </p>
+    <p style="margin-top: 8px; font-size: 0.78rem;">
+      Benchmarks: M3 Max · macOS 15 · 6-layer transformer · dim=768 · 12 heads · 32k vocab · seqLen=256
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

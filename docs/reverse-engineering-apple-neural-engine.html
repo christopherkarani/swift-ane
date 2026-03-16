@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reverse-Engineering Apple's Neural Engine for Direct Inference | Espresso</title>
+  <meta name="description" content="How we reverse-engineered Apple's private ANE APIs (_ANEClient, _ANEInMemoryModel) to achieve direct Neural Engine inference without CoreML. Techniques, findings, and working code.">
+  <meta name="keywords" content="Apple Neural Engine reverse engineering, ANE private API, _ANEClient, apple silicon ML internals, MIL compiler swift, CoreML internals, apple neural engine programming, ANE E5 binary, direct ANE inference">
+  <link rel="canonical" href="https://christopherkarani.github.io/Espresso/reverse-engineering-apple-neural-engine.html">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="Reverse-Engineering Apple's Neural Engine for Direct Inference">
+  <meta property="og:description" content="How we dlopen'd private ANE APIs, mapped the MIL compiler, and built a framework that bypasses CoreML entirely.">
+  <meta property="og:type" content="article">
+  <meta property="og:url" content="https://christopherkarani.github.io/Espresso/reverse-engineering-apple-neural-engine.html">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Reverse-Engineering Apple's Neural Engine">
+  <meta name="twitter:description" content="The internals of Apple's ANE: private APIs, MIL compilation, IOSurface I/O, and what CoreML doesn't tell you.">
+
+  <style>
+    :root {
+      --bg: #0d0d0f;
+      --surface: #18181b;
+      --border: #27272a;
+      --text: #fafafa;
+      --muted: #a1a1aa;
+      --accent: #f97316;
+      --green: #22c55e;
+      --yellow: #fbbf24;
+      --red: #ef4444;
+      --purple: #a78bfa;
+      --code-bg: #1c1c1f;
+      --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; font-size: 17px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    header { border-bottom: 1px solid var(--border); padding: 16px 0; }
+    .header-inner { max-width: 760px; margin: 0 auto; padding: 0 24px; display: flex; justify-content: space-between; align-items: center; }
+    .logo { font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 18px; }
+    .nav-links { display: flex; gap: 24px; font-size: 14px; color: var(--muted); }
+
+    article { max-width: 760px; margin: 0 auto; padding: 48px 24px 96px; }
+
+    .meta { color: var(--muted); font-size: 14px; margin-bottom: 40px; display: flex; gap: 16px; flex-wrap: wrap; }
+    .tag { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; font-size: 12px; font-family: var(--mono); }
+
+    h1 { font-size: 36px; font-weight: 800; line-height: 1.2; margin-bottom: 16px; letter-spacing: -0.5px; }
+    h2 { font-size: 24px; font-weight: 700; margin-top: 48px; margin-bottom: 16px; }
+    h3 { font-size: 18px; font-weight: 600; margin-top: 32px; margin-bottom: 12px; }
+    p { margin-bottom: 20px; color: #e4e4e7; }
+
+    .lede { font-size: 20px; color: var(--muted); margin-bottom: 40px; line-height: 1.5; }
+
+    .callout { background: var(--surface); border-left: 3px solid var(--accent); padding: 16px 20px; border-radius: 0 8px 8px 0; margin: 32px 0; }
+    .callout.warning { border-left-color: var(--yellow); }
+    .callout.danger { border-left-color: var(--red); }
+    .callout strong { color: var(--accent); }
+    .callout.warning strong { color: var(--yellow); }
+    .callout.danger strong { color: var(--red); }
+
+    code { font-family: var(--mono); font-size: 0.88em; background: var(--code-bg); padding: 2px 6px; border-radius: 4px; color: #e879f9; }
+    pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px; overflow-x: auto; margin: 24px 0; }
+    pre code { background: none; padding: 0; color: #e4e4e7; font-size: 14px; }
+
+    .finding { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin: 16px 0; }
+    .finding-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .finding-status { font-family: var(--mono); font-size: 11px; padding: 2px 6px; border-radius: 3px; font-weight: 700; }
+    .status-works { background: rgba(34,197,94,0.15); color: var(--green); }
+    .status-broken { background: rgba(239,68,68,0.15); color: var(--red); }
+    .status-blocked { background: rgba(251,191,36,0.15); color: var(--yellow); }
+    .finding-title { font-weight: 600; }
+
+    .arch-diagram { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin: 24px 0; font-family: var(--mono); font-size: 13px; line-height: 1.8; }
+    .arch-layer { color: var(--accent); }
+    .arch-arrow { color: var(--muted); }
+    .arch-note { color: var(--green); }
+
+    ul, ol { padding-left: 24px; margin-bottom: 20px; }
+    li { margin-bottom: 8px; color: #e4e4e7; }
+
+    table { width: 100%; border-collapse: collapse; margin: 24px 0; font-size: 15px; }
+    th { text-align: left; padding: 10px 14px; border-bottom: 2px solid var(--border); color: var(--muted); font-size: 12px; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.05em; }
+    td { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+    .works { color: var(--green); }
+    .broken { color: var(--red); }
+
+    footer { border-top: 1px solid var(--border); padding: 32px 24px; text-align: center; color: var(--muted); font-size: 14px; }
+  </style>
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "Reverse-Engineering Apple's Neural Engine for Direct Inference",
+    "description": "How Espresso reverse-engineered Apple's private ANE APIs to achieve direct Neural Engine inference without CoreML.",
+    "datePublished": "2026-03-17",
+    "author": { "@type": "Organization", "name": "Espresso" },
+    "keywords": ["Apple Neural Engine", "reverse engineering", "ANE", "CoreML", "private API", "Swift"]
+  }
+  </script>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <span class="logo">Espresso</span>
+    <nav class="nav-links">
+      <a href="https://github.com/christopherkarani/Espresso">GitHub</a>
+      <a href="index.html">Home</a>
+      <a href="benchmarks.md">Benchmarks</a>
+      <a href="blog.html">Blog</a>
+    </nav>
+  </div>
+</header>
+
+<article>
+  <div class="meta">
+    <span>March 17, 2026</span>
+    <span class="tag">internals</span>
+    <span class="tag">ANE</span>
+    <span class="tag">reverse engineering</span>
+  </div>
+
+  <h1>Reverse-Engineering Apple's Neural Engine for Direct Inference</h1>
+
+  <p class="lede">
+    Apple's Neural Engine is one of the most powerful ML accelerators in consumer hardware.
+    CoreML gives you access to about 20% of its performance.
+    Here's how we found the other 80%.
+  </p>
+
+  <div class="callout warning">
+    <strong>Note on private APIs:</strong> Everything described here uses undocumented, private Apple APIs. This works today on macOS 15 / Apple Silicon. It could break in future OS updates. We monitor changes and will adapt, but use this in production at your own risk.
+  </div>
+
+  <h2>The Stack</h2>
+
+  <p>Before going further, here's what's actually running when you execute a model on Apple Silicon:</p>
+
+  <div class="arch-diagram">
+<span class="arch-layer">Your Code (Swift/Python/Obj-C)</span>
+    <span class="arch-arrow">↓</span>
+<span class="arch-layer">CoreML Framework</span>              <span class="arch-note">← Where most developers stop</span>
+    <span class="arch-arrow">↓</span>
+<span class="arch-layer">MIL Compiler (espresso, private)</span>  <span class="arch-note">← Compiles to ANE E5 binary</span>
+    <span class="arch-arrow">↓</span>
+<span class="arch-layer">_ANEClient (private)</span>           <span class="arch-note">← Espresso enters here</span>
+    <span class="arch-arrow">↓</span>
+<span class="arch-layer">_ANEInMemoryModel (private)</span>
+    <span class="arch-arrow">↓</span>
+<span class="arch-layer">ANE Driver (kernel space)</span>
+    <span class="arch-arrow">↓</span>
+<span class="arch-layer">Neural Engine Silicon</span>          <span class="arch-note">← 18 TFLOPS fp16 on M3 Max</span>
+  </div>
+
+  <p>CoreML is a convenient wrapper around the private ANE stack. It adds model validation, format conversion, compile caching, and a clean API. It also adds latency — marshaling, per-token overhead, and abstraction layers that aren't free.</p>
+
+  <p>Espresso calls <code>_ANEClient</code> and <code>_ANEInMemoryModel</code> directly, bypassing CoreML entirely.</p>
+
+  <h2>How We Found the Private APIs</h2>
+
+  <h3>1. class-dump and otool</h3>
+
+  <p>The starting point is <code>class-dump</code> on CoreML's private framework and the ANE daemon:</p>
+
+  <pre><code># Dump the ANE private framework headers
+class-dump /System/Library/PrivateFrameworks/ANECompilerService.framework/
+
+# Check what CoreML links against
+otool -L /System/Library/Frameworks/CoreML.framework/Versions/A/CoreML | grep ANE
+
+# Look at what symbols are exported
+nm /System/Library/PrivateFrameworks/ANECompilerService.framework/Versions/A/ANECompilerService \
+  | grep -i "ANEClient\|ANEModel\|ANERequest"</code></pre>
+
+  <p>This revealed the main classes: <code>_ANEClient</code>, <code>_ANEInMemoryModel</code>, <code>_ANERequest</code>, and <code>_ANESharedEvents</code>.</p>
+
+  <h3>2. Hopper / Binary Ninja for call graphs</h3>
+
+  <p>With class names in hand, we used Hopper to trace the call graph from CoreML's <code>MLModel.prediction</code> down to the ANE dispatch. Key discovery: CoreML calls <code>[_ANEClient evaluateWithModel:request:]</code> and that's the last stop before the kernel.</p>
+
+  <h3>3. Dynamic instrumentation with LLDB</h3>
+
+  <p>With the call graph mapped, we used LLDB to intercept ANE calls and inspect arguments:</p>
+
+  <pre><code>(lldb) breakpoint set --name "-[_ANEClient evaluateWithModel:request:]"
+(lldb) po $arg2  # Print the _ANEInMemoryModel object
+(lldb) po $arg3  # Print the _ANERequest object</code></pre>
+
+  <p>This let us see exactly what a valid <code>_ANEInMemoryModel</code> looks like — what fields it expects, how weights are laid out, what the IOSurface format should be.</p>
+
+  <h2>The <code>dlopen</code> Bridge</h2>
+
+  <p>Direct Objective-C calls to private APIs would require a framework link, which Apple would reject. Espresso uses <code>dlopen</code> to load the private framework at runtime and <code>dlsym</code> to resolve symbols:</p>
+
+  <pre><code>// ANEInterop.m — the ObjC/C bridge layer
+#include &lt;dlfcn.h&gt;
+
+static void* ane_handle = NULL;
+static Class _ANEClientClass = nil;
+static Class _ANEInMemoryModelClass = nil;
+
+void ane_interop_init(void) {
+    ane_handle = dlopen(
+        "/System/Library/PrivateFrameworks/ANECompilerService.framework/"
+        "Versions/A/ANECompilerService",
+        RTLD_NOW | RTLD_LOCAL
+    );
+    if (!ane_handle) { return; }
+
+    _ANEClientClass = NSClassFromString(@"_ANEClient");
+    _ANEInMemoryModelClass = NSClassFromString(@"_ANEInMemoryModel");
+}
+
+// Compile a MIL program to ANE binary
+id ane_interop_compile_model(NSString* milText, NSArray* weightBlobs, ...) {
+    if (!_ANEInMemoryModelClass) { ane_interop_init(); }
+
+    id model = [_ANEInMemoryModelClass alloc];
+    // ... (initialization from reversed header)
+    return model;
+}</code></pre>
+
+  <p>The Swift layer in Espresso calls into this ObjC bridge cleanly:</p>
+
+  <pre><code>// Swift side — ANERuntime module
+import ANEInterop
+
+let handle = ane_interop_compile_model(
+    milText as NSString,
+    weightBlobs as NSArray,
+    inputSizes, outputSizes
+)
+// handle is an opaque ANE model reference</code></pre>
+
+  <h2>MIL: The Intermediate Representation</h2>
+
+  <p>MIL (Multi-Level Intermediate Representation) is Apple's internal IR for neural network programs. It's a text format — the same one CoreML writes internally before handing it to the ANE compiler. Espresso writes MIL directly.</p>
+
+  <p>The format looks like this:</p>
+
+  <pre><code>program(1.3) {
+  func main<ios18>(
+    x: tensor&lt;fp16, [1, 768, 1, 32]&gt;,
+    w_q: const tensor&lt;fp16, [1, 768, 1, 768]&gt;
+  ) -> (tensor&lt;fp16, [1, 768, 1, 32]&gt;) {
+    block0():
+      // Layer norm (RMSNorm: square, reduce_sum, pow for rsqrt)
+      sq = mul(x=x, y=x)
+      sum = reduce_sum(x=sq, axes=[1], keep_dims=true)
+      inv_std = pow(x=sum, y=fp16(-0.5))  // rsqrt via pow
+
+      // Linear projection via conv (ANE's native operation)
+      q = conv(
+        x=x_normed,
+        weight=w_q,
+        pad_type="valid",
+        strides=[1,1], pad=[0,0,0,0],
+        dilations=[1,1], groups=1
+      )
+      return (output)
+  }
+}</code></pre>
+
+  <p>MIL uses a tensor layout that matches the ANE's native IOSurface format: <code>[N, C, H, W]</code> with channel-first ordering. Tokens are packed along the width dimension. Weights are compiled into the E5 binary at compile time — weight swapping at runtime is not supported.</p>
+
+  <h2>What We Learned the Hard Way: MIL Gotchas</h2>
+
+  <p>Not everything that looks like valid MIL actually compiles on the ANE. We hit every one of these walls:</p>
+
+  <div class="finding">
+    <div class="finding-header">
+      <span class="finding-status status-broken">BROKEN</span>
+      <span class="finding-title"><code>rsqrt</code> operator</span>
+    </div>
+    <p><code>rsqrt(x=tensor)</code> exists in the CoreML Python SDK but is not available in raw MIL text format for the ANE compiler. Use <code>pow(x=tensor, y=fp16(-0.5))</code> instead — identical result, actually compiles.</p>
+  </div>
+
+  <div class="finding">
+    <div class="finding-header">
+      <span class="finding-status status-broken">BROKEN</span>
+      <span class="finding-title"><code>reduce_mean</code> operator</span>
+    </div>
+    <p><code>reduce_mean</code> does not exist in the ANE MIL dialect. Use <code>reduce_sum</code> followed by a manual divide. We found this by trying to write LayerNorm and getting <code>InvalidMILProgram</code> with no useful error message.</p>
+  </div>
+
+  <div class="finding">
+    <div class="finding-header">
+      <span class="finding-status status-broken">BROKEN</span>
+      <span class="finding-title"><code>softmax</code> on non-power-of-2 dimensions</span>
+    </div>
+    <p>Softmax over a non-power-of-2 dimension size compiles but returns <code>InvalidMILProgram</code> at eval time. Attention score dimensions must be powers of 2. This cost us days before we isolated the cause.</p>
+  </div>
+
+  <div class="finding">
+    <div class="finding-header">
+      <span class="finding-status status-broken">BROKEN</span>
+      <span class="finding-title">INT8 / quantized weights</span>
+    </div>
+    <p>Both <code>constexpr_affine_dequantize</code> and <code>cast(uint8→fp16)</code> produce <code>InvalidMILProgram</code>. The private MIL compiler does not support non-fp16 weight types. fp16 only.</p>
+  </div>
+
+  <div class="finding">
+    <div class="finding-header">
+      <span class="finding-status status-blocked">BLOCKED</span>
+      <span class="finding-title"><code>slice_by_index</code> on function inputs with complex programs</span>
+    </div>
+    <p>Slicing a function input combined with RMSNorm + convolutions + attention produces <code>InvalidMILProgram</code> at compile time. Workaround: pre-shape your inputs before passing them to the ANE program — let the caller slice, not the MIL program.</p>
+  </div>
+
+  <div class="finding">
+    <div class="finding-header">
+      <span class="finding-status status-works">WORKS</span>
+      <span class="finding-title">Everything else we needed</span>
+    </div>
+    <p><code>conv</code>, <code>matmul</code>, <code>softmax</code> (power-of-2 dims), <code>sigmoid</code>, <code>mul</code>, <code>add</code>, <code>reshape</code>, <code>transpose</code>, <code>reduce_sum</code>, <code>reduce_max</code>, <code>pow</code>, <code>concat</code> (12+ inputs) — all confirmed working. Enough to build full transformer attention and FFN blocks.</p>
+  </div>
+
+  <h2>IOSurface: The Memory Model</h2>
+
+  <p>The ANE doesn't operate on regular heap memory. It operates on IOSurface buffers — shared memory objects managed by the OS that can be accessed by the CPU, GPU, and ANE without copying.</p>
+
+  <p>Espresso creates input IOSurfaces, writes fp16 data to them using NEON-vectorized C functions, passes them to the ANE via <code>_ANERequest</code>, and reads output IOSurfaces directly after eval:</p>
+
+  <pre><code>// Create an IOSurface for ANE input
+let surface = IOSurfaceCreate([
+    kIOSurfaceWidth: width,
+    kIOSurfaceHeight: height,
+    kIOSurfaceBytesPerElement: 2,  // fp16
+    kIOSurfacePixelFormat: kCVPixelFormatType_OneComponent16Half
+] as CFDictionary)
+
+// Write data (NEON-vectorized C function in ANEInterop)
+ane_interop_write_fp32_to_fp16_surface(surface, floatData, count)
+
+// After eval(), read output directly — no copy
+let tokenId = ane_interop_io_argmax_fp16_spatial_slice(
+    outputSurface, vocabSize: 32000
+)</code></pre>
+
+  <p>The zero-copy design means ANE output bytes are read directly from the mapped IOSurface — the same memory the ANE wrote to. No intermediate buffer, no format conversion, no extra allocation.</p>
+
+  <h2>What Didn't Work (Dead Ends)</h2>
+
+  <h3>_ANEVirtualClient</h3>
+
+  <p>We found a class called <code>_ANEVirtualClient</code> with 22 instance methods and 66 class methods, including what looked like async dispatch and pipeline control. Exciting, until every instantiation path returned <code>nil</code> — classic IOKit entitlement gate. This API requires kernel-level entitlements that only Apple's own processes have.</p>
+
+  <h3>Async eval via _ANESharedEvents</h3>
+
+  <p>We tried to pipeline ANE dispatches using <code>_ANESharedEvents</code> backed by <code>MTLSharedEvent</code>. The standard eval path hung on hardware before the completion callback fired. Metal-based event signaling doesn't bridge to the ANE scheduler the way it does to the GPU scheduler.</p>
+
+  <h3>Metal/ANE hybrid attention</h3>
+
+  <p>We prototyped a split path: ANE for QKV projection, Metal for the attention math, ANE for FFN. Metal attention over 12 heads measured 0.31 ms/eval. But inserting Metal into the dependency chain destroyed any overlap opportunity — FFN layer N depends on Metal layer N, QKV layer N+1 depends on FFN layer N. Net result: 1.8 ms/token slower than pure ANE.</p>
+
+  <h3>Multi-layer cache channel packing</h3>
+
+  <p>We tried packing two layers' KV caches onto the channel axis to fuse two decode steps into one dispatch. Both the full-pack and reduced-pack variants produced <code>InvalidMILProgram</code> at compile time on M3 Max macOS 15. The MIL compiler doesn't handle large channel-packed inputs with complex graphs.</p>
+
+  <h2>The Architecture That Works</h2>
+
+  <p>After exhausting the above dead ends, the architecture that actually hit the performance targets:</p>
+
+  <ol>
+    <li><strong>RWKV-style recurrent stepping</strong> — fixed-size state vectors instead of growing KV caches. Constant latency at any context length.</li>
+    <li><strong>3-layer kernel fusion</strong> — compile 3 transformer layers into one MIL program. 6 layers = 2 ANE dispatches total.</li>
+    <li><strong>Fused RMSNorm + classifier head</strong> — keep the output head on ANE with lane-packed layout for compatibility.</li>
+    <li><strong>Direct-select argmax</strong> — NEON scan on IOSurface memory. No logits copy to CPU.</li>
+  </ol>
+
+  <h2>Confirmed Working MIL Ops</h2>
+
+  <table>
+    <thead>
+      <tr><th>Op</th><th>Status</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>conv</code></td><td class="works">✓ Works</td><td>ANE's native linear op. Use for all matrix multiplications.</td></tr>
+      <tr><td><code>matmul</code></td><td class="works">✓ Works</td><td>Works but <code>conv</code> is often faster on ANE.</td></tr>
+      <tr><td><code>softmax</code></td><td class="works">✓ Works*</td><td>*Power-of-2 dims only. 257 → fail; 256 → ok.</td></tr>
+      <tr><td><code>sigmoid</code></td><td class="works">✓ Works</td><td></td></tr>
+      <tr><td><code>mul</code>, <code>add</code></td><td class="works">✓ Works</td><td>Elementwise, broadcasting works.</td></tr>
+      <tr><td><code>reshape</code>, <code>transpose</code></td><td class="works">✓ Works</td><td></td></tr>
+      <tr><td><code>reduce_sum</code>, <code>reduce_max</code></td><td class="works">✓ Works</td><td></td></tr>
+      <tr><td><code>pow</code></td><td class="works">✓ Works</td><td>Use for rsqrt: <code>pow(x, fp16(-0.5))</code></td></tr>
+      <tr><td><code>concat</code></td><td class="works">✓ Works</td><td>Tested with 12+ values.</td></tr>
+      <tr><td><code>rsqrt</code></td><td class="broken">✗ Broken</td><td>Use <code>pow(x, fp16(-0.5))</code></td></tr>
+      <tr><td><code>reduce_mean</code></td><td class="broken">✗ Missing</td><td>Use <code>reduce_sum</code> + divide</td></tr>
+      <tr><td><code>cast(uint8→fp16)</code></td><td class="broken">✗ Broken</td><td>No quantized weights</td></tr>
+      <tr><td><code>constexpr_affine_dequantize</code></td><td class="broken">✗ Broken</td><td>No quantized weights</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Lessons for Anyone Going Further</h2>
+
+  <p><strong>Start with small programs.</strong> A single-op identity kernel (input → output, no processing) is your baseline. If that works, add one op at a time. <code>InvalidMILProgram</code> often comes from op combinations, not individual ops.</p>
+
+  <p><strong>Dimension alignment matters.</strong> The ANE is optimized for 64-byte-aligned shapes. Keep channel dimensions as multiples of 64 where possible. Smaller widths (< 32) on trunk kernels reliably produce <code>statusType=0x9</code> at eval time.</p>
+
+  <p><strong>Weights are baked in at compile time.</strong> There's no runtime weight swapping. If you need to run multiple models, compile separate ANE binaries. The OS caches them in <code>~/Library/Caches/</code>, so cold compile happens once per distinct program.</p>
+
+  <p><strong>Compilation is expensive the first time.</strong> Our first cold compile of a 6-layer recurrent model took 131 seconds. Subsequent runs (after OS cache warmup) take 350ms. Plan your iteration cycle accordingly — don't change MIL structure in a tight loop.</p>
+
+  <p><strong>IOSurface format is non-negotiable.</strong> <code>[1, C, 1, S]</code> with <code>kCVPixelFormatType_OneComponent16Half</code>. Any deviation breaks the contract. The channel axis is how the ANE identifies tensor type; the spatial axis packs sequence positions.</p>
+
+  <h2>The Code</h2>
+
+  <p>All of this is open source, MIT licensed, and running in production on the Espresso benchmark suite.</p>
+
+  <ul>
+    <li><code>Sources/ANEInterop/</code> — ObjC/C bridge, <code>dlopen</code> wrappers, IOSurface I/O, NEON argmax</li>
+    <li><code>Sources/ANETypes/</code> — <code>~Copyable</code> tensor types, surface management</li>
+    <li><code>Sources/MILGenerator/</code> — programmatic MIL text generation for all 28+ kernel variants</li>
+    <li><code>Sources/ANERuntime/</code> — kernel lifecycle, eval dispatch, surface management</li>
+  </ul>
+
+  <pre><code>git clone https://github.com/christopherkarani/Espresso.git
+
+# Read the MIL generator (how we write MIL programmatically)
+open Sources/MILGenerator/
+
+# Read the ANE bridge
+open Sources/ANEInterop/
+
+# Run the hardware tests (requires Apple Silicon)
+ANE_HARDWARE_TESTS=1 swift test --filter ANERuntimeTests</code></pre>
+
+  <div class="callout">
+    <strong>See also:</strong>
+    <a href="coreml-vs-espresso-benchmarks.html">CoreML vs Espresso: Benchmark Numbers</a> ·
+    <a href="gpt2-926-tokens-per-second.html">GPT-2 at 926 tok/s: The Full Pipeline</a>
+  </div>
+</article>
+
+<footer>
+  <p>© 2026 Espresso · <a href="https://github.com/christopherkarani/Espresso">GitHub</a> · MIT License · Made for Apple Silicon</p>
+</footer>
+
+</body>
+</html>

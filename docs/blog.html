@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blog | Espresso — Direct ANE Inference for Apple Silicon</title>
+  <meta name="description" content="Technical articles on Apple Neural Engine internals, CoreML alternatives, and high-performance Swift ML inference on Apple Silicon.">
+  <meta name="keywords" content="apple neural engine blog, CoreML alternative swift, apple silicon ML framework, swift transformer inference, ANE programming, on-device LLM macOS">
+  <link rel="canonical" href="https://christopherkarani.github.io/Espresso/blog.html">
+
+  <style>
+    :root {
+      --bg: #0d0d0f;
+      --surface: #18181b;
+      --border: #27272a;
+      --text: #fafafa;
+      --muted: #a1a1aa;
+      --accent: #f97316;
+      --green: #22c55e;
+      --code-bg: #1c1c1f;
+      --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; font-size: 17px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    header { border-bottom: 1px solid var(--border); padding: 16px 0; }
+    .header-inner { max-width: 760px; margin: 0 auto; padding: 0 24px; display: flex; justify-content: space-between; align-items: center; }
+    .logo { font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 18px; }
+    .nav-links { display: flex; gap: 24px; font-size: 14px; color: var(--muted); }
+
+    main { max-width: 760px; margin: 0 auto; padding: 48px 24px 96px; }
+    h1 { font-size: 36px; font-weight: 800; margin-bottom: 8px; }
+    .subtitle { color: var(--muted); margin-bottom: 48px; font-size: 18px; }
+
+    .post-list { display: flex; flex-direction: column; gap: 0; }
+    .post-item { border-bottom: 1px solid var(--border); padding: 28px 0; }
+    .post-item:first-child { border-top: 1px solid var(--border); }
+
+    .post-meta { color: var(--muted); font-size: 13px; margin-bottom: 10px; display: flex; gap: 12px; align-items: center; }
+    .tag { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 7px; font-size: 11px; font-family: var(--mono); }
+
+    .post-title { font-size: 22px; font-weight: 700; margin-bottom: 10px; line-height: 1.3; }
+    .post-title a { color: var(--text); }
+    .post-title a:hover { color: var(--accent); text-decoration: none; }
+
+    .post-summary { color: var(--muted); font-size: 16px; margin-bottom: 14px; }
+    .read-more { font-size: 14px; color: var(--accent); font-family: var(--mono); }
+
+    .stat-inline { font-family: var(--mono); font-size: 13px; background: rgba(249,115,22,0.1); color: var(--accent); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+
+    footer { border-top: 1px solid var(--border); padding: 32px 24px; text-align: center; color: var(--muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <a href="index.html" style="text-decoration:none"><span class="logo">Espresso</span></a>
+    <nav class="nav-links">
+      <a href="https://github.com/christopherkarani/Espresso">GitHub</a>
+      <a href="index.html">Home</a>
+      <a href="benchmarks.md">Benchmarks</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <h1>Blog</h1>
+  <p class="subtitle">Technical deep-dives on direct ANE inference, CoreML internals, and high-performance Swift ML.</p>
+
+  <div class="post-list">
+
+    <div class="post-item">
+      <div class="post-meta">
+        <span>March 17, 2026</span>
+        <span class="tag">benchmarks</span>
+        <span class="tag">CoreML</span>
+      </div>
+      <div class="post-title">
+        <a href="coreml-vs-espresso-benchmarks.html">CoreML vs Espresso: Benchmarks on Apple Silicon</a>
+      </div>
+      <p class="post-summary">
+        We measured CoreML's <code>cpuAndNeuralEngine</code> path against Espresso's direct ANE inference on M3 Max.
+        The gap is <span class="stat-inline">4.76x</span>. Here's the breakdown: why it exists, how to reproduce it,
+        and what to expect on M1/M2/M4.
+      </p>
+      <a href="coreml-vs-espresso-benchmarks.html" class="read-more">Read → CoreML vs Espresso benchmarks</a>
+    </div>
+
+    <div class="post-item">
+      <div class="post-meta">
+        <span>March 17, 2026</span>
+        <span class="tag">tutorial</span>
+        <span class="tag">GPT-2</span>
+      </div>
+      <div class="post-title">
+        <a href="gpt2-926-tokens-per-second.html">How to Run GPT-2 at 926 tok/s on a MacBook</a>
+      </div>
+      <p class="post-summary">
+        <span class="stat-inline">1.08 ms/token</span>. <span class="stat-inline">926 tok/s</span>. No Python. No CoreML. No GPU.
+        Step-by-step: the four optimizations (direct ANE access, 3-layer fusion, recurrent architecture,
+        zero-copy argmax) that together hit these numbers on consumer hardware.
+      </p>
+      <a href="gpt2-926-tokens-per-second.html" class="read-more">Read → GPT-2 at 926 tok/s</a>
+    </div>
+
+    <div class="post-item">
+      <div class="post-meta">
+        <span>March 17, 2026</span>
+        <span class="tag">internals</span>
+        <span class="tag">reverse engineering</span>
+      </div>
+      <div class="post-title">
+        <a href="reverse-engineering-apple-neural-engine.html">Reverse-Engineering Apple's Neural Engine for Direct Inference</a>
+      </div>
+      <p class="post-summary">
+        CoreML gives you access to about 20% of the ANE's performance. Here's how we found the other 80%:
+        <code>dlopen</code> into private APIs, map the MIL compiler, write IOSurface buffers directly, and
+        hit every compile-time wall so you don't have to.
+      </p>
+      <a href="reverse-engineering-apple-neural-engine.html" class="read-more">Read → Reverse-engineering the ANE</a>
+    </div>
+
+  </div>
+</main>
+
+<footer>
+  <p>© 2026 Espresso · <a href="https://github.com/christopherkarani/Espresso">GitHub</a> · MIT License · Made for Apple Silicon</p>
+</footer>
+
+</body>
+</html>
