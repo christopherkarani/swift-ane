@@ -1001,6 +1001,20 @@ public struct RealModelInferenceEngine: ~Copyable {
                     )
                 }
             }
+            if newLayers.count > 1 {
+                for layerIndex in 1..<newLayers.count {
+                    do {
+                        try newLayers[layerIndex].decodeQKVOnly.rebindInput(
+                            at: 0,
+                            to: newSurfaceHandles[layerIndex - 1].ffnOut
+                        )
+                    } catch {
+                        throw RealModelInferenceError.runtimeFailure(
+                            "Hybrid decode chaining unavailable for layer \(layerIndex): \(error)"
+                        )
+                    }
+                }
+            }
 
             compiledHybridLayers = newLayers
             compiledHybridSurfaceHandles = newSurfaceHandles
