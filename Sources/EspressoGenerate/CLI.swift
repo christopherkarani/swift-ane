@@ -833,6 +833,27 @@ private func percentile(_ latencies: [Double], percentile: Double) -> Double {
     return sorted[lower] + ((sorted[upper] - sorted[lower]) * fraction)
 }
 
+func resolvedANECompileCachePolicy(environment: [String: String]) -> String {
+    guard let explicit = environment["ANE_COMPILE_CACHE_POLICY"], !explicit.isEmpty else {
+        return "preferCached"
+    }
+    return explicit
+}
+
+private func applyDefaultANECompileCachePolicyIfNeeded() {
+    let policy = resolvedANECompileCachePolicy(environment: ProcessInfo.processInfo.environment)
+    setenv("ANE_COMPILE_CACHE_POLICY", policy, 0)
+}
+
+private func makeEspressoEngine(invocation: ResolvedInvocation) throws -> RealModelInferenceEngine {
+    applyDefaultANECompileCachePolicyIfNeeded()
+    return try RealModelInferenceEngine.build(
+        config: invocation.config,
+        weightDir: invocation.weightsDir,
+        tokenizerDir: invocation.tokenizerDir
+    )
+}
+
 private func runEspressoGeneration(
     engine: inout RealModelInferenceEngine,
     invocation: ResolvedInvocation,
@@ -913,11 +934,7 @@ func aggregateBenchmarkRuns(
 }
 
 private func runEspressoBenchmark(invocation: ResolvedInvocation) throws -> BackendRunMetrics {
-    var engine = try RealModelInferenceEngine.build(
-        config: invocation.config,
-        weightDir: invocation.weightsDir,
-        tokenizerDir: invocation.tokenizerDir
-    )
+    var engine = try makeEspressoEngine(invocation: invocation)
     return try aggregateBenchmarkRuns(warmup: invocation.compareWarmup, iterations: invocation.compareIterations) {
         try runEspressoGeneration(engine: &engine, invocation: invocation)
     }
@@ -1339,11 +1356,7 @@ private func runLiveCompare(invocation: ResolvedInvocation, defaults: DemoDefaul
     )
 
     let espressoCalibration = try maybeMeasurePower(enabled: powerEnabled) {
-        var engine = try RealModelInferenceEngine.build(
-            config: invocation.config,
-            weightDir: invocation.weightsDir,
-            tokenizerDir: invocation.tokenizerDir
-        )
+        var engine = try makeEspressoEngine(invocation: invocation)
         return try engine.generate(
             prompt: invocation.prompt,
             maxTokens: min(invocation.maxTokens, 4),
@@ -1540,11 +1553,7 @@ private func runLiveCompare(invocation: ResolvedInvocation, defaults: DemoDefaul
                 snapshot.events.append("[Espresso] loading ANE pipeline")
                 trimEvents(&snapshot.events)
             }
-            var liveEngine = try RealModelInferenceEngine.build(
-                config: invocation.config,
-                weightDir: invocation.weightsDir,
-                tokenizerDir: invocation.tokenizerDir
-            )
+            var liveEngine = try makeEspressoEngine(invocation: invocation)
             let espressoMetrics = try runEspressoGeneration(engine: &liveEngine, invocation: invocation) { step in
                 espressoTokensBox.set(step.generatedTokens)
                 store.mutate { snapshot in
@@ -1680,11 +1689,7 @@ private func metricsOrZero(_ value: Double, fallback: Double) -> Double {
 }
 
 private func runGenerate(invocation: ResolvedInvocation) throws -> BackendRunMetrics {
-    var engine = try RealModelInferenceEngine.build(
-        config: invocation.config,
-        weightDir: invocation.weightsDir,
-        tokenizerDir: invocation.tokenizerDir
-    )
+    var engine = try makeEspressoEngine(invocation: invocation)
     return try runEspressoGeneration(engine: &engine, invocation: invocation)
 }
 

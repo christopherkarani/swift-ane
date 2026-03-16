@@ -233,3 +233,17 @@ import Testing
         ))
     )
 }
+
+@Test func test_resolvedANECompileCachePolicyDefaultsToPreferCachedWhenUnset() {
+    #expect(resolvedANECompileCachePolicy(environment: [:]) == "preferCached")
+    #expect(resolvedANECompileCachePolicy(environment: ["ANE_COMPILE_CACHE_POLICY": ""]) == "preferCached")
+}
+
+@Test func test_resolvedANECompileCachePolicyPreservesExplicitEnvironmentValue() {
+    #expect(
+        resolvedANECompileCachePolicy(environment: ["ANE_COMPILE_CACHE_POLICY": "forceRebuild"]) == "forceRebuild"
+    )
+    #expect(
+        resolvedANECompileCachePolicy(environment: ["ANE_COMPILE_CACHE_POLICY": "preferCached"]) == "preferCached"
+    )
+}
