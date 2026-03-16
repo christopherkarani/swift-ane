@@ -306,9 +306,13 @@ public struct HybridDecodeSurfaceHandles {
         let vOut = try kernels.decodeQKVOnly.outputSurface(at: 2)
         let projectionContextIn = try kernels.decodeProjection.inputSurface(at: 0)
         let projectionOut = try kernels.decodeProjection.outputSurface(at: 0)
-        let ffnOut = try kernels.decodeFFN.outputSurface(at: 0)
+        let ffnOut = try (kernels.usesFusedPostAttention
+            ? kernels.decodeProjection.outputSurface(at: 0)
+            : kernels.decodeFFN.outputSurface(at: 0))
         try kernels.decodeProjection.rebindInput(at: 1, to: qkvIn)
-        try kernels.decodeFFN.rebindInput(at: 0, to: projectionOut)
+        if !kernels.usesFusedPostAttention {
+            try kernels.decodeFFN.rebindInput(at: 0, to: projectionOut)
+        }
 
         self.qkvIn = qkvIn
         self.kOut = kOut
@@ -317,7 +321,7 @@ public struct HybridDecodeSurfaceHandles {
         self.projectionContextIn = projectionContextIn
         self.projectionResidualIn = qkvIn
         self.projectionOut = projectionOut
-        self.ffnIn = projectionOut
+        self.ffnIn = kernels.usesFusedPostAttention ? qkvIn : projectionOut
         self.ffnOut = ffnOut
         self.maxSeq = logicalMaxSeq ?? kernels.maxSeq
         self.laneSpatial = kernels.laneSpatial
@@ -786,38 +790,16 @@ public extension ForwardPass {
 
                 t0 = RuntimeClock.now()
                 try kernels[layerIndex].decodeProjection.eval()
+                if !kernels[layerIndex].usesFusedPostAttention {
+                    try kernels[layerIndex].decodeFFN.eval()
+                }
             } catch {
-                throw .invalidArguments("hybrid decodeProjection failed at layer \(layerIndex), token \(tokenIndex): \(error)")
-            }
-            timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
-
-            t0 = RuntimeClock.now()
-            do {
-                try kernels[layerIndex].decodeFFN.eval()
-            } catch {
-                throw .invalidArguments("hybrid decodeFFN eval failed at layer \(layerIndex), token \(tokenIndex): \(error)")
+                let kernelName = kernels[layerIndex].usesFusedPostAttention
+                    ? "decodeProjectionFFN"
+                    : "decodeProjection+decodeFFN"
+                throw .invalidArguments("hybrid \(kernelName) failed at layer \(layerIndex), token \(tokenIndex): \(error)")
             }
             timings.tAneFFN += RuntimeClock.ms(RuntimeClock.now() - t0)
-
-            if layerIndex + 1 < kernels.count {
-                t0 = RuntimeClock.now()
-                do {
-                    try SurfaceIO.copyFP16SpatialSlice(
-                        dst: surfaceHandles[layerIndex + 1].qkvIn,
-                        dstChannelOffset: 0,
-                        dstSpatialIndex: 0,
-                        dstSpatial: laneSpatial,
-                        src: handles.ffnOut,
-                        srcChannelOffset: 0,
-                        srcSpatialIndex: 0,
-                        srcSpatial: laneSpatial,
-                        channels: dim
-                    )
-                } catch {
-                    throw .invalidArguments("hybrid ffn->next-qkv lane0 transfer failed: \(error)")
-                }
-                timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
-            }
         }
 
         if readFinalOutputIntoXCur {
