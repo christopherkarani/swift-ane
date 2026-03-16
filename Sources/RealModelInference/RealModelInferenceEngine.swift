@@ -204,6 +204,275 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
     }
 
+    private struct HybridRuntimeCheckpoint: Sendable {
+        let step: Int
+    }
+
+    private struct HybridLayerRangeRuntime: ~Copyable {
+        let layerRange: Range<Int>
+        let maxSeq: Int
+        let laneSpatial: Int
+        let headSpatial: Int
+        let layers: LayerStorage<HybridDecodeKernelSet>
+        let surfaceHandles: [HybridDecodeSurfaceHandles]
+        let greedyNorm: LayerStorage<CompiledHead>
+        let greedyClassifier: LayerStorage<CompiledClassifier>
+        let checkpointSurface: IOSurfaceRef
+        let zeroSlice: TensorBuffer
+        var decodeState: DecodeState
+
+        init(
+            config: MultiModelConfig,
+            weightDirURL: URL,
+            assets: GPT2TopLevelAssets,
+            layerRange: Range<Int>,
+            maxSeq: Int
+        ) throws {
+            precondition(!layerRange.isEmpty)
+
+            let layers = try RealModelInferenceEngine.compileHybridLayers(
+                config: config,
+                weightDirURL: weightDirURL,
+                sourceLayerRange: layerRange,
+                maxSeq: maxSeq
+            )
+
+            var surfaceHandles: [HybridDecodeSurfaceHandles] = []
+            surfaceHandles.reserveCapacity(layers.count)
+            for localLayerIndex in 0..<layers.count {
+                do {
+                    surfaceHandles.append(
+                        try HybridDecodeSurfaceHandles(
+                            kernels: layers[localLayerIndex],
+                            logicalMaxSeq: maxSeq
+                        )
+                    )
+                } catch {
+                    let sourceLayerIndex = layerRange.lowerBound + localLayerIndex
+                    throw RealModelInferenceError.runtimeFailure(
+                        "Hybrid speculative surfaces unavailable for layer \(sourceLayerIndex): \(error)"
+                    )
+                }
+            }
+
+            if layers.count > 1 {
+                for localLayerIndex in 1..<layers.count {
+                    do {
+                        try layers[localLayerIndex].decodeQKVOnly.rebindInput(
+                            at: 0,
+                            to: surfaceHandles[localLayerIndex - 1].ffnOut
+                        )
+                    } catch {
+                        let sourceLayerIndex = layerRange.lowerBound + localLayerIndex
+                        throw RealModelInferenceError.runtimeFailure(
+                            "Hybrid speculative chaining unavailable for layer \(sourceLayerIndex): \(error)"
+                        )
+                    }
+                }
+            }
+
+            let headSpatial = RealModelInferenceEngine.incrementalHeadSpatial(channels: config.dModel)
+            let greedyNorm = try LayerStorage<CompiledHead>(count: 1, throwingInitializer: { _ in
+                try RealModelInferenceEngine.compileHead(
+                    config: config,
+                    weightDirURL: weightDirURL,
+                    assets: assets,
+                    spatial: headSpatial,
+                    inputDType: .fp16,
+                    outputDType: .fp16
+                )
+            })
+            let greedyClassifier = try LayerStorage<CompiledClassifier>(count: 1, throwingInitializer: { _ in
+                try RealModelInferenceEngine.compileClassifier(
+                    config: config,
+                    assets: assets,
+                    spatial: headSpatial
+                )
+            })
+            try greedyClassifier[0].kernel.rebindInput(
+                at: 0,
+                to: greedyNorm[0].outputSurface
+            )
+            if let finalSurface = surfaceHandles.last?.ffnOut {
+                try greedyNorm[0].kernel.rebindInput(at: 0, to: finalSurface)
+                try greedyClassifier[0].kernel.rebindInput(
+                    at: 0,
+                    to: greedyNorm[0].outputSurface
+                )
+            }
+
+            guard let checkpointSurface = ane_interop_create_surface(config.dModel * surfaceHandles[0].laneSpatial * 2) else {
+                throw RealModelInferenceError.runtimeFailure("Hybrid speculative checkpoint surface allocation failed")
+            }
+
+            var decodeState = try DecodeState(maxSeq: maxSeq)
+            ForwardPass.initializeHybridDecodeCaches(
+                surfaceHandles: surfaceHandles,
+                dim: config.dModel
+            )
+            decodeState.reset()
+            let zeroSlice = TensorBuffer(count: config.dModel, zeroed: true)
+
+            self.layerRange = layerRange
+            self.maxSeq = maxSeq
+            self.laneSpatial = surfaceHandles[0].laneSpatial
+            self.headSpatial = headSpatial
+            self.layers = layers
+            self.surfaceHandles = surfaceHandles
+            self.greedyNorm = greedyNorm
+            self.greedyClassifier = greedyClassifier
+            self.checkpointSurface = checkpointSurface
+            self.zeroSlice = zeroSlice
+            self.decodeState = decodeState
+        }
+
+        var finalSurface: IOSurfaceRef {
+            surfaceHandles[surfaceHandles.count - 1].ffnOut
+        }
+
+        var step: Int {
+            decodeState.visibleTokenCount
+        }
+
+        mutating func reset(dim: Int) {
+            ForwardPass.initializeHybridDecodeCaches(
+                surfaceHandles: surfaceHandles,
+                dim: dim
+            )
+            decodeState.reset()
+        }
+
+        mutating func captureCheckpoint(dim: Int) throws -> HybridRuntimeCheckpoint {
+            try RealModelInferenceEngine.copyFullFP16Surface(
+                dst: checkpointSurface,
+                src: finalSurface,
+                channels: dim,
+                spatial: laneSpatial
+            )
+            return HybridRuntimeCheckpoint(step: step)
+        }
+
+        mutating func rollback(
+            to checkpoint: HybridRuntimeCheckpoint,
+            mutatedTokenCount: Int,
+            dim: Int
+        ) throws {
+            decodeState = try DecodeState(maxSeq: maxSeq, step: checkpoint.step)
+            try RealModelInferenceEngine.copyFullFP16Surface(
+                dst: finalSurface,
+                src: checkpointSurface,
+                channels: dim,
+                spatial: laneSpatial
+            )
+            guard mutatedTokenCount > 0 else { return }
+            for handles in surfaceHandles {
+                for offset in 0..<mutatedTokenCount {
+                    let spatialIndex = checkpoint.step + offset
+                    guard spatialIndex < maxSeq else { continue }
+                    try zeroSlice.withUnsafeBufferPointer { zeroBuffer in
+                        try SurfaceIO.writeFP16SpatialSlice(
+                            to: handles.kCacheFull,
+                            channelOffset: 0,
+                            spatialIndex: spatialIndex,
+                            spatial: maxSeq,
+                            data: zeroBuffer,
+                            channels: dim
+                        )
+                        try SurfaceIO.writeFP16SpatialSlice(
+                            to: handles.vCacheFull,
+                            channelOffset: 0,
+                            spatialIndex: spatialIndex,
+                            spatial: maxSeq,
+                            data: zeroBuffer,
+                            channels: dim
+                        )
+                    }
+                }
+            }
+        }
+
+        mutating func copyState(
+            from other: borrowing HybridLayerRangeRuntime,
+            dim: Int
+        ) throws {
+            precondition(layerRange == other.layerRange)
+            precondition(maxSeq == other.maxSeq)
+            precondition(laneSpatial == other.laneSpatial)
+
+            decodeState = try DecodeState(maxSeq: maxSeq, step: other.step)
+            for index in surfaceHandles.indices {
+                try RealModelInferenceEngine.copyFullFP16Surface(
+                    dst: surfaceHandles[index].kCacheFull,
+                    src: other.surfaceHandles[index].kCacheFull,
+                    channels: dim,
+                    spatial: maxSeq
+                )
+                try RealModelInferenceEngine.copyFullFP16Surface(
+                    dst: surfaceHandles[index].vCacheFull,
+                    src: other.surfaceHandles[index].vCacheFull,
+                    channels: dim,
+                    spatial: maxSeq
+                )
+            }
+            try RealModelInferenceEngine.copyFullFP16Surface(
+                dst: finalSurface,
+                src: other.finalSurface,
+                channels: dim,
+                spatial: laneSpatial
+            )
+        }
+
+        mutating func selectGreedyToken(vocab: Int) throws -> UInt16 {
+            try RealModelInferenceEngine.evaluateGreedyClassifier(
+                norm: greedyNorm[0],
+                classifier: greedyClassifier[0],
+                headSpatial: headSpatial,
+                vocab: vocab
+            )
+        }
+
+        mutating func advanceFromBuffer(
+            _ inputBuffer: borrowing TensorBuffer,
+            metalAttention: MetalAttentionKernel,
+            dim: Int
+        ) throws {
+            var timings = HybridDecodeTimingBreakdown()
+            try ForwardPass.runHybridDecodeTimed(
+                xCur: inputBuffer,
+                kernels: layers,
+                surfaceHandles: surfaceHandles,
+                metalAttention: metalAttention,
+                decodeState: &decodeState,
+                dim: dim,
+                readFinalOutputIntoXCur: false,
+                timings: &timings
+            )
+        }
+
+        mutating func advanceFromSurface(
+            _ sourceSurface: IOSurfaceRef,
+            metalAttention: MetalAttentionKernel,
+            dim: Int
+        ) throws {
+            let firstHandles = surfaceHandles[0]
+            try RealModelInferenceEngine.copyFullFP16Surface(
+                dst: firstHandles.qkvIn,
+                src: sourceSurface,
+                channels: dim,
+                spatial: laneSpatial
+            )
+            var timings = HybridDecodeTimingBreakdown()
+            try ForwardPass.runHybridDecodeTimedFromPreparedInput(
+                kernels: layers,
+                surfaceHandles: surfaceHandles,
+                metalAttention: metalAttention,
+                decodeState: &decodeState,
+                dim: dim,
+                timings: &timings
+            )
+        }
+    }
+
     private static let gpt2EOSToken: UInt16 = 50_256
 
     private let config: MultiModelConfig
@@ -388,6 +657,26 @@ public struct RealModelInferenceEngine: ~Copyable {
         if useHybridFastPath, let metalAttention = hybridMetalAttention {
             let compileEnd = DispatchTime.now().uptimeNanoseconds
             let compileTimeMs = compileDidRun ? Self.milliseconds(from: compileEnd - compileStart) : 0
+            if let speculativeDraftLayerCount = Self.resolvedSpeculativeDraftLayerCount(
+                config: config,
+                temperature: temperature
+            ) {
+                do {
+                    return try generateIncrementalHybridSpeculative(
+                        promptTokens: promptTokens,
+                        effectiveMaxTokens: effectiveMaxTokens,
+                        compileTimeMs: compileTimeMs,
+                        maxSeq: bucket,
+                        metalAttention: metalAttention,
+                        draftLayerCount: speculativeDraftLayerCount,
+                        onStep: onStep
+                    )
+                } catch {
+                    if ProcessInfo.processInfo.environment["ESPRESSO_REALMODEL_DISABLE_HYBRID_FALLBACK"] == "1" {
+                        throw RealModelInferenceError.runtimeFailure("Hybrid speculative fast path failed: \(error)")
+                    }
+                }
+            }
             do {
                 return try generateIncrementalHybrid(
                     promptTokens: promptTokens,
@@ -532,6 +821,24 @@ public struct RealModelInferenceEngine: ~Copyable {
 
     static func incrementalHeadSpatial(channels: Int) -> Int {
         minimumCompileSpatial(channels: channels)
+    }
+
+    static func resolvedSpeculativeDraftLayerCount(
+        config: MultiModelConfig,
+        temperature: Float,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int? {
+        guard config.architecture == .gpt2,
+              temperature == 0,
+              config.nLayer > 1,
+              environment["ESPRESSO_ENABLE_GPT2_SPECULATIVE"] == "1" else {
+            return nil
+        }
+
+        let defaultDraftLayerCount = 1
+        let requestedDraftLayerCount = environment["ESPRESSO_GPT2_SPECULATIVE_DRAFT_LAYERS"].flatMap(Int.init)
+            ?? defaultDraftLayerCount
+        return min(max(requestedDraftLayerCount, 1), config.nLayer - 1)
     }
 
     static func resolveTopLevelWeightPaths(
@@ -1324,6 +1631,236 @@ public struct RealModelInferenceEngine: ~Copyable {
         )
     }
 
+    private mutating func generateIncrementalHybridSpeculative(
+        promptTokens: [UInt16],
+        effectiveMaxTokens: Int,
+        compileTimeMs: Double,
+        maxSeq: Int,
+        metalAttention: MetalAttentionKernel,
+        draftLayerCount: Int,
+        onStep: ((GenerationStep) -> Void)?
+    ) throws -> GenerationResult {
+        guard draftLayerCount > 0, draftLayerCount < config.nLayer else {
+            throw RealModelInferenceError.runtimeFailure(
+                "Speculative GPT-2 draft layer count \(draftLayerCount) is invalid for \(config.nLayer) layers"
+            )
+        }
+
+        let speculativeCompileStart = DispatchTime.now().uptimeNanoseconds
+        var draftRuntime = try HybridLayerRangeRuntime(
+            config: config,
+            weightDirURL: weightDirURL,
+            assets: gpt2Assets,
+            layerRange: 0..<draftLayerCount,
+            maxSeq: maxSeq
+        )
+        var verifierRuntime = try HybridLayerRangeRuntime(
+            config: config,
+            weightDirURL: weightDirURL,
+            assets: gpt2Assets,
+            layerRange: draftLayerCount..<config.nLayer,
+            maxSeq: maxSeq
+        )
+        let totalCompileTimeMs = compileTimeMs + Self.milliseconds(
+            from: DispatchTime.now().uptimeNanoseconds - speculativeCompileStart
+        )
+
+        let xCur = TensorBuffer(count: config.dModel, zeroed: true)
+        for (position, token) in promptTokens.enumerated() {
+            try writeIncrementalEmbedding(token: token, position: position, into: xCur)
+            do {
+                try draftRuntime.advanceFromBuffer(
+                    xCur,
+                    metalAttention: metalAttention,
+                    dim: config.dModel
+                )
+                try verifierRuntime.advanceFromSurface(
+                    draftRuntime.finalSurface,
+                    metalAttention: metalAttention,
+                    dim: config.dModel
+                )
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid speculative prefill failed at prompt position \(position): \(error)"
+                )
+            }
+        }
+
+        var allTokens = promptTokens
+        var generatedTokens: [UInt16] = []
+        generatedTokens.reserveCapacity(effectiveMaxTokens)
+
+        let generationStart = DispatchTime.now().uptimeNanoseconds
+        var emissionStart = generationStart
+        var firstTokenLatencyMs = 0.0
+        var firstTokenRecorded = false
+
+        func emitToken(_ token: UInt16, at emissionNow: UInt64) {
+            generatedTokens.append(token)
+            allTokens.append(token)
+            let elapsedMs = Self.milliseconds(from: emissionNow - generationStart)
+            let tokenLatencyMs = Self.milliseconds(from: emissionNow - emissionStart)
+            if !firstTokenRecorded {
+                firstTokenLatencyMs = Self.milliseconds(from: emissionNow - generationStart)
+                firstTokenRecorded = true
+            }
+            let tokensPerSecond = Double(generatedTokens.count) / max(elapsedMs / 1_000, 1e-9)
+            onStep?(
+                GenerationStep(
+                    token: token,
+                    generatedTokens: generatedTokens,
+                    text: tokenizer.decode(allTokens.map(Int.init)),
+                    tokenLatencyMs: tokenLatencyMs,
+                    elapsedMs: elapsedMs,
+                    firstTokenLatencyMs: firstTokenLatencyMs,
+                    tokensPerSecond: tokensPerSecond
+                )
+            )
+        }
+
+        while generatedTokens.count < effectiveMaxTokens {
+            let checkpoint = try draftRuntime.captureCheckpoint(dim: config.dModel)
+            let proposedToken0: UInt16
+            do {
+                proposedToken0 = try draftRuntime.selectGreedyToken(vocab: config.vocab)
+                try writeIncrementalEmbedding(token: proposedToken0, position: allTokens.count, into: xCur)
+                try draftRuntime.advanceFromBuffer(
+                    xCur,
+                    metalAttention: metalAttention,
+                    dim: config.dModel
+                )
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid speculative draft proposal-0 failed at generated token \(generatedTokens.count): \(error)"
+                )
+            }
+
+            let proposedToken1: UInt16
+            do {
+                proposedToken1 = try draftRuntime.selectGreedyToken(vocab: config.vocab)
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid speculative draft proposal-1 failed at generated token \(generatedTokens.count): \(error)"
+                )
+            }
+
+            let exactToken0: UInt16
+            do {
+                exactToken0 = try verifierRuntime.selectGreedyToken(vocab: config.vocab)
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid speculative verifier token-0 failed at generated token \(generatedTokens.count): \(error)"
+                )
+            }
+            if exactToken0 == Self.gpt2EOSToken {
+                break
+            }
+
+            if exactToken0 != proposedToken0 {
+                do {
+                    try draftRuntime.rollback(to: checkpoint, mutatedTokenCount: 1, dim: config.dModel)
+                    try writeIncrementalEmbedding(token: exactToken0, position: allTokens.count, into: xCur)
+                    try draftRuntime.advanceFromBuffer(
+                        xCur,
+                        metalAttention: metalAttention,
+                        dim: config.dModel
+                    )
+                    try verifierRuntime.advanceFromSurface(
+                        draftRuntime.finalSurface,
+                        metalAttention: metalAttention,
+                        dim: config.dModel
+                    )
+                } catch {
+                    throw RealModelInferenceError.runtimeFailure(
+                        "Hybrid speculative verifier rollback failed at generated token \(generatedTokens.count): \(error)"
+                    )
+                }
+
+                let emissionNow = DispatchTime.now().uptimeNanoseconds
+                emitToken(exactToken0, at: emissionNow)
+                emissionStart = emissionNow
+                if generatedTokens.count >= effectiveMaxTokens || allTokens.count >= config.maxSeq {
+                    break
+                }
+                continue
+            }
+
+            do {
+                try verifierRuntime.advanceFromSurface(
+                    draftRuntime.finalSurface,
+                    metalAttention: metalAttention,
+                    dim: config.dModel
+                )
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid speculative verifier promotion failed at generated token \(generatedTokens.count): \(error)"
+                )
+            }
+
+            let emissionAfterFirst = DispatchTime.now().uptimeNanoseconds
+            emitToken(exactToken0, at: emissionAfterFirst)
+            emissionStart = emissionAfterFirst
+
+            if generatedTokens.count >= effectiveMaxTokens || allTokens.count >= config.maxSeq {
+                break
+            }
+
+            let exactToken1: UInt16
+            do {
+                exactToken1 = try verifierRuntime.selectGreedyToken(vocab: config.vocab)
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid speculative verifier token-1 failed at generated token \(generatedTokens.count): \(error)"
+                )
+            }
+            if exactToken1 == Self.gpt2EOSToken {
+                break
+            }
+
+            do {
+                let committedSecondToken = exactToken1 == proposedToken1 ? proposedToken1 : exactToken1
+                try writeIncrementalEmbedding(token: committedSecondToken, position: allTokens.count, into: xCur)
+                try draftRuntime.advanceFromBuffer(
+                    xCur,
+                    metalAttention: metalAttention,
+                    dim: config.dModel
+                )
+                try verifierRuntime.advanceFromSurface(
+                    draftRuntime.finalSurface,
+                    metalAttention: metalAttention,
+                    dim: config.dModel
+                )
+            } catch {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Hybrid speculative commit failed at generated token \(generatedTokens.count): \(error)"
+                )
+            }
+
+            let emissionAfterSecond = DispatchTime.now().uptimeNanoseconds
+            emitToken(exactToken1, at: emissionAfterSecond)
+            emissionStart = emissionAfterSecond
+
+            if allTokens.count >= config.maxSeq {
+                break
+            }
+        }
+
+        let generationEnd = DispatchTime.now().uptimeNanoseconds
+        let generationTimeMs = Self.milliseconds(from: generationEnd - generationStart)
+        let tokensPerSecond = generatedTokens.isEmpty
+            ? 0
+            : Double(generatedTokens.count) / max(generationTimeMs / 1_000, 1e-9)
+
+        return GenerationResult(
+            text: tokenizer.decode(allTokens.map(Int.init)),
+            tokens: generatedTokens,
+            promptTokens: promptTokens,
+            tokensPerSecond: tokensPerSecond,
+            compileTimeMs: totalCompileTimeMs,
+            firstTokenLatencyMs: firstTokenLatencyMs
+        )
+    }
+
     private func encodePrompt(_ prompt: String) throws -> [UInt16] {
         let rawTokens = tokenizer.encode(prompt)
         guard !rawTokens.isEmpty else {
@@ -1378,9 +1915,12 @@ public struct RealModelInferenceEngine: ~Copyable {
     private static func compileHybridLayers(
         config: MultiModelConfig,
         weightDirURL: URL,
+        sourceLayerRange: Range<Int>? = nil,
         maxSeq: Int
     ) throws -> LayerStorage<HybridDecodeKernelSet> {
-        try LayerStorage<HybridDecodeKernelSet>(count: config.nLayer, throwingInitializer: { layerIndex in
+        let layerRange = sourceLayerRange ?? (0..<config.nLayer)
+        return try LayerStorage<HybridDecodeKernelSet>(count: layerRange.count, throwingInitializer: { localLayerIndex in
+            let layerIndex = layerRange.lowerBound + localLayerIndex
             let paths = LayerWeightPaths.forLayer(layerIndex, config: config, blobDir: weightDirURL.path)
             let weights = try loadHybridLayerWeights(config: config, paths: paths)
             do {
@@ -2510,6 +3050,54 @@ public struct RealModelInferenceEngine: ~Copyable {
         let baseAddress = IOSurfaceGetBaseAddress(surface).assumingMemoryBound(to: Float.self)
         for channel in 0..<channels {
             destination[channel] = baseAddress[channel * spatial + spatialIndex]
+        }
+    }
+
+    private static func copyFullFP16Surface(
+        dst: IOSurfaceRef,
+        src: IOSurfaceRef,
+        channels: Int,
+        spatial: Int
+    ) throws {
+        try SurfaceIO.copyFP16(
+            dst: dst,
+            dstChannelOffset: 0,
+            src: src,
+            srcChannelOffset: 0,
+            channels: channels,
+            spatial: spatial
+        )
+    }
+
+    private static func evaluateGreedyClassifier(
+        norm: borrowing CompiledHead,
+        classifier: borrowing CompiledClassifier,
+        headSpatial: Int,
+        vocab: Int
+    ) throws -> UInt16 {
+        do {
+            try norm.kernel.eval()
+            try classifier.kernel.eval()
+            let argmax = try SurfaceIO.argmaxFP16SpatialSliceWithHint(
+                from: classifier.outputSurface,
+                channelOffset: 0,
+                spatialIndex: 0,
+                spatial: headSpatial,
+                channels: vocab,
+                hintSurface: classifier.maxValueSurface,
+                hintSpatialIndex: 0,
+                hintSpatial: headSpatial
+            )
+            guard let token = UInt16(exactly: argmax.index) else {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Greedy ANE classifier selected out-of-range token \(argmax.index)"
+                )
+            }
+            return token
+        } catch let error as RealModelInferenceError {
+            throw error
+        } catch {
+            throw RealModelInferenceError.runtimeFailure("Hybrid greedy ANE head evaluation failed: \(error)")
         }
     }
 

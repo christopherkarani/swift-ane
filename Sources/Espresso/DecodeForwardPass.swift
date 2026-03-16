@@ -700,13 +700,6 @@ public extension ForwardPass {
         precondition(dim > 0)
         precondition(xCur.count == dim)
 
-        let maxSeq = decodeState.maxSeq
-        for handles in surfaceHandles {
-            precondition(handles.maxSeq == maxSeq)
-        }
-
-        let tokenIndex = try decodeState.beginTokenStep()
-        let visibleTokens = tokenIndex + 1
         let laneSpatial = surfaceHandles[0].laneSpatial
         precondition(laneSpatial > 0)
 
@@ -726,6 +719,59 @@ public extension ForwardPass {
             throw .invalidArguments("hybrid decode token lane write failed: \(error)")
         }
         timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
+
+        try runHybridDecodeTimedFromPreparedInput(
+            kernels: kernels,
+            surfaceHandles: surfaceHandles,
+            metalAttention: metalAttention,
+            decodeState: &decodeState,
+            dim: dim,
+            timings: &timings
+        )
+
+        if readFinalOutputIntoXCur {
+            let finalHandles = surfaceHandles[kernels.count - 1]
+            let t0 = RuntimeClock.now()
+            do {
+                try xCur.withUnsafeMutableBufferPointer { out in
+                    try SurfaceIO.readFP16SpatialSlice(
+                        from: finalHandles.ffnOut,
+                        channelOffset: 0,
+                        spatialIndex: 0,
+                        spatial: laneSpatial,
+                        into: out,
+                        channels: dim
+                    )
+                }
+            } catch {
+                throw .invalidArguments("hybrid final decode lane unpack failed: \(error)")
+            }
+            timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
+        }
+    }
+
+    public static func runHybridDecodeTimedFromPreparedInput(
+        kernels: borrowing LayerStorage<HybridDecodeKernelSet>,
+        surfaceHandles: [HybridDecodeSurfaceHandles],
+        metalAttention: MetalAttentionKernel,
+        decodeState: inout DecodeState,
+        dim: Int = ModelConfig.dim,
+        timings: inout HybridDecodeTimingBreakdown
+    ) throws(ANEError) {
+        precondition(kernels.count > 0)
+        precondition(surfaceHandles.count == kernels.count)
+        precondition(dim > 0)
+
+        let maxSeq = decodeState.maxSeq
+        for handles in surfaceHandles {
+            precondition(handles.maxSeq == maxSeq)
+        }
+
+        let tokenIndex = try decodeState.beginTokenStep()
+        let visibleTokens = tokenIndex + 1
+        let laneSpatial = surfaceHandles[0].laneSpatial
+        precondition(laneSpatial > 0)
+        var t0 = RuntimeClock.now()
 
         for layerIndex in 0..<kernels.count {
             let handles = surfaceHandles[layerIndex]
@@ -800,26 +846,6 @@ public extension ForwardPass {
                 throw .invalidArguments("hybrid \(kernelName) failed at layer \(layerIndex), token \(tokenIndex): \(error)")
             }
             timings.tAneFFN += RuntimeClock.ms(RuntimeClock.now() - t0)
-        }
-
-        if readFinalOutputIntoXCur {
-            let finalHandles = surfaceHandles[kernels.count - 1]
-            t0 = RuntimeClock.now()
-            do {
-                try xCur.withUnsafeMutableBufferPointer { out in
-                    try SurfaceIO.readFP16SpatialSlice(
-                        from: finalHandles.ffnOut,
-                        channelOffset: 0,
-                        spatialIndex: 0,
-                        spatial: laneSpatial,
-                        into: out,
-                        channels: dim
-                    )
-                }
-            } catch {
-                throw .invalidArguments("hybrid final decode lane unpack failed: \(error)")
-            }
-            timings.tIO += RuntimeClock.ms(RuntimeClock.now() - t0)
         }
 
         try decodeState.commitTokenStep(expectedIndex: tokenIndex)

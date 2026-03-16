@@ -103,6 +103,111 @@ import ModelSupport
     #expect(RealModelInferenceEngine.incrementalHeadSpatial(channels: 768) == 32)
 }
 
+@Test func test_resolvedSpeculativeDraftLayerCountRequiresGreedyGPT2AndEnv() {
+    let gpt2Config = MultiModelConfig(
+        name: "spec-gpt2",
+        nLayer: 12,
+        nHead: 2,
+        nKVHead: 2,
+        dModel: 8,
+        headDim: 4,
+        hiddenDim: 32,
+        vocab: 64,
+        maxSeq: 8,
+        normEps: 1e-5,
+        architecture: .gpt2
+    )
+    let llamaConfig = MultiModelConfig(
+        name: "spec-llama",
+        nLayer: 12,
+        nHead: 2,
+        nKVHead: 2,
+        dModel: 8,
+        headDim: 4,
+        hiddenDim: 32,
+        vocab: 64,
+        maxSeq: 8,
+        normEps: 1e-5,
+        architecture: .llama
+    )
+
+    #expect(
+        RealModelInferenceEngine.resolvedSpeculativeDraftLayerCount(
+            config: gpt2Config,
+            temperature: 0,
+            environment: [:]
+        ) == nil
+    )
+    #expect(
+        RealModelInferenceEngine.resolvedSpeculativeDraftLayerCount(
+            config: gpt2Config,
+            temperature: 0.8,
+            environment: ["ESPRESSO_ENABLE_GPT2_SPECULATIVE": "1"]
+        ) == nil
+    )
+    #expect(
+        RealModelInferenceEngine.resolvedSpeculativeDraftLayerCount(
+            config: llamaConfig,
+            temperature: 0,
+            environment: ["ESPRESSO_ENABLE_GPT2_SPECULATIVE": "1"]
+        ) == nil
+    )
+}
+
+@Test func test_resolvedSpeculativeDraftLayerCountDefaultsAndClamps() {
+    let config = MultiModelConfig(
+        name: "spec-gpt2",
+        nLayer: 12,
+        nHead: 2,
+        nKVHead: 2,
+        dModel: 8,
+        headDim: 4,
+        hiddenDim: 32,
+        vocab: 64,
+        maxSeq: 8,
+        normEps: 1e-5,
+        architecture: .gpt2
+    )
+
+    #expect(
+        RealModelInferenceEngine.resolvedSpeculativeDraftLayerCount(
+            config: config,
+            temperature: 0,
+            environment: ["ESPRESSO_ENABLE_GPT2_SPECULATIVE": "1"]
+        ) == 1
+    )
+    #expect(
+        RealModelInferenceEngine.resolvedSpeculativeDraftLayerCount(
+            config: config,
+            temperature: 0,
+            environment: [
+                "ESPRESSO_ENABLE_GPT2_SPECULATIVE": "1",
+                "ESPRESSO_GPT2_SPECULATIVE_DRAFT_LAYERS": "0",
+            ]
+        ) == 1
+    )
+    #expect(
+        RealModelInferenceEngine.resolvedSpeculativeDraftLayerCount(
+            config: config,
+            temperature: 0,
+            environment: [
+                "ESPRESSO_ENABLE_GPT2_SPECULATIVE": "1",
+                "ESPRESSO_GPT2_SPECULATIVE_DRAFT_LAYERS": "99",
+            ]
+        ) == 11
+    )
+    #expect(
+        RealModelInferenceEngine.resolvedSpeculativeDraftLayerCount(
+            config: config,
+            temperature: 0,
+            environment: [
+                "ESPRESSO_ENABLE_GPT2_SPECULATIVE": "1",
+                "ESPRESSO_GPT2_SPECULATIVE_DRAFT_LAYERS": "junk",
+            ]
+        ) == 1
+    )
+}
+
 @Test func test_weightPathResolution() throws {
     let root = "/tmp/real-model-inference"
 
