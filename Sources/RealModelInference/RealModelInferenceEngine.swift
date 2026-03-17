@@ -2412,6 +2412,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         var firstTokenRecorded = false
         var rng = SystemRandomNumberGenerator()
         var normalized = [Float](repeating: 0, count: config.dModel)
+        var hidden = [Float](repeating: 0, count: config.dModel)
         let headSpatial = compiledHybridHeadSpatial
 
         while generatedTokens.count < effectiveMaxTokens {
@@ -2448,7 +2449,6 @@ public struct RealModelInferenceEngine: ~Copyable {
                 let laneSpatial = compiledHybridSurfaceHandles.last!.laneSpatial
 
                 // 1. Read hidden state from last layer's FFN output surface
-                var hidden = [Float](repeating: 0, count: config.dModel)
                 do {
                     try hidden.withUnsafeMutableBufferPointer { buf in
                         try SurfaceIO.readFP16SpatialSlice(
@@ -2468,8 +2468,8 @@ public struct RealModelInferenceEngine: ~Copyable {
                 let gamma = llamaAssets.finalNormGamma
                 var sumSq: Float = 0
                 vDSP_dotpr(hidden, 1, hidden, 1, &sumSq, vDSP_Length(config.dModel))
-                let invRms = 1.0 / sqrtf(sumSq / Float(config.dModel) + config.normEps)
-                vDSP_vsmul(hidden, 1, [invRms], &normalized, 1, vDSP_Length(config.dModel))
+                var invRms = 1.0 / sqrtf(sumSq / Float(config.dModel) + config.normEps)
+                vDSP_vsmul(hidden, 1, &invRms, &normalized, 1, vDSP_Length(config.dModel))
                 vDSP_vmul(normalized, 1, gamma, 1, &normalized, 1, vDSP_Length(config.dModel))
 
                 // 3. Tiled matmul argmax using pre-converted FP16 weights
