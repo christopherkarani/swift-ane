@@ -274,7 +274,7 @@ public func loadGenerationWeightsForCoreML(
 
 public func benchmarkCoreMLGeneration(
     request: borrowing CoreMLBenchmarkRequest,
-    promptTokens: [UInt16],
+    promptTokens: [TokenID],
     maxNewTokens: Int,
     warmup: Int,
     iterations: Int,
@@ -298,7 +298,7 @@ public func benchmarkCoreMLGeneration(
 
 private func benchmarkAutoregressiveHarness<Model>(
     harness: inout AutoregressiveGenerationHarness<Model>,
-    promptTokens: [UInt16],
+    promptTokens: [TokenID],
     maxNewTokens: Int,
     warmup: Int,
     iterations: Int
@@ -359,7 +359,7 @@ private struct CoreMLGenerationBenchmarkModel: ~Copyable, AutoregressiveLanguage
     private let verifyLogits: TensorBuffer
     private let stepRMSWorkspace: RMSNorm.Workspace
     private let verifyRMSWorkspace: RMSNorm.Workspace
-    private var currentTokens: [UInt16]
+    private var currentTokens: [TokenID]
     private(set) var compileTimeMs: Double
     private var trunkLatencyMs: Double
     private var logitsLatencyMs: Double
@@ -463,7 +463,7 @@ private struct CoreMLGenerationBenchmarkModel: ~Copyable, AutoregressiveLanguage
         zeroInputArray()
     }
 
-    mutating func prefill(promptTokens: [UInt16]) throws(GenerationError) -> [Float] {
+    mutating func prefill(promptTokens: [TokenID]) throws(GenerationError) -> [Float] {
         guard !promptTokens.isEmpty else {
             throw .invalidArguments("promptTokens must not be empty")
         }
@@ -479,7 +479,7 @@ private struct CoreMLGenerationBenchmarkModel: ~Copyable, AutoregressiveLanguage
         return try projectCurrentLogits(sequenceIndex: promptTokens.count - 1)
     }
 
-    mutating func decode(nextToken: UInt16) throws(GenerationError) -> [Float] {
+    mutating func decode(nextToken: TokenID) throws(GenerationError) -> [Float] {
         guard currentTokens.count < maxSequenceTokens else {
             throw .invalidArguments("decode overflow at maxSequenceTokens \(maxSequenceTokens)")
         }
@@ -491,7 +491,7 @@ private struct CoreMLGenerationBenchmarkModel: ~Copyable, AutoregressiveLanguage
     }
 
     mutating func verify(
-        sequenceTokens: [UInt16],
+        sequenceTokens: [TokenID],
         startIndex: Int
     ) throws(GenerationError) -> [[Float]] {
         guard !sequenceTokens.isEmpty else {
@@ -557,7 +557,7 @@ private struct CoreMLGenerationBenchmarkModel: ~Copyable, AutoregressiveLanguage
         }
     }
 
-    private func writeToken(_ token: UInt16, at position: Int) throws(GenerationError) {
+    private func writeToken(_ token: TokenID, at position: Int) throws(GenerationError) {
         guard Int(token) < vocabSize else {
             throw .invalidArguments("token \(token) exceeds vocab size \(vocabSize)")
         }

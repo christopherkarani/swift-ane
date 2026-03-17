@@ -14,7 +14,7 @@ public struct LocalRealArtifactManifest: Sendable, Equatable, Codable {
     public let recurrentCheckpointPath: String
     public let futureSidecarPath: String
     public let manifestPath: String
-    public let promptToken: UInt16
+    public let promptToken: TokenID
     public let tokenCount: Int
     public let layerCount: Int
     public let vocabSize: Int
@@ -25,7 +25,7 @@ public struct LocalRealArtifactManifest: Sendable, Equatable, Codable {
         recurrentCheckpointPath: String,
         futureSidecarPath: String,
         manifestPath: String,
-        promptToken: UInt16,
+        promptToken: TokenID,
         tokenCount: Int,
         layerCount: Int,
         vocabSize: Int
@@ -60,7 +60,8 @@ public enum LocalRealArtifactPipeline {
             throw LocalRealArtifactPipelineError.modelLoadFailed("\(error)")
         }
 
-        let tokens = Array(UnsafeBufferPointer(start: dataset.tokensBase, count: dataset.nTokens))
+        let rawTokens = UnsafeBufferPointer(start: dataset.tokensBase, count: dataset.nTokens)
+        let tokens: [TokenID] = rawTokens.map { TokenID($0) }
         let artifacts = try LocalBigramArtifactBuilder.build(
             tokens: tokens,
             layerCount: layerCount,
@@ -106,7 +107,7 @@ public enum LocalRealArtifactPipeline {
     public static func offlineAcceptanceGate(
         recurrentCheckpointPath: String,
         futureSidecarPath: String,
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         maxNewTokens: Int,
         strategy: TokenSelectionStrategy = .argmax
     ) throws -> OfflineExactAcceptanceTrace {
