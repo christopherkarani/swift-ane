@@ -1,8 +1,9 @@
+import ANEGraphIR
+import ANETypes
 import Darwin
 import Foundation
-import Testing
-import ANEGraphIR
 import ModelSupport
+import Testing
 @testable import RealModelInference
 
 @Test func test_buildPipelineConfigValidation() throws {
@@ -346,7 +347,7 @@ import ModelSupport
     }
 
     let config = ModelRegistry.gpt2_124m
-    let tokens: [UInt32] = [15496, 11]
+    let tokens: [TokenID] = [15496, 11]
     let packedInput = try RealModelInferenceEngine.composeEmbeddingInputForTesting(
         config: config,
         weightDir: weightsDir,
