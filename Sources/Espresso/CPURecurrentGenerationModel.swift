@@ -108,7 +108,7 @@ public struct CPURecurrentGenerationModel: ~Copyable, FutureTokenProposingLangua
         hasCurrentActivation = false
     }
 
-    public mutating func prefill(promptTokens: [UInt16]) throws(GenerationError) -> [Float] {
+    public mutating func prefill(promptTokens: [TokenID]) throws(GenerationError) -> [Float] {
         guard !promptTokens.isEmpty else {
             throw .invalidArguments("promptTokens must not be empty")
         }
@@ -120,12 +120,12 @@ public struct CPURecurrentGenerationModel: ~Copyable, FutureTokenProposingLangua
         return logits
     }
 
-    public mutating func decode(nextToken: UInt16) throws(GenerationError) -> [Float] {
+    public mutating func decode(nextToken: TokenID) throws(GenerationError) -> [Float] {
         try runStep(token: nextToken)
     }
 
     public mutating func verify(
-        sequenceTokens: [UInt16],
+        sequenceTokens: [TokenID],
         startIndex: Int
     ) throws(GenerationError) -> [[Float]] {
         guard !sequenceTokens.isEmpty else {
@@ -148,24 +148,24 @@ public struct CPURecurrentGenerationModel: ~Copyable, FutureTokenProposingLangua
     }
 
     public mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         let logits = try prefill(promptTokens: promptTokens)
         return try selectToken(from: logits, strategy: strategy)
     }
 
     public mutating func decodeSelectedToken(
-        nextToken: UInt16,
+        nextToken: TokenID,
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         let logits = try decode(nextToken: nextToken)
         return try selectToken(from: logits, strategy: strategy)
     }
 
     public mutating func proposeFutureToken(
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         guard hasFutureHead else {
             throw .runtimeFailure("future proposer requested without a loaded two-step student sidecar")
         }
@@ -182,7 +182,7 @@ public struct CPURecurrentGenerationModel: ~Copyable, FutureTokenProposingLangua
         return try selectToken(from: logits, strategy: strategy)
     }
 
-    private mutating func runStep(token: UInt16) throws(GenerationError) -> [Float] {
+    private mutating func runStep(token: TokenID) throws(GenerationError) -> [Float] {
         guard Int(token) < vocabSize else {
             throw .invalidArguments("token \(token) exceeds vocab size \(vocabSize)")
         }
@@ -362,7 +362,7 @@ private func copyArray(from buffer: borrowing TensorBuffer) -> [Float] {
 }
 
 @inline(__always)
-private func selectToken(from logits: [Float], strategy: TokenSelectionStrategy) throws(GenerationError) -> UInt16 {
+private func selectToken(from logits: [Float], strategy: TokenSelectionStrategy) throws(GenerationError) -> TokenID {
     guard !logits.isEmpty else {
         throw .runtimeFailure("logits must not be empty")
     }
@@ -375,9 +375,9 @@ private func selectToken(from logits: [Float], strategy: TokenSelectionStrategy)
             bestValue = logits[idx]
             bestIndex = idx
         }
-        guard bestIndex <= Int(UInt16.max) else {
-            throw .runtimeFailure("best token index \(bestIndex) exceeds UInt16 range")
+        guard bestIndex <= Int(TokenID.max) else {
+            throw .runtimeFailure("best token index \(bestIndex) exceeds TokenID range")
         }
-        return UInt16(bestIndex)
+        return TokenID(bestIndex)
     }
 }
