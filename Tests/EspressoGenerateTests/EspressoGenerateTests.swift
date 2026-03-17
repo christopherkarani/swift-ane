@@ -169,7 +169,7 @@ import ANETypes
         return BackendRunMetrics(
             backend: "espresso",
             text: "Hello \(callCount)",
-            generatedTokens: [UInt32(callCount)],
+            generatedTokens: [TokenID(callCount)],
             promptTokens: [0],
             compileTimeMs: compileTimeMs,
             firstTokenLatencyMs: Double(100 + callCount),

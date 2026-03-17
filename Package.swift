@@ -107,7 +107,7 @@ let package = Package(
             resources: [.process("Fixtures")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
-        .testTarget(name: "CPUOpsTests", dependencies: ["CPUOps"], swiftSettings: [.swiftLanguageMode(.v6)]),
+        .testTarget(name: "CPUOpsTests", dependencies: ["CPUOps", "ANETypes"], swiftSettings: [.swiftLanguageMode(.v6)]),
         .testTarget(
             name: "ANERuntimeTests",
             dependencies: ["ANERuntime", "ANEInterop", "MILGenerator", "ANETypes", "Espresso"],
@@ -235,13 +235,13 @@ let package = Package(
         ),
         .testTarget(
             name: "EspressoGenerateTests",
-            dependencies: ["EspressoGenerate", "ModelSupport"],
+            dependencies: ["EspressoGenerate", "ModelSupport", "ANETypes"],
             path: "Tests/EspressoGenerateTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "RealModelInferenceTests",
-            dependencies: ["RealModelInference", "ModelSupport", "ANEGraphIR", "Espresso"],
+            dependencies: ["RealModelInference", "ModelSupport", "ANEGraphIR", "ANETypes", "Espresso"],
             path: "Tests/RealModelInferenceTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
