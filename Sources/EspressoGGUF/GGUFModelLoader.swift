@@ -44,11 +44,14 @@ public enum GGUFModelLoader {
         switch erConfig.architectureName.lowercased() {
         case "gpt2":
             arch = .gpt2
-        case "llama", "llama2", "llama3", "mistral", "qwen2":
+        case "llama", "llama2", "llama3", "mistral", "qwen2", "qwen3":
             arch = .llama
         default:
             throw GGUFModelLoaderError.unsupportedArchitecture(erConfig.architectureName)
         }
+
+        let ropeTheta = ggufLoader.modelConfig.float(forKey: "\(erConfig.architectureName).rope.freq_base")
+            ?? 10_000.0
 
         let config = MultiModelConfig(
             name: erConfig.architectureName,
@@ -63,6 +66,7 @@ public enum GGUFModelLoader {
                 ?? 0,
             maxSeq: erConfig.contextLength,
             normEps: erConfig.rmsNormEpsilon,
+            ropeTheta: ropeTheta,
             architecture: arch
         )
 

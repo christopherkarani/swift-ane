@@ -49,25 +49,25 @@ public protocol AutoregressiveLanguageModel: ~Copyable {
     var vocabSize: Int { get }
 
     mutating func reset() throws(GenerationError)
-    mutating func prefill(promptTokens: [UInt16]) throws(GenerationError) -> [Float]
-    mutating func decode(nextToken: UInt16) throws(GenerationError) -> [Float]
-    mutating func verify(sequenceTokens: [UInt16], startIndex: Int) throws(GenerationError) -> [[Float]]
+    mutating func prefill(promptTokens: [TokenID]) throws(GenerationError) -> [Float]
+    mutating func decode(nextToken: TokenID) throws(GenerationError) -> [Float]
+    mutating func verify(sequenceTokens: [TokenID], startIndex: Int) throws(GenerationError) -> [[Float]]
 }
 
 public protocol DirectTokenSelectingLanguageModel: ~Copyable, AutoregressiveLanguageModel {
     mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16
+    ) throws(GenerationError) -> TokenID
     mutating func decodeSelectedToken(
-        nextToken: UInt16,
+        nextToken: TokenID,
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16
+    ) throws(GenerationError) -> TokenID
 }
 
 public struct AutoregressiveGenerationTrace: Sendable {
-    public let promptTokens: [UInt16]
-    public let generatedTokens: [UInt16]
+    public let promptTokens: [TokenID]
+    public let generatedTokens: [TokenID]
     public let prefillLatencyMs: Double
     public let decodeLatenciesMs: [Double]
 
@@ -87,17 +87,17 @@ public struct AutoregressiveGenerationTrace: Sendable {
 
 public struct TwoTokenBranchCommitResult: Sendable, Equatable {
     public let acceptedPrefixLength: Int
-    public let committedTokens: [UInt16]
+    public let committedTokens: [TokenID]
 
-    public init(acceptedPrefixLength: Int, committedTokens: [UInt16]) {
+    public init(acceptedPrefixLength: Int, committedTokens: [TokenID]) {
         self.acceptedPrefixLength = acceptedPrefixLength
         self.committedTokens = committedTokens
     }
 }
 
 public struct TwoTokenBranchCommitTrace: Sendable, Equatable {
-    public let promptTokens: [UInt16]
-    public let generatedTokens: [UInt16]
+    public let promptTokens: [TokenID]
+    public let generatedTokens: [TokenID]
     public let acceptedPrefixLengths: [Int]
 }
 
@@ -131,13 +131,13 @@ public struct ExactTwoTokenPassMetrics: Sendable, Equatable {
 }
 
 public struct ExactTwoTokenPassResult: Sendable, Equatable {
-    public let committedTokens: [UInt16]
-    public let nextCurrentToken: UInt16
+    public let committedTokens: [TokenID]
+    public let nextCurrentToken: TokenID
     public let metrics: ExactTwoTokenPassMetrics
 
     public init(
-        committedTokens: [UInt16],
-        nextCurrentToken: UInt16,
+        committedTokens: [TokenID],
+        nextCurrentToken: TokenID,
         metrics: ExactTwoTokenPassMetrics
     ) {
         self.committedTokens = committedTokens
@@ -147,17 +147,17 @@ public struct ExactTwoTokenPassResult: Sendable, Equatable {
 }
 
 struct ExactTwoTokenBranchPromotionPlan: Sendable, Equatable {
-    let committedTokens: [UInt16]
-    let nextCurrentToken: UInt16
+    let committedTokens: [TokenID]
+    let nextCurrentToken: TokenID
     let committedExactTokenCount: Int
     let acceptedFutureTokenCount: Int
     let promotedStepCount: Int
 
     static func make(
-        currentToken: UInt16,
-        proposedFutureToken: UInt16,
-        exactNextToken: UInt16,
-        exactFutureToken: UInt16,
+        currentToken: TokenID,
+        proposedFutureToken: TokenID,
+        exactNextToken: TokenID,
+        exactFutureToken: TokenID,
         remainingTokenBudget: Int
     ) -> ExactTwoTokenBranchPromotionPlan {
         if remainingTokenBudget > 1, proposedFutureToken == exactNextToken {
@@ -181,8 +181,8 @@ struct ExactTwoTokenBranchPromotionPlan: Sendable, Equatable {
 }
 
 public struct ExactTwoTokenGenerationTrace: Sendable, Equatable {
-    public let promptTokens: [UInt16]
-    public let generatedTokens: [UInt16]
+    public let promptTokens: [TokenID]
+    public let generatedTokens: [TokenID]
     public let prefillLatencyMs: Double
     public let passMetrics: [ExactTwoTokenPassMetrics]
 
@@ -241,11 +241,11 @@ public protocol ExactTwoTokenGeneratingLanguageModel: ~Copyable, GenerationPerfo
 
     mutating func reset() throws(GenerationError)
     mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16
+    ) throws(GenerationError) -> TokenID
     mutating func performExactTwoTokenPass(
-        currentToken: UInt16,
+        currentToken: TokenID,
         remainingTokenBudget: Int,
         strategy: TokenSelectionStrategy
     ) throws(GenerationError) -> ExactTwoTokenPassResult
@@ -279,28 +279,28 @@ private func recurrentWeightsUseIdentityZeroTrunk(
 public protocol TwoTokenDraftingLanguageModel: ~Copyable {
     mutating func reset() throws(GenerationError)
     mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16
-    mutating func proposeTwoTokens(strategy: TokenSelectionStrategy) throws(GenerationError) -> [UInt16]
-    mutating func commit(tokens: [UInt16]) throws(GenerationError)
+    ) throws(GenerationError) -> TokenID
+    mutating func proposeTwoTokens(strategy: TokenSelectionStrategy) throws(GenerationError) -> [TokenID]
+    mutating func commit(tokens: [TokenID]) throws(GenerationError)
 }
 
 public protocol TwoTokenBranchVerifyingLanguageModel: ~Copyable {
     mutating func reset() throws(GenerationError)
     mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16
+    ) throws(GenerationError) -> TokenID
     mutating func verifyAndCommit(
-        proposedTokens: [UInt16],
+        proposedTokens: [TokenID],
         strategy: TokenSelectionStrategy
     ) throws(GenerationError) -> TwoTokenBranchCommitResult
 }
 
 public struct SpeculativeGenerationTrace: Sendable {
-    public let promptTokens: [UInt16]
-    public let generatedTokens: [UInt16]
+    public let promptTokens: [TokenID]
+    public let generatedTokens: [TokenID]
     public let candidateCount: Int
     public let draftPrefillLatencyMs: Double
     public let fullPrefillLatencyMs: Double
@@ -451,7 +451,7 @@ enum GenerationClock {
 }
 
 @inline(__always)
-private func selectToken(from logits: [Float], strategy: TokenSelectionStrategy) throws(GenerationError) -> UInt16 {
+private func selectToken(from logits: [Float], strategy: TokenSelectionStrategy) throws(GenerationError) -> TokenID {
     guard !logits.isEmpty else {
         throw .invalidArguments("cannot select from empty logits")
     }
@@ -463,8 +463,8 @@ private func selectToken(from logits: [Float], strategy: TokenSelectionStrategy)
             bestValue = logits[idx]
             bestIndex = idx
         }
-        guard let token = UInt16(exactly: bestIndex) else {
-            throw .invalidArguments("selected token index \(bestIndex) exceeds UInt16 range")
+        guard let token = TokenID(exactly: bestIndex) else {
+            throw .invalidArguments("selected token index \(bestIndex) exceeds TokenID range")
         }
         return token
     }
@@ -474,7 +474,7 @@ private func selectToken(from logits: [Float], strategy: TokenSelectionStrategy)
 private func selectToken(
     from logits: borrowing TensorBuffer,
     strategy: TokenSelectionStrategy
-) throws(GenerationError) -> UInt16 {
+) throws(GenerationError) -> TokenID {
     guard logits.count > 0 else {
         throw .invalidArguments("cannot select from empty logits")
     }
@@ -486,8 +486,8 @@ private func selectToken(
             vDSP_maxvi(ptr, 1, &maxValue, &maxIndex, vDSP_Length(logits.count))
             return Int(maxIndex)
         }
-        guard let token = UInt16(exactly: bestIndex) else {
-            throw .invalidArguments("selected token index \(bestIndex) exceeds UInt16 range")
+        guard let token = TokenID(exactly: bestIndex) else {
+            throw .invalidArguments("selected token index \(bestIndex) exceeds TokenID range")
         }
         return token
     }
@@ -503,7 +503,7 @@ public struct AutoregressiveGenerationHarness<Model: AutoregressiveLanguageModel
     }
 
     public mutating func generate(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         maxNewTokens: Int
     ) throws(GenerationError) -> AutoregressiveGenerationTrace {
         guard !promptTokens.isEmpty else {
@@ -518,7 +518,7 @@ public struct AutoregressiveGenerationHarness<Model: AutoregressiveLanguageModel
         var logits = try model.prefill(promptTokens: promptTokens)
         let prefillLatencyMs = GenerationClock.milliseconds(start: prefillStart, end: GenerationClock.now())
 
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         var decodeLatenciesMs: [Double] = []
         generatedTokens.reserveCapacity(maxNewTokens)
         decodeLatenciesMs.reserveCapacity(maxNewTokens)
@@ -554,7 +554,7 @@ where Model: ~Copyable {
     }
 
     public mutating func generate(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         maxNewTokens: Int
     ) throws(GenerationError) -> AutoregressiveGenerationTrace {
         guard !promptTokens.isEmpty else {
@@ -572,7 +572,7 @@ where Model: ~Copyable {
         )
         let prefillLatencyMs = GenerationClock.milliseconds(start: prefillStart, end: GenerationClock.now())
 
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         var decodeLatenciesMs: [Double] = []
         generatedTokens.reserveCapacity(maxNewTokens)
         decodeLatenciesMs.reserveCapacity(maxNewTokens)
@@ -610,7 +610,7 @@ where Model: ~Copyable {
     }
 
     public mutating func generate(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         maxNewTokens: Int
     ) throws(GenerationError) -> ExactTwoTokenGenerationTrace {
         guard !promptTokens.isEmpty else {
@@ -628,7 +628,7 @@ where Model: ~Copyable {
         )
         let prefillLatencyMs = GenerationClock.milliseconds(start: prefillStart, end: GenerationClock.now())
 
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         var passMetrics: [ExactTwoTokenPassMetrics] = []
         generatedTokens.reserveCapacity(maxNewTokens)
         passMetrics.reserveCapacity(maxNewTokens)
@@ -705,7 +705,7 @@ public struct TwoTokenBranchCommitGenerationHarness<
     }
 
     public mutating func generate(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         maxNewTokens: Int
     ) throws(GenerationError) -> TwoTokenBranchCommitTrace {
         guard !promptTokens.isEmpty else {
@@ -721,7 +721,7 @@ public struct TwoTokenBranchCommitGenerationHarness<
         try fullModel.reset()
         let firstToken = try fullModel.prefillSelectedToken(promptTokens: promptTokens, strategy: strategy)
 
-        var generatedTokens: [UInt16] = [firstToken]
+        var generatedTokens: [TokenID] = [firstToken]
         var acceptedPrefixLengths: [Int] = []
         generatedTokens.reserveCapacity(maxNewTokens)
         acceptedPrefixLengths.reserveCapacity(maxNewTokens)
@@ -808,14 +808,14 @@ public struct ANEExactTwoTokenUpperBoundGenerationModel: ~Copyable, ExactTwoToke
     }
 
     public mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         try baseModel.prefillSelectedToken(promptTokens: promptTokens, strategy: strategy)
     }
 
     public mutating func performExactTwoTokenPass(
-        currentToken: UInt16,
+        currentToken: TokenID,
         remainingTokenBudget: Int,
         strategy: TokenSelectionStrategy
     ) throws(GenerationError) -> ExactTwoTokenPassResult {
@@ -834,7 +834,7 @@ public struct ANEExactTwoTokenUpperBoundGenerationModel: ~Copyable, ExactTwoToke
         let verifierTrunkLatencyMs = verifierAfter.trunkLatencyMs - verifierBefore.trunkLatencyMs
         let verifierLogitsLatencyMs = verifierAfter.logitsLatencyMs - verifierBefore.logitsLatencyMs
 
-        var committedTokens: [UInt16] = [currentToken]
+        var committedTokens: [TokenID] = [currentToken]
         var acceptedFutureTokenCount = 0
         var stateAdvanceLatencyMs = 0.0
         var nextCurrentToken = exactNext
@@ -1261,9 +1261,9 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     }
 
     public mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         guard !promptTokens.isEmpty else {
             throw .invalidArguments("promptTokens must not be empty")
         }
@@ -1271,7 +1271,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
             throw .invalidArguments("prompt length \(promptTokens.count) exceeds maxSequenceTokens \(maxSequenceTokens)")
         }
 
-        var selectedToken: UInt16 = 0
+        var selectedToken: TokenID = 0
         for token in promptTokens {
             selectedToken = try runCommittedSingleToken(token: token, strategy: strategy)
         }
@@ -1279,7 +1279,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     }
 
     public mutating func performExactTwoTokenPass(
-        currentToken: UInt16,
+        currentToken: TokenID,
         remainingTokenBudget: Int,
         strategy: TokenSelectionStrategy
     ) throws(GenerationError) -> ExactTwoTokenPassResult {
@@ -1344,9 +1344,9 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     }
 
     private mutating func runCommittedSingleToken(
-        token: UInt16,
+        token: TokenID,
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         guard Int(token) < vocabSize else {
             throw .invalidArguments("token \(token) exceeds vocab size \(vocabSize)")
         }
@@ -1400,16 +1400,16 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     }
 
     private struct PreparedExactTwoTokenPair {
-        let exactNextToken: UInt16
-        let exactFutureToken: UInt16
+        let exactNextToken: TokenID
+        let exactFutureToken: TokenID
         let trunkLatencyMs: Double
         let logitsLatencyMs: Double
         let sourcePairIsA: Bool
     }
 
     private mutating func prepareExactTwoTokenPair(
-        currentToken: UInt16,
-        proposedFutureToken: UInt16,
+        currentToken: TokenID,
+        proposedFutureToken: TokenID,
         strategy: TokenSelectionStrategy
     ) throws(GenerationError) -> PreparedExactTwoTokenPair {
         guard Int(currentToken) < vocabSize else {
@@ -1520,8 +1520,8 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         self.trunkLatencyMs += trunkLatencyMs
 
         let logitsStart = GenerationClock.now()
-        let exactNextToken: UInt16
-        let exactFutureToken: UInt16
+        let exactNextToken: TokenID
+        let exactFutureToken: TokenID
         if sourcePairIsA {
             (exactNextToken, exactFutureToken) = try Self.selectTokenPairFromPreparedActivations(
                 pair0ActivationA,
@@ -1603,7 +1603,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     }
 
     private static func writeTokenEmbedding(
-        _ token: UInt16,
+        _ token: TokenID,
         embedding: borrowing TensorBuffer,
         into activation: borrowing TensorBuffer
     ) throws(GenerationError) {
@@ -1616,9 +1616,9 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
     }
 
     private mutating func selectProposedFutureToken(
-        currentToken: UInt16,
+        currentToken: TokenID,
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         guard hasFutureProposer else {
             // Echo-family upper bound fallback.
             return currentToken
@@ -1702,7 +1702,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         aneRMSNormClassifierHead: ANEGenerationRMSNormClassifierHead?,
         vocabSize: Int,
         stepRMSWorkspace: borrowing RMSNorm.Workspace
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         if outputHeadBackend != .aneRMSNormClassifier {
             activation.withUnsafePointer { xPtr in
                 stepNorm.withUnsafeMutablePointer { normPtr in
@@ -1720,7 +1720,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
             }
         }
 
-        let token: UInt16
+        let token: TokenID
         switch outputHeadBackend {
         case .cpu:
             // beta=0.0 means sgemm overwrites C entirely — no pre-zeroing needed
@@ -1812,7 +1812,7 @@ public struct ANEExactTwoTokenBranchStatePromotionModel: ~Copyable, ExactTwoToke
         aneRMSNormClassifierHead: ANEGenerationRMSNormClassifierHead?,
         vocabSize: Int,
         stepRMSWorkspace: borrowing RMSNorm.Workspace
-    ) throws(GenerationError) -> (UInt16, UInt16) {
+    ) throws(GenerationError) -> (TokenID, TokenID) {
         if outputHeadBackend == .aneRMSNormClassifier {
             guard let aneRMSNormClassifierHead else {
                 throw .runtimeFailure("two-step ANE fused output-head backend requested without compiled head")
@@ -1880,7 +1880,7 @@ public struct SpeculativeGenerationHarness<
     }
 
     public mutating func generate(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         maxNewTokens: Int
     ) throws(GenerationError) -> SpeculativeGenerationTrace {
         guard !promptTokens.isEmpty else {
@@ -1907,7 +1907,7 @@ public struct SpeculativeGenerationHarness<
         let fullPrefillLatencyMs = GenerationClock.milliseconds(start: fullPrefillStart, end: GenerationClock.now())
 
         var prefixTokens = promptTokens
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         var acceptedPrefixLengths: [Int] = []
         var draftLatenciesMs: [Double] = []
         var verificationLatenciesMs: [Double] = []
@@ -1919,7 +1919,7 @@ public struct SpeculativeGenerationHarness<
         while generatedTokens.count < maxNewTokens {
             let roundCandidates = min(candidateCount, maxNewTokens - generatedTokens.count)
 
-            var candidates: [UInt16] = []
+            var candidates: [TokenID] = []
             candidates.reserveCapacity(roundCandidates)
             let draftStart = GenerationClock.now()
             var roundLogits = draftLogits
@@ -2410,7 +2410,7 @@ public struct ANEDirectGenerationModel: ~Copyable, DirectTokenSelectingLanguageM
         logitsLatencyMs = 0
     }
 
-    public mutating func prefill(promptTokens: [UInt16]) throws(GenerationError) -> [Float] {
+    public mutating func prefill(promptTokens: [TokenID]) throws(GenerationError) -> [Float] {
         guard !promptTokens.isEmpty else {
             throw .invalidArguments("promptTokens must not be empty")
         }
@@ -2424,15 +2424,15 @@ public struct ANEDirectGenerationModel: ~Copyable, DirectTokenSelectingLanguageM
         return try projectStepLogits()
     }
 
-    public mutating func decode(nextToken: UInt16) throws(GenerationError) -> [Float] {
+    public mutating func decode(nextToken: TokenID) throws(GenerationError) -> [Float] {
         try runDecodeStep(token: nextToken)
         return try projectStepLogits()
     }
 
     public mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         guard !promptTokens.isEmpty else {
             throw .invalidArguments("promptTokens must not be empty")
         }
@@ -2447,15 +2447,15 @@ public struct ANEDirectGenerationModel: ~Copyable, DirectTokenSelectingLanguageM
     }
 
     public mutating func decodeSelectedToken(
-        nextToken: UInt16,
+        nextToken: TokenID,
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         try runDecodeStep(token: nextToken)
         return try selectStepToken(strategy: strategy)
     }
 
     public mutating func verify(
-        sequenceTokens: [UInt16],
+        sequenceTokens: [TokenID],
         startIndex: Int
     ) throws(GenerationError) -> [[Float]] {
         guard !sequenceTokens.isEmpty else {
@@ -2511,7 +2511,7 @@ public struct ANEDirectGenerationModel: ~Copyable, DirectTokenSelectingLanguageM
         return try classifier.withUnsafePointer(body)
     }
 
-    private mutating func runDecodeStep(token: UInt16) throws(GenerationError) {
+    private mutating func runDecodeStep(token: TokenID) throws(GenerationError) {
         guard Int(token) < vocabSize else {
             throw .invalidArguments("token \(token) exceeds vocab size \(vocabSize)")
         }
@@ -2604,7 +2604,7 @@ public struct ANEDirectGenerationModel: ~Copyable, DirectTokenSelectingLanguageM
 
     private mutating func selectStepToken(
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         let logitsStart = GenerationClock.now()
         if outputHeadBackend != .aneRMSNormClassifier {
             xCur.withUnsafePointer { xPtr in
@@ -2623,7 +2623,7 @@ public struct ANEDirectGenerationModel: ~Copyable, DirectTokenSelectingLanguageM
             }
         }
 
-        let token: UInt16
+        let token: TokenID
         switch outputHeadBackend {
         case .cpu:
             stepLogits.zero()
@@ -2702,7 +2702,7 @@ public struct ANEDirectGenerationModel: ~Copyable, DirectTokenSelectingLanguageM
         return token
     }
 
-    private mutating func writeSequenceTokens(_ tokens: [UInt16]) throws(GenerationError) {
+    private mutating func writeSequenceTokens(_ tokens: [TokenID]) throws(GenerationError) {
         verifySequence.zero()
         for token in tokens where Int(token) >= vocabSize {
             throw .invalidArguments("token \(token) exceeds vocab size \(vocabSize)")
@@ -3223,7 +3223,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
         logitsLatencyMs = 0
     }
 
-    public mutating func prefill(promptTokens: [UInt16]) throws(GenerationError) -> [Float] {
+    public mutating func prefill(promptTokens: [TokenID]) throws(GenerationError) -> [Float] {
         guard !promptTokens.isEmpty else {
             throw .invalidArguments("promptTokens must not be empty")
         }
@@ -3237,15 +3237,15 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
         return try projectCurrentLogits()
     }
 
-    public mutating func decode(nextToken: UInt16) throws(GenerationError) -> [Float] {
+    public mutating func decode(nextToken: TokenID) throws(GenerationError) -> [Float] {
         try runRecurrentStep(token: nextToken)
         return try projectCurrentLogits()
     }
 
     public mutating func prefillSelectedToken(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         guard !promptTokens.isEmpty else {
             throw .invalidArguments("promptTokens must not be empty")
         }
@@ -3260,15 +3260,15 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
     }
 
     public mutating func decodeSelectedToken(
-        nextToken: UInt16,
+        nextToken: TokenID,
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         try runRecurrentStep(token: nextToken)
         return try selectCurrentToken(strategy: strategy)
     }
 
     public mutating func verify(
-        sequenceTokens: [UInt16],
+        sequenceTokens: [TokenID],
         startIndex: Int
     ) throws(GenerationError) -> [[Float]] {
         throw .runtimeFailure(
@@ -3284,7 +3284,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
         return try classifier.withUnsafePointer(body)
     }
 
-    private mutating func runRecurrentStep(token: UInt16) throws(GenerationError) {
+    private mutating func runRecurrentStep(token: TokenID) throws(GenerationError) {
         guard Int(token) < vocabSize else {
             throw .invalidArguments("token \(token) exceeds vocab size \(vocabSize)")
         }
@@ -3436,7 +3436,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
 
     private mutating func selectCurrentToken(
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16 {
+    ) throws(GenerationError) -> TokenID {
         let logitsStart = GenerationClock.now()
         if outputHeadBackend != .aneRMSNormClassifier {
             if currentActivationIsA {
@@ -3472,7 +3472,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
             }
         }
 
-        let token: UInt16
+        let token: TokenID
         switch outputHeadBackend {
         case .cpu:
             stepLogits.zero()
@@ -3578,7 +3578,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
                     }
                 }
             }
-            token = UInt16(tokenIndex)
+            token = TokenID(tokenIndex)
         case .cpuFP16Tiled:
             guard classifierFP16.count > 0 else {
                 throw .runtimeFailure("FP16 tiled classifier backend requested without FP16 weights")
@@ -3593,7 +3593,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
                     )
                 }
             }
-            token = UInt16(tokenIndex)
+            token = TokenID(tokenIndex)
         }
 
         logitsLatencyMs += GenerationClock.milliseconds(start: logitsStart, end: GenerationClock.now())
@@ -3604,8 +3604,8 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
 
     /// Result of a two-token streaming decode step.
     public struct TwoTokenStreamResult: Sendable {
-        public let token1: UInt16
-        public let token2: UInt16
+        public let token1: TokenID
+        public let token2: TokenID
         public let token1TrunkMs: Double
         public let token1ClassifierMs: Double
         public let token2TrunkMs: Double
@@ -3630,7 +3630,7 @@ public struct ANERecurrentGenerationModel: ~Copyable, DirectTokenSelectingLangua
     /// Falls back to sequential execution when the model uses an ANE output head
     /// (since the head can't run concurrently with trunk).
     public mutating func decodeSelectedTwoTokensStreaming(
-        inputToken: UInt16,
+        inputToken: TokenID,
         strategy: TokenSelectionStrategy
     ) throws(GenerationError) -> TwoTokenStreamResult {
         // Token 1: trunk

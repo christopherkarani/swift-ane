@@ -107,7 +107,7 @@ let package = Package(
             resources: [.process("Fixtures")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
-        .testTarget(name: "CPUOpsTests", dependencies: ["CPUOps"], swiftSettings: [.swiftLanguageMode(.v6)]),
+        .testTarget(name: "CPUOpsTests", dependencies: ["CPUOps", "ANETypes"], swiftSettings: [.swiftLanguageMode(.v6)]),
         .testTarget(
             name: "ANERuntimeTests",
             dependencies: ["ANERuntime", "ANEInterop", "MILGenerator", "ANETypes", "Espresso"],
@@ -229,19 +229,19 @@ let package = Package(
         ),
         .executableTarget(
             name: "EspressoGenerate",
-            dependencies: ["RealModelInference", "ModelSupport"],
+            dependencies: ["RealModelInference", "ModelSupport", "ANETypes"],
             path: "Sources/EspressoGenerate",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "EspressoGenerateTests",
-            dependencies: ["EspressoGenerate", "ModelSupport"],
+            dependencies: ["EspressoGenerate", "ModelSupport", "ANETypes"],
             path: "Tests/EspressoGenerateTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "RealModelInferenceTests",
-            dependencies: ["RealModelInference", "ModelSupport", "ANEGraphIR"],
+            dependencies: ["RealModelInference", "ModelSupport", "ANEGraphIR", "ANETypes", "Espresso"],
             path: "Tests/RealModelInferenceTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
@@ -259,6 +259,12 @@ let package = Package(
             name: "EspressoGGUFTests",
             dependencies: ["EspressoGGUF", "ModelSupport", "ANETypes"],
             path: "Tests/EspressoGGUFTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .executableTarget(
+            name: "EspressoGGUFRunner",
+            dependencies: ["EspressoGGUF", "RealModelInference", "ModelSupport"],
+            path: "Sources/EspressoGGUFRunner",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

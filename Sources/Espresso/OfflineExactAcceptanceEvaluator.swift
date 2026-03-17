@@ -1,21 +1,22 @@
 import Foundation
+import ANETypes
 
 public protocol FutureTokenProposingLanguageModel: ~Copyable, DirectTokenSelectingLanguageModel {
     mutating func proposeFutureToken(
         strategy: TokenSelectionStrategy
-    ) throws(GenerationError) -> UInt16
+    ) throws(GenerationError) -> TokenID
 }
 
 public struct OfflineExactAcceptanceTrace: Sendable, Equatable {
-    public let promptTokens: [UInt16]
-    public let generatedTokens: [UInt16]
+    public let promptTokens: [TokenID]
+    public let generatedTokens: [TokenID]
     public let committedExactTokenCounts: [Int]
     public let acceptedFutureTokenCounts: [Int]
     public let parityMatchedAllCommittedTokens: Bool
 
     public init(
-        promptTokens: [UInt16],
-        generatedTokens: [UInt16],
+        promptTokens: [TokenID],
+        generatedTokens: [TokenID],
         committedExactTokenCounts: [Int],
         acceptedFutureTokenCounts: [Int],
         parityMatchedAllCommittedTokens: Bool
@@ -44,7 +45,7 @@ public enum OfflineExactAcceptanceEvaluator {
     public static func evaluate<Teacher, Student>(
         teacher: inout Teacher,
         student: inout Student,
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         maxNewTokens: Int,
         strategy: TokenSelectionStrategy
     ) throws(GenerationError) -> OfflineExactAcceptanceTrace
@@ -66,7 +67,7 @@ public enum OfflineExactAcceptanceEvaluator {
         var teacherCurrent = try teacher.prefillSelectedToken(promptTokens: promptTokens, strategy: strategy)
         var studentCurrent = try student.prefillSelectedToken(promptTokens: promptTokens, strategy: strategy)
 
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         var committedExactTokenCounts: [Int] = []
         var acceptedFutureTokenCounts: [Int] = []
         var parityMatchedAllCommittedTokens = (teacherCurrent == studentCurrent)
