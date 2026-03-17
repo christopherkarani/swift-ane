@@ -16,16 +16,16 @@ import ModelSupport
 
 public struct GenerationResult: Sendable {
     public let text: String
-    public let tokens: [UInt16]
-    public let promptTokens: [UInt16]
+    public let tokens: [TokenID]
+    public let promptTokens: [TokenID]
     public let tokensPerSecond: Double
     public let compileTimeMs: Double
     public let firstTokenLatencyMs: Double
 
     public init(
         text: String,
-        tokens: [UInt16],
-        promptTokens: [UInt16],
+        tokens: [TokenID],
+        promptTokens: [TokenID],
         tokensPerSecond: Double,
         compileTimeMs: Double,
         firstTokenLatencyMs: Double
@@ -40,8 +40,8 @@ public struct GenerationResult: Sendable {
 }
 
 public struct GenerationStep: Sendable {
-    public let token: UInt16
-    public let generatedTokens: [UInt16]
+    public let token: TokenID
+    public let generatedTokens: [TokenID]
     public let text: String
     public let tokenLatencyMs: Double
     public let elapsedMs: Double
@@ -49,8 +49,8 @@ public struct GenerationStep: Sendable {
     public let tokensPerSecond: Double
 
     public init(
-        token: UInt16,
-        generatedTokens: [UInt16],
+        token: TokenID,
+        generatedTokens: [TokenID],
         text: String,
         tokenLatencyMs: Double,
         elapsedMs: Double,
@@ -476,7 +476,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             )
         }
 
-        mutating func selectGreedyToken(vocab: Int) throws -> UInt16 {
+        mutating func selectGreedyToken(vocab: Int) throws -> TokenID {
             try RealModelInferenceEngine.evaluateGreedyClassifier(
                 norm: greedyNorm[0],
                 classifier: greedyClassifier[0],
@@ -527,7 +527,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
     }
 
-    private static let gpt2EOSToken: UInt16 = 50_256
+    private static let gpt2EOSToken: TokenID = 50_256
     private static let speculativeRuntimeCacheLimit = 4
 
     private let config: MultiModelConfig
@@ -846,7 +846,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
 
         var allTokens = promptTokens
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
 
         let generationStart = DispatchTime.now().uptimeNanoseconds
@@ -1192,7 +1192,7 @@ public struct RealModelInferenceEngine: ~Copyable {
     static func composeEmbeddingInputForTesting(
         config: MultiModelConfig,
         weightDir: String,
-        tokens: [UInt16]
+        tokens: [TokenID]
     ) throws -> [Float] {
         let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
         try validateDirectory(weightDirURL)
@@ -1227,7 +1227,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         config: MultiModelConfig,
         weightDir: String,
         layer: Int,
-        tokens: [UInt16]
+        tokens: [TokenID]
     ) throws -> [Float] {
         let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
         try validateDirectory(weightDirURL)
@@ -1290,7 +1290,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         config: MultiModelConfig,
         weightDir: String,
         layer: Int,
-        tokens: [UInt16]
+        tokens: [TokenID]
     ) throws -> [Float] {
         try evalHybridSingleLayerAttentionOutputsForTesting(
             config: config,
@@ -1304,7 +1304,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         config: MultiModelConfig,
         weightDir: String,
         layer: Int,
-        tokens: [UInt16]
+        tokens: [TokenID]
     ) throws -> AttentionTestingOutputs {
         let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
         try validateDirectory(weightDirURL)
@@ -1700,7 +1700,7 @@ public struct RealModelInferenceEngine: ~Copyable {
     }
 
     private mutating func generateIncrementalHybrid(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         effectiveMaxTokens: Int,
         temperature: Float,
         compileTimeMs: Double,
@@ -1799,7 +1799,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
 
         var allTokens = promptTokens
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
 
         let generationStart = DispatchTime.now().uptimeNanoseconds
@@ -1811,7 +1811,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         let headSpatial = compiledHybridHeadSpatial
 
         while generatedTokens.count < effectiveMaxTokens {
-            let nextToken: UInt16
+            let nextToken: TokenID
             if useANEGreedyHead {
                 do {
                     try compiledHybridGreedyNorm[0].kernel.eval()
@@ -1826,7 +1826,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                         hintSpatialIndex: 0,
                         hintSpatial: headSpatial
                     )
-                    guard let token = UInt16(exactly: argmax.index) else {
+                    guard let token = TokenID(exactly: argmax.index) else {
                         throw RealModelInferenceError.runtimeFailure(
                             "Greedy ANE classifier selected out-of-range token \(argmax.index)"
                         )
@@ -1937,7 +1937,7 @@ public struct RealModelInferenceEngine: ~Copyable {
     }
 
     private mutating func generateIncrementalHybridSpeculative(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         effectiveMaxTokens: Int,
         compileTimeMs: Double,
         metalAttention: MetalAttentionKernel,
@@ -1968,7 +1968,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
 
         var allTokens = promptTokens
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
 
         let generationStart = DispatchTime.now().uptimeNanoseconds
@@ -1976,7 +1976,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         var firstTokenLatencyMs = 0.0
         var firstTokenRecorded = false
 
-        func emitToken(_ token: UInt16, at emissionNow: UInt64) {
+        func emitToken(_ token: TokenID, at emissionNow: UInt64) {
             generatedTokens.append(token)
             allTokens.append(token)
             let elapsedMs = Self.milliseconds(from: emissionNow - generationStart)
@@ -2001,7 +2001,7 @@ public struct RealModelInferenceEngine: ~Copyable {
 
         while generatedTokens.count < effectiveMaxTokens {
             let checkpoint = try cachedRuntimePair.draftRuntime.captureCheckpoint(dim: config.dModel)
-            let proposedToken0: UInt16
+            let proposedToken0: TokenID
             do {
                 proposedToken0 = try cachedRuntimePair.draftRuntime.selectGreedyToken(vocab: config.vocab)
                 try writeIncrementalEmbedding(token: proposedToken0, position: allTokens.count, into: xCur)
@@ -2016,7 +2016,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                 )
             }
 
-            let proposedToken1: UInt16
+            let proposedToken1: TokenID
             do {
                 proposedToken1 = try cachedRuntimePair.draftRuntime.selectGreedyToken(vocab: config.vocab)
             } catch {
@@ -2025,7 +2025,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                 )
             }
 
-            let exactToken0: UInt16
+            let exactToken0: TokenID
             do {
                 exactToken0 = try cachedRuntimePair.verifierRuntime.selectGreedyToken(vocab: config.vocab)
             } catch {
@@ -2090,7 +2090,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                 break
             }
 
-            let exactToken1: UInt16
+            let exactToken1: TokenID
             do {
                 exactToken1 = try cachedRuntimePair.verifierRuntime.selectGreedyToken(vocab: config.vocab)
             } catch {
@@ -2204,23 +2204,23 @@ public struct RealModelInferenceEngine: ~Copyable {
         return (order, evictedKey)
     }
 
-    private func encodePrompt(_ prompt: String) throws -> [UInt16] {
+    private func encodePrompt(_ prompt: String) throws -> [TokenID] {
         let rawTokens = tokenizer.encode(prompt)
         guard !rawTokens.isEmpty else {
             throw RealModelInferenceError.invalidPrompt("Prompt produced no tokens")
         }
-        var tokens: [UInt16] = []
+        var tokens: [TokenID] = []
         tokens.reserveCapacity(rawTokens.count)
         for token in rawTokens {
-            guard token >= 0, token <= Int(UInt16.max) else {
-                throw RealModelInferenceError.invalidPrompt("Token \(token) does not fit UInt16")
+            guard token >= 0, token <= Int(TokenID.max) else {
+                throw RealModelInferenceError.invalidPrompt("Token \(token) does not fit TokenID")
             }
-            tokens.append(UInt16(token))
+            tokens.append(TokenID(token))
         }
         return tokens
     }
 
-    private func composeEmbeddingInput(tokens: [UInt16], spatial: Int) -> [Float] {
+    private func composeEmbeddingInput(tokens: [TokenID], spatial: Int) -> [Float] {
         var output = [Float](repeating: 0, count: config.dModel * spatial)
         for tokenIndex in 0..<tokens.count {
             let token = Int(tokens[tokenIndex])
@@ -2236,7 +2236,7 @@ public struct RealModelInferenceEngine: ~Copyable {
     }
 
     private func writeIncrementalEmbedding(
-        token: UInt16,
+        token: TokenID,
         position: Int,
         into buffer: borrowing TensorBuffer
     ) throws {
@@ -2256,7 +2256,7 @@ public struct RealModelInferenceEngine: ~Copyable {
     }
 
     private func writeIncrementalEmbeddingLlama(
-        token: UInt16,
+        token: TokenID,
         into buffer: borrowing TensorBuffer
     ) throws {
         let tokenBase = Int(token) * config.dModel
@@ -2268,7 +2268,7 @@ public struct RealModelInferenceEngine: ~Copyable {
     }
 
     private mutating func generateIncrementalHybridLlama(
-        promptTokens: [UInt16],
+        promptTokens: [TokenID],
         effectiveMaxTokens: Int,
         temperature: Float,
         compileTimeMs: Double,
@@ -2403,7 +2403,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
 
         var allTokens = promptTokens
-        var generatedTokens: [UInt16] = []
+        var generatedTokens: [TokenID] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
 
         let generationStart = DispatchTime.now().uptimeNanoseconds
@@ -2415,7 +2415,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         let headSpatial = compiledHybridHeadSpatial
 
         while generatedTokens.count < effectiveMaxTokens {
-            let nextToken: UInt16
+            let nextToken: TokenID
             if useANEGreedyHead {
                 do {
                     try compiledHybridGreedyNorm[0].kernel.eval()
@@ -2430,7 +2430,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                         hintSpatialIndex: 0,
                         hintSpatial: headSpatial
                     )
-                    guard let token = UInt16(exactly: argmax.index) else {
+                    guard let token = TokenID(exactly: argmax.index) else {
                         throw RealModelInferenceError.runtimeFailure(
                             "Llama greedy ANE classifier selected out-of-range token \(argmax.index)"
                         )
@@ -2484,7 +2484,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                         )
                     }
                 }
-                nextToken = UInt16(bestIndex)
+                nextToken = TokenID(bestIndex)
             } else {
                 do {
                     try xCur.withUnsafeBufferPointer { buffer in
@@ -3307,9 +3307,6 @@ public struct RealModelInferenceEngine: ~Copyable {
         guard config.dModel == config.nHead * config.headDim else {
             throw RealModelInferenceError.invalidConfig("dModel must equal nHead * headDim")
         }
-        guard config.vocab <= Int(UInt16.max) else {
-            throw RealModelInferenceError.invalidConfig("vocab \(config.vocab) exceeds UInt16 token capacity")
-        }
     }
 
     private static func requireCompileSpatialCapacity(channels: Int, maxSeq: Int) throws -> Int {
@@ -3531,10 +3528,10 @@ public struct RealModelInferenceEngine: ~Copyable {
         from logits: [Float],
         temperature: Float,
         using rng: inout R
-    ) -> UInt16 {
+    ) -> TokenID {
         if temperature <= 0 {
             let index = logits.enumerated().max(by: { $0.element < $1.element })?.offset ?? 0
-            return UInt16(index)
+            return TokenID(index)
         }
 
         let maxLogit = logits.max() ?? 0
@@ -3548,27 +3545,27 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
         if !total.isFinite || total <= 0 {
             let index = logits.enumerated().max(by: { $0.element < $1.element })?.offset ?? 0
-            return UInt16(index)
+            return TokenID(index)
         }
 
         var threshold = Double.random(in: 0..<total, using: &rng)
         for index in scaled.indices {
             threshold -= scaled[index]
             if threshold <= 0 {
-                return UInt16(index)
+                return TokenID(index)
             }
         }
-        return UInt16(max(0, scaled.count - 1))
+        return TokenID(max(0, scaled.count - 1))
     }
 
     private mutating func selectTokenFromNormalizedHidden<R: RandomNumberGenerator>(
         _ hidden: [Float],
         temperature: Float,
         using rng: inout R
-    ) -> UInt16 {
+    ) -> TokenID {
         if temperature <= 0 {
             let index = exactClassifierArgmax(hidden)
-            return UInt16(index)
+            return TokenID(index)
         }
         let logits = projectLogits(hidden)
         return sampleToken(from: logits, temperature: temperature, using: &rng)
@@ -3747,7 +3744,7 @@ public struct RealModelInferenceEngine: ~Copyable {
 
     private static func composeTestingEmbeddingInput(
         config: MultiModelConfig,
-        tokens: [UInt16],
+        tokens: [TokenID],
         tokenEmbedding: [Float],
         positionEmbedding: [Float]
     ) -> [Float] {
@@ -3768,7 +3765,7 @@ public struct RealModelInferenceEngine: ~Copyable {
 
     private static func writeTestingIncrementalEmbedding(
         config: MultiModelConfig,
-        token: UInt16,
+        token: TokenID,
         position: Int,
         tokenEmbedding: [Float],
         positionEmbedding: [Float],
@@ -3899,7 +3896,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         classifier: borrowing CompiledClassifier,
         headSpatial: Int,
         vocab: Int
-    ) throws -> UInt16 {
+    ) throws -> TokenID {
         do {
             try norm.kernel.eval()
             try classifier.kernel.eval()
@@ -3913,7 +3910,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                 hintSpatialIndex: 0,
                 hintSpatial: headSpatial
             )
-            guard let token = UInt16(exactly: argmax.index) else {
+            guard let token = TokenID(exactly: argmax.index) else {
                 throw RealModelInferenceError.runtimeFailure(
                     "Greedy ANE classifier selected out-of-range token \(argmax.index)"
                 )
