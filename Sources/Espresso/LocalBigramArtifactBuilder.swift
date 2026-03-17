@@ -3,8 +3,8 @@ import ANETypes
 
 public enum LocalBigramArtifactBuilderError: Error, Equatable, Sendable {
     case notEnoughTokens
-    case unsupportedToken(UInt16, vocabSize: Int)
-    case unsupportedFeatureWidth(maxToken: UInt16, dim: Int)
+    case unsupportedToken(TokenID, vocabSize: Int)
+    case unsupportedFeatureWidth(maxToken: TokenID, dim: Int)
     case studentContract(String)
 }
 
@@ -26,7 +26,7 @@ public struct LocalBigramArtifacts: ~Copyable {
 
 public enum LocalBigramArtifactBuilder {
     public static func buildRecurrentWeights(
-        tokens: [UInt16],
+        tokens: [TokenID],
         layerCount: Int,
         vocabSize: Int = ModelConfig.vocab
     ) throws(LocalBigramArtifactBuilderError) -> RecurrentGenerationWeights {
@@ -35,7 +35,7 @@ public enum LocalBigramArtifactBuilder {
     }
 
     public static func buildFutureSidecar(
-        tokens: [UInt16],
+        tokens: [TokenID],
         layerCount: Int,
         vocabSize: Int = ModelConfig.vocab
     ) throws(LocalBigramArtifactBuilderError) -> TwoStepStudentSidecar {
@@ -44,7 +44,7 @@ public enum LocalBigramArtifactBuilder {
     }
 
     public static func build(
-        tokens: [UInt16],
+        tokens: [TokenID],
         layerCount: Int,
         vocabSize: Int = ModelConfig.vocab
     ) throws(LocalBigramArtifactBuilderError) -> LocalBigramArtifacts {
@@ -148,15 +148,15 @@ public enum LocalBigramArtifactBuilder {
         )
     }
 
-    public static func mostLikelyNextTokenByCurrentToken(tokens: [UInt16]) -> [UInt16: UInt16] {
-        var counts: [UInt16: [UInt16: Int]] = [:]
+    public static func mostLikelyNextTokenByCurrentToken(tokens: [TokenID]) -> [TokenID: TokenID] {
+        var counts: [TokenID: [TokenID: Int]] = [:]
         for idx in 0..<(tokens.count - 1) {
             let current = tokens[idx]
             let next = tokens[idx + 1]
             counts[current, default: [:]][next, default: 0] += 1
         }
 
-        var result: [UInt16: UInt16] = [:]
+        var result: [TokenID: TokenID] = [:]
         for (current, nextCounts) in counts {
             let best = nextCounts.max { lhs, rhs in
                 if lhs.value == rhs.value {
@@ -170,9 +170,9 @@ public enum LocalBigramArtifactBuilder {
     }
 
     public static func mostLikelyFutureTokenByCurrentToken(
-        nextByToken: [UInt16: UInt16]
-    ) -> [UInt16: UInt16] {
-        var result: [UInt16: UInt16] = [:]
+        nextByToken: [TokenID: TokenID]
+    ) -> [TokenID: TokenID] {
+        var result: [TokenID: TokenID] = [:]
         result.reserveCapacity(nextByToken.count)
 
         for (current, next) in nextByToken {
@@ -188,7 +188,7 @@ public enum LocalBigramArtifactBuilder {
     private static func fillBigramEmbeddingAndClassifier(
         embedding: borrowing TensorBuffer,
         classifier: borrowing TensorBuffer,
-        nextByToken: [UInt16: UInt16],
+        nextByToken: [TokenID: TokenID],
         vocabSize: Int
     ) {
         embedding.withUnsafeMutablePointer { embeddingPtr in
@@ -208,7 +208,7 @@ public enum LocalBigramArtifactBuilder {
 
     private static func fillFutureClassifier(
         futureClassifier: borrowing TensorBuffer,
-        futureByToken: [UInt16: UInt16],
+        futureByToken: [TokenID: TokenID],
         vocabSize: Int
     ) {
         futureClassifier.withUnsafeMutablePointer { classifierPtr in

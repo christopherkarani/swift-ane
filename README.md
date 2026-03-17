@@ -7,11 +7,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/christopherkarani/Espresso/actions/workflows/phase8-matrix.yml"><img src="https://github.com/christopherkarani/Espresso/actions/workflows/phase8-matrix.yml/badge.svg" alt="Build"></a>
+  <a href="https://github.com/christopherkarani/Espresso/actions/workflows/ci.yml"><img src="https://github.com/christopherkarani/Espresso/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/christopherkarani/Espresso/actions/workflows/phase8-matrix.yml"><img src="https://github.com/christopherkarani/Espresso/actions/workflows/phase8-matrix.yml/badge.svg" alt="ANE Matrix"></a>
   <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-6.2-orange.svg" alt="Swift 6.2"></a>
   <a href="https://github.com/christopherkarani/Espresso/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/macOS-15+-lightgrey.svg" alt="macOS 15+">
   <img src="https://img.shields.io/badge/Dependencies-0-brightgreen.svg" alt="Zero Dependencies">
+  <a href="https://github.com/christopherkarani/Espresso/releases"><img src="https://img.shields.io/github/v/release/christopherkarani/Espresso?color=purple" alt="Latest Release"></a>
 </p>
 
 ---
@@ -28,46 +30,55 @@ Espresso compiles MIL programs straight to ANE silicon through reverse-engineere
   <img src=".github/assets/demo.gif" alt="Espresso generating tokens on ANE" width="700">
 </p>
 
-## Try The TUI
-
-From a fresh clone:
+## Quick Start
 
 ```bash
-./espresso
+git clone https://github.com/christopherkarani/Espresso.git
+cd Espresso
+./espresso          # builds, downloads demo weights, launches TUI
 ```
 
-That one command will:
+Five lines to first ANE inference in your own project:
 
-- build the local Swift targets if needed
-- bootstrap the managed GPT-2 demo assets on first run
-- launch the side-by-side Espresso vs Core ML TUI
+```swift
+// Package.swift — add the dependency
+.package(url: "https://github.com/christopherkarani/Espresso.git", from: "1.0.0")
 
-If `./espresso` does not start cleanly, run `./espresso doctor`.
+import ANERuntime
 
-Useful follow-ups:
+let kernel = try ANEKernel(milText: myMIL, weights: blobs, inputSizes: [input], outputSizes: [output])
+try kernel.eval()                          // runs on Neural Engine
+let result = kernel.outputSurface(at: 0)  // zero-copy read
+```
+
+Other entry points:
 
 ```bash
-./espresso "Hello"
-./espresso doctor
-./espresso compare --no-power "Hello"
-./espresso install
-swift run espresso-generate demo
+./espresso "Hello"                          # generate text
+./espresso doctor                           # check host readiness
+./espresso compare --no-power "Hello"       # side-by-side vs CoreML
+./espresso install                          # install to ~/.local/bin
+swift run espresso-bench --ane-only --inference --layers 6
 ```
-
-`./espresso install` writes a small shim to `~/.local/bin/espresso` that points back to this checkout, so future runs can use `espresso`.
 
 ## Benchmark
 
-| Path | ms/token | tok/s |
-|------|----------|-------|
-| Espresso exact two-step ANE decode | **1.08** | **926** |
-| CoreML `.cpuAndNeuralEngine` | 5.09 | 196 |
-| **Speedup** | | **4.76x** |
+### Espresso vs CoreML vs llama.cpp
 
-> 6-layer transformer · dim=768 · 12 heads · 32k vocab · seqLen=256 · M3 Max · macOS 15
+| Backend | ms/token | tok/s | Notes |
+|---------|----------|-------|-------|
+| **Espresso ANE** (exact two-step) | **1.08** | **926** | Direct ANE, 2 dispatches / 6 layers |
+| CoreML `.cpuAndNeuralEngine` | 5.09 | 196 | Apple's standard ANE path |
+| llama.cpp Metal | ~12–20 | ~50–85 | GPU path, CPU-bound decode¹ |
+| llama.cpp CPU (`ggml`) | ~25–40 | ~25–40 | Pure CPU, no ANE¹ |
+| **Espresso speedup vs CoreML** | | **4.76x** | |
+| **Espresso speedup vs llama.cpp Metal** | | **~11x** | |
+
+> ¹ llama.cpp has no ANE backend. Metal figures are representative for GPT-2 117M on M3 Max; actual performance varies by quantization and prompt length.
+> All Espresso / CoreML numbers: 6-layer local artifact · dim=768 · 12 heads · 32k vocab · seqLen=256 · M3 Max · macOS 15.
 
 <details>
-<summary>Reproduce it yourself</summary>
+<summary>Reproduce Espresso benchmarks</summary>
 
 ```bash
 RESULTS_DIR=results/$(date +%Y%m%d-%H%M%S) \
@@ -75,54 +86,22 @@ REPEATS=5 WARMUP=3 ITERATIONS=20 \
 ./scripts/reproduce_local_real_artifact_claim.sh
 ```
 
-Machine-readable benchmark output is generated locally under `artifacts/benchmarks/` and kept out of git.
+Machine-readable output lands in `artifacts/benchmarks/` and is kept out of git.
 
 </details>
 
-## Quick Start
+### Platform Compatibility
 
-```bash
-./espresso                            # first-run GPT-2 TUI demo
-./espresso doctor                     # check host readiness
-swift build                                              # build everything
-swift test                                               # unit tests (no ANE needed)
-swift run espresso-bench --ane-only --inference --layers 6  # benchmark
-swift run espresso-bench --decode --decode-steps 32 --layers 6  # decode benchmark
-```
+| SoC | Neural Engine | Tested | Notes |
+|-----|---------------|--------|-------|
+| M1 / M1 Pro / M1 Max / M1 Ultra | 16-core ANE | ✅ | Full feature set |
+| M2 / M2 Pro / M2 Max / M2 Ultra | 16-core ANE | ✅ | Full feature set |
+| M3 / M3 Pro / M3 Max | 18-core ANE | ✅ | Reference hardware (M3 Max) |
+| M4 / M4 Pro / M4 Max | 38-core ANE | ✅ | Faster compile cache warm-up |
+| Intel Mac | — | ❌ | No Neural Engine |
+| Apple A-series (iOS) | ✅ | ⚠️ | Requires entitlement; not App Store safe |
 
-Hardware-gated tests (requires ANE):
-
-```bash
-ANE_HARDWARE_TESTS=1 swift test --filter "ANERuntimeTests|EspressoTests|CrossValidationTests"
-```
-
-### As a dependency
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/christopherkarani/Espresso.git", branch: "main")
-]
-```
-
-```swift
-import Espresso
-import ANERuntime
-import ANETypes
-
-// Compile a kernel directly to ANE
-let kernel = try ANEKernel(
-    milText: generator.milText,
-    weights: weightBlobs,
-    inputSizes: [inputSize],
-    outputSizes: [outputSize]
-)
-
-// Evaluate on the Neural Engine
-try kernel.eval()
-
-// Read results — zero copy from IOSurface
-let output = kernel.outputSurface(at: 0)
-```
+macOS 15+ required. iOS / tvOS not supported out of the box (private API entitlements differ per platform).
 
 ## How It Works
 
@@ -174,6 +153,43 @@ ANEInterop (ObjC/C — private API bridge)
 | **ANERuntime** | Compiles MIL to ANE E5 binaries. Manages IOSurface buffers and compile budget. |
 | **Espresso** | Transformer layers, generation harnesses, exact two-token decode, training loop. |
 
+## SPM Integration
+
+```swift
+// Package.swift
+dependencies: [
+    .package(url: "https://github.com/christopherkarani/Espresso.git", from: "1.0.0")
+],
+targets: [
+    .target(name: "MyApp", dependencies: [
+        .product(name: "ANERuntime", package: "Espresso"),
+        .product(name: "ANETypes",   package: "Espresso"),
+    ])
+]
+```
+
+```swift
+import ANERuntime
+import ANETypes
+
+// 1. Define your kernel shape
+let gen = MyMILGenerator(config: .init(dim: 768, heads: 12))
+
+// 2. Compile once to ANE E5 binary
+let kernel = try ANEKernel(
+    milText: gen.milText,
+    weights: gen.weightBlobs,
+    inputSizes: [gen.inputSize],
+    outputSizes: [gen.outputSize]
+)
+
+// 3. Run inference — stays on ANE the whole time
+try kernel.eval()
+
+// 4. Read results via zero-copy IOSurface
+let output = kernel.outputSurface(at: 0)
+```
+
 ## Requirements
 
 | | Minimum |
@@ -186,7 +202,7 @@ ANEInterop (ObjC/C — private API bridge)
 ## Testing
 
 ```bash
-swift test                                                    # unit tests
+swift test                                                    # unit tests (no ANE needed)
 ANE_HARDWARE_TESTS=1 swift test --filter "ANERuntimeTests|EspressoTests"  # hardware tests
 OBJC_CROSS_VALIDATION=1 ANE_HARDWARE_TESTS=1 swift test --filter CrossValidationTests  # parity
 ```
@@ -203,7 +219,8 @@ This project uses undocumented private Apple APIs discovered through runtime int
 
 ## Contributing
 
-Contributions welcome. File bugs and feature requests via [GitHub Issues](https://github.com/christopherkarani/Espresso/issues).
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+File bugs and feature requests via [GitHub Issues](https://github.com/christopherkarani/Espresso/issues).
 
 ## License
 

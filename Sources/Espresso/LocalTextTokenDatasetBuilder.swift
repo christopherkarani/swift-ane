@@ -1,3 +1,4 @@
+import ANETypes
 import Foundation
 
 public enum LocalTextTokenDatasetBuilderError: Error, Equatable, Sendable {
@@ -8,14 +9,14 @@ public enum LocalTextTokenDatasetBuilderError: Error, Equatable, Sendable {
 }
 
 public enum LocalTextTokenDatasetBuilder {
-    public static let fileSeparatorToken: UInt16 = 256
+    public static let fileSeparatorToken: TokenID = 256
 
     public static func collectTokens(
         roots: [String],
         allowedExtensions: Set<String> = ["swift", "md", "txt", "py", "sh", "m", "h", "c"],
         maxFiles: Int? = nil,
         maxBytes: Int? = nil
-    ) throws(LocalTextTokenDatasetBuilderError) -> [UInt16] {
+    ) throws(LocalTextTokenDatasetBuilderError) -> [TokenID] {
         let cleanedRoots = roots.filter { !$0.isEmpty }
         guard !cleanedRoots.isEmpty else {
             throw .noRoots
@@ -52,7 +53,7 @@ public enum LocalTextTokenDatasetBuilder {
             throw .noFilesFound
         }
 
-        var tokens: [UInt16] = []
+        var tokens: [TokenID] = []
         tokens.reserveCapacity(16_384)
         var consumedBytes = 0
         for (index, path) in filePaths.enumerated() {
@@ -67,7 +68,7 @@ public enum LocalTextTokenDatasetBuilder {
                 if let maxBytes, consumedBytes >= maxBytes {
                     return tokens
                 }
-                tokens.append(UInt16(byte))
+                tokens.append(TokenID(byte))
                 consumedBytes += 1
             }
 
@@ -80,13 +81,13 @@ public enum LocalTextTokenDatasetBuilder {
     }
 
     public static func writeUInt16Dataset(
-        tokens: [UInt16],
+        tokens: [TokenID],
         to path: String
     ) throws(LocalTextTokenDatasetBuilderError) {
         var data = Data(capacity: tokens.count * MemoryLayout<UInt16>.stride)
         for token in tokens {
-            var littleEndian = token.littleEndian
-            withUnsafeBytes(of: &littleEndian) { bytes in
+            var narrow = UInt16(token).littleEndian
+            withUnsafeBytes(of: &narrow) { bytes in
                 data.append(bytes.bindMemory(to: UInt8.self))
             }
         }
