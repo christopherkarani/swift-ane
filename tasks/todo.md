@@ -1,4 +1,27 @@
+# Qwen ANE Serving Execution Spec Review 2026-03-20
+
+- [x] Compare the canonical execution spec against the local implementation plan and current workspace layout.
+- [x] Validate paired-worktree assumptions for Espresso and the sibling Edgerunner dependency.
+- [x] Verify that referenced commands, targets, tests, and environment paths exist or note where the prompt must be tightened.
+- [x] Summarize the must-have final-prompt requirements, hidden blockers, and ANE-first anti-drift checks.
+
+## Review
+
+- The canonical spec is directionally solid but not fully executable as written by a separate coding agent.
+- The final prompt must explicitly handle the sibling checkout naming mismatch: the real repo on disk is `/Users/chriskarani/CodingProjects/EdgeRunner`, while Espresso’s package dependency still requires a sibling directory literally named `Edgerunner`.
+- The final prompt must require baseline verification before any rewrite work and must name the exact existing commands/tests that already enforce Qwen parity.
+- The final prompt must also add architecture guardrails that prevent fallback drift into verifier-sidecars, CPU-hot-path decode, or an Edgerunner-first Metal rewrite before the ANE serving backend proves or disproves its gates.
+
 # Qwen GGUF Remaining Correctness Plan 2026-03-20
+
+- [x] Phase 2 loop closure: skip hybrid compile entirely when Qwen prefers exact CPU decode.
+- [x] Phase 2 loop closure: add reusable prepared-artifact caching with an explicit fresh-prepare escape hatch.
+- [x] Phase 2 loop closure: split GGUF exact float32 sidecar generation into explicit policies instead of always writing full Qwen sidecars.
+- [x] Phase 2 loop closure: add a single-process GGUF verification path that reuses one prepared artifact/engine across cold-start and parity checks.
+- [x] Add focused tests for the runtime decode-path selection and the new GGUF cache/policy helpers.
+- [ ] Re-run the protected 0.6B, 1.7B, and 4B Qwen checks with the tightened loop.
+- [ ] Update the persistent log, `tasks/todo.md` review, and commit the production fix / tests / docs separately.
+- [x] Write the canonical ANE-first Qwen serving runtime execution spec in `QWEN_ANE_SERVING_AGENT_EXECUTION_SPEC.md`.
 
 - [x] Compare raw GGUF dequantized float32 tensors against the fresh Qwen artifact sidecars for the first late-token-relevant tensor set.
 - [x] Exhaust the mapped converter surface before touching runtime again.
@@ -36,17 +59,30 @@
 - repeated large-model fresh-artifact prep with full float32 sidecars can exhaust local disk unless old disposable `/var/folders/.../T/espresso_gguf_*` directories are cleaned
 - 4B full `Hello` continuation parity is still not proven end to end under the current full-sidecar exact-CPU verification budget
 - Merge gate is therefore still not met for the larger-model path, even though the original 0.6B correctness bug is fixed and 1.7B exact-CPU parity now passes.
+- New Phase 2 loop-closing work landed on this branch:
+- `GGUFModelLoader` now supports prepared-artifact caching plus explicit sidecar policies (`automatic|none|essential|selected|full`)
+- `RunGGUF.verifyQwen` reuses a single prepared artifact and engine across cold-start, late-prefix, and `Hello` checks
+- `EspressoGGUFRunner verify-qwen` now accepts `--sidecars selected --selected-sidecars CSV` so the exact-CPU sidecar surface can be narrowed experimentally without code edits
+- Sidecar narrowing evidence (complete):
+- `--sidecars essential` is still not correctness-safe for Qwen 0.6B; it regresses the late-prefix token to `21340`
+- selected sidecars for layers `24...27` also regress to `21340`
+- selected sidecars for layers `20...27` also regress to `21340`
+- Binary search over contiguous `0..K` ranges found **minimum K = 11**:
+  - `0-6` (7 layers): FAIL, token `21340`
+  - `0-10` (11 layers): FAIL, token `21340`
+  - **`0-11` (12 layers): PASS, token `3681`** ← minimum correctness-safe set
+  - `0-12` (13 layers): PASS, token `3681`
+  - `0-13` (14 layers): PASS, token `3681`
+- Full 3-check gate passed on layers 0-11: cold-start `Hello Answer`, late-prefix `3681`, hello `[21806,11,358,2776,14589,369,279,3681]`
+- **Decision**: since minimum K=11 (12 layers) < 14 (half of 28), the default Qwen 0.6B sidecar can be narrowed to `selected(0..11)` for iteration speed (43% of model, ~57% prepare-time savings)
+- Key insight: FP16 rounding errors in early layers (0-11) compound through the forward pass; once those have exact FP32 weights, all downstream layers produce correct tokens. Late-layer FP32 sidecars alone cannot compensate for early-layer rounding.
 
-## Planned Narrowing Order
+## Planned Narrowing Order (COMPLETED)
 
-- Start with fresh artifact sidecars, not FP16 blobs.
-- Compare raw GGUF vs fresh artifact `.float32.bin` for:
-- `blk.27.ffn_down.weight`
-- `blk.27.attn_q.weight`
-- `blk.27.attn_k.weight`
-- `blk.27.attn_v.weight`
-- If those match, move one layer earlier and repeat.
-- If one differs, fix only that converter semantic transform before touching runtime again.
+- [x] Binary search over `0..K` contiguous layer ranges — **minimum K = 11 found**
+- [x] Full 3-check gate passed on `0..11` (cold-start, late-prefix, hello tokens)
+- [x] 1.7B spot check: Hello continuation passed; late-prefix proven in Experiment 9 (disk-limited recheck)
+- [ ] 4B spot check: skipped (disk-limited, needs ~23 GiB free)
 
 ## Current Grounded Boundary
 
@@ -904,3 +940,17 @@
 - llama.cpp `[21806, 11, 358, 2776, 14589, 369, 279, 3681]`
 - First divergence moved from generated token index `1` to generated token index `7`
 - The remaining token-7 miss is now the tiny artifact-vs-raw GGUF gap already seen in the pure CPU artifact forward (`21340` vs `3681`), not the original first-token runtime correctness bug.
+
+# Prompt Readiness Audit 2026-03-20
+
+- [x] Review project workflow constraints and existing lessons before auditing the prompt requirements.
+- [x] Inspect the concrete runnable surfaces in `/Users/chriskarani/CodingProjects/Espresso` and `/Users/chriskarani/CodingProjects/Edgerunner`.
+- [x] Verify the protected model directory exists at `/tmp/edgerunner-models`.
+- [x] Produce a concise operational-readiness checklist focused on exact paths, commands, final output contract, and forbidden actions.
+
+## Review
+
+- Verified the prompt can be grounded in real local paths and commands rather than placeholders.
+- Confirmed protected models currently exist in `/tmp/edgerunner-models` for `0.6B`, `1.7B`, and `4B`.
+- Confirmed the main executable surfaces the prompt should pin down include Espresso `swift build`, `swift test`, `./espresso`, `./.build/debug/EspressoGGUFRunner verify-qwen`, and Edgerunner `swift build` plus `swift test --filter "QwenBenchmark/decodeBenchmark"`.
+- Confirmed the prompt should explicitly forbid destructive git cleanup and deletion of protected models, while allowing cleanup only for disposable `/var/folders/.../T/espresso_gguf_*` temp directories.

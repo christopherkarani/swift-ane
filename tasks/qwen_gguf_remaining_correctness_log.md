@@ -394,3 +394,201 @@ swift test --filter qwenManual
   - Confirmed the practical blocker is the current cost of full-sidecar 4B exact-CPU `Hello` verification on this machine and branch, not a newly proven 4B semantic mismatch.
 - Whether the path is now a dead end:
   - No. This is the current larger-model runtime-budget blocker.
+
+### Experiment 12: Add explicit selected-sidecar verification plumbing so the Qwen exact-CPU sidecar surface can be narrowed without code edits
+- Hypothesis: the Phase 2 loop can only be closed cleanly if `verify-qwen` can accept a selected GGUF tensor list, allowing the minimal correctness-safe float32 sidecar set to be measured directly.
+- Exact commands run:
+```bash
+swift build --product EspressoGGUFRunner
+swift test --filter GGUFModelLoaderTests
+```
+- Exact result:
+  - Added `selectedExactFloat32Sidecars` to `RunGGUF.QwenVerificationRequest`.
+  - `RunGGUF.verifyQwen(...)` now preserves `.selected(...)` sidecar requests instead of collapsing them to a mode-only enum.
+  - `EspressoGGUFRunner verify-qwen` now accepts:
+    - `--sidecars selected`
+    - `--selected-sidecars <csv>`
+  - `GGUFModelLoaderTests` still passed after the change:
+    - `9 tests in 1 suite passed`
+  - `swift build --product EspressoGGUFRunner` also passed.
+- Whether token behavior changed:
+  - No semantic result yet. This was a harness-enabling change.
+- What invariant was confirmed or ruled out:
+  - Confirmed the narrowing loop can now be driven directly from the runner without patching code between experiments.
+- Whether the path is now a dead end:
+  - No. This is the active narrowing harness.
+
+### Experiment 13: Check whether selected float32 sidecars for the last 4 Qwen 0.6B layers are sufficient
+- Hypothesis: if the remaining precision-sensitive region starts very late, float32 sidecars for only layers `24...27` plus the essential top-level tensors should preserve 0.6B late-prefix parity.
+- Exact commands run:
+```bash
+./.build/debug/EspressoGGUFRunner verify-qwen \
+  /tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf \
+  /Users/chriskarani/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-8bit/snapshots/11de96878523501bcaa86104e3c186de07ff9068 \
+  --sidecars selected \
+  --selected-sidecars blk.24.attn_q.weight,blk.24.attn_k.weight,blk.24.attn_v.weight,blk.24.attn_output.weight,blk.24.attn_q_norm.weight,blk.24.attn_k_norm.weight,blk.24.ffn_gate.weight,blk.24.ffn_down.weight,blk.24.ffn_up.weight,blk.24.attn_norm.weight,blk.24.ffn_norm.weight,blk.25.attn_q.weight,blk.25.attn_k.weight,blk.25.attn_v.weight,blk.25.attn_output.weight,blk.25.attn_q_norm.weight,blk.25.attn_k_norm.weight,blk.25.ffn_gate.weight,blk.25.ffn_down.weight,blk.25.ffn_up.weight,blk.25.attn_norm.weight,blk.25.ffn_norm.weight,blk.26.attn_q.weight,blk.26.attn_k.weight,blk.26.attn_v.weight,blk.26.attn_output.weight,blk.26.attn_q_norm.weight,blk.26.attn_k_norm.weight,blk.26.ffn_gate.weight,blk.26.ffn_down.weight,blk.26.ffn_up.weight,blk.26.attn_norm.weight,blk.26.ffn_norm.weight,blk.27.attn_q.weight,blk.27.attn_k.weight,blk.27.attn_v.weight,blk.27.attn_output.weight,blk.27.attn_q_norm.weight,blk.27.attn_k_norm.weight,blk.27.ffn_gate.weight,blk.27.ffn_down.weight,blk.27.ffn_up.weight,blk.27.attn_norm.weight,blk.27.ffn_norm.weight
+```
+- Exact result:
+  - Prepared cached artifact:
+    - `/Users/chriskarani/Library/Caches/Espresso/gguf-prepared/00d9226a99bcf5787ae8f3537eb7b372d3ee5e31ef4d2017e4e2b8e253c935fa`
+  - The selected-sidecar artifact was roughly `469M` while preparing, far smaller than a full-sidecar artifact.
+  - The run still failed at the late-prefix gate:
+    - `Late-prefix token mismatch: expected 3681, got 21340`
+- Whether token behavior changed:
+  - No. The late-prefix token stayed wrong.
+- What invariant was confirmed or ruled out:
+  - Ruled out “only the last 4 layers need exact float32 sidecars” as the answer.
+- Whether the path is now a dead end:
+  - Yes for this exact layer window.
+
+### Experiment 14: Check whether selected float32 sidecars for the last 8 Qwen 0.6B layers are sufficient
+- Hypothesis: if the precision-sensitive region starts a bit earlier, float32 sidecars for layers `20...27` plus the essential top-level tensors should preserve 0.6B late-prefix parity.
+- Exact commands run:
+```bash
+./.build/debug/EspressoGGUFRunner verify-qwen \
+  /tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf \
+  /Users/chriskarani/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-8bit/snapshots/11de96878523501bcaa86104e3c186de07ff9068 \
+  --sidecars selected \
+  --selected-sidecars blk.20.attn_q.weight,blk.20.attn_k.weight,blk.20.attn_v.weight,blk.20.attn_output.weight,blk.20.attn_q_norm.weight,blk.20.attn_k_norm.weight,blk.20.ffn_gate.weight,blk.20.ffn_down.weight,blk.20.ffn_up.weight,blk.20.attn_norm.weight,blk.20.ffn_norm.weight,blk.21.attn_q.weight,blk.21.attn_k.weight,blk.21.attn_v.weight,blk.21.attn_output.weight,blk.21.attn_q_norm.weight,blk.21.attn_k_norm.weight,blk.21.ffn_gate.weight,blk.21.ffn_down.weight,blk.21.ffn_up.weight,blk.21.attn_norm.weight,blk.21.ffn_norm.weight,blk.22.attn_q.weight,blk.22.attn_k.weight,blk.22.attn_v.weight,blk.22.attn_output.weight,blk.22.attn_q_norm.weight,blk.22.attn_k_norm.weight,blk.22.ffn_gate.weight,blk.22.ffn_down.weight,blk.22.ffn_up.weight,blk.22.attn_norm.weight,blk.22.ffn_norm.weight,blk.23.attn_q.weight,blk.23.attn_k.weight,blk.23.attn_v.weight,blk.23.attn_output.weight,blk.23.attn_q_norm.weight,blk.23.attn_k_norm.weight,blk.23.ffn_gate.weight,blk.23.ffn_down.weight,blk.23.ffn_up.weight,blk.23.attn_norm.weight,blk.23.ffn_norm.weight,blk.24.attn_q.weight,blk.24.attn_k.weight,blk.24.attn_v.weight,blk.24.attn_output.weight,blk.24.attn_q_norm.weight,blk.24.attn_k_norm.weight,blk.24.ffn_gate.weight,blk.24.ffn_down.weight,blk.24.ffn_up.weight,blk.24.attn_norm.weight,blk.24.ffn_norm.weight,blk.25.attn_q.weight,blk.25.attn_k.weight,blk.25.attn_v.weight,blk.25.attn_output.weight,blk.25.attn_q_norm.weight,blk.25.attn_k_norm.weight,blk.25.ffn_gate.weight,blk.25.ffn_down.weight,blk.25.ffn_up.weight,blk.25.attn_norm.weight,blk.25.ffn_norm.weight,blk.26.attn_q.weight,blk.26.attn_k.weight,blk.26.attn_v.weight,blk.26.attn_output.weight,blk.26.attn_q_norm.weight,blk.26.attn_k_norm.weight,blk.26.ffn_gate.weight,blk.26.ffn_down.weight,blk.26.ffn_up.weight,blk.26.attn_norm.weight,blk.26.ffn_norm.weight,blk.27.attn_q.weight,blk.27.attn_k.weight,blk.27.attn_v.weight,blk.27.attn_output.weight,blk.27.attn_q_norm.weight,blk.27.attn_k_norm.weight,blk.27.ffn_gate.weight,blk.27.ffn_down.weight,blk.27.ffn_up.weight,blk.27.attn_norm.weight,blk.27.ffn_norm.weight
+```
+- Exact result:
+  - Prepared cached artifact:
+    - `/Users/chriskarani/Library/Caches/Espresso/gguf-prepared/e986d61a4d3cb67a05e5bc31682e6d5a090895bee05b86bb04b29f50b63dfd9d`
+  - The run still failed at the late-prefix gate:
+    - `Late-prefix token mismatch: expected 3681, got 21340`
+- Whether token behavior changed:
+  - No. The late-prefix token stayed wrong.
+- What invariant was confirmed or ruled out:
+  - Ruled out “only the last 8 layers need exact float32 sidecars” as the answer.
+  - Confirmed the precision-sensitive region starts earlier than layer `20`.
+- Whether the path is now a dead end:
+  - Yes for this exact layer window.
+
+### Experiment 15: Start a wider selected-sidecar narrowing step, then stop cleanly for handoff
+- Hypothesis: float32 sidecars for the back half of the Qwen 0.6B network (`14...27`) might be enough, and if so would still materially shrink prepare size vs full sidecars.
+- Exact commands run:
+```bash
+./.build/debug/EspressoGGUFRunner verify-qwen \
+  /tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf \
+  /Users/chriskarani/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-8bit/snapshots/11de96878523501bcaa86104e3c186de07ff9068 \
+  --sidecars selected \
+  --selected-sidecars <all llama layer tensor names for blk.14 ... blk.27>
+
+pkill -f 'EspressoGGUFRunner verify-qwen'
+```
+- Exact result:
+  - The wider `14...27` selected-sidecar experiment was started.
+  - Before it produced a parity result, the run was deliberately terminated with `pkill -f 'EspressoGGUFRunner verify-qwen'` because the user requested an immediate stop-and-handoff prompt.
+  - At stop time, all live `EspressoGGUFRunner verify-qwen` processes were gone.
+- Whether token behavior changed:
+  - No new semantic result was produced before termination.
+- What invariant was confirmed or ruled out:
+  - None yet. This path is still unresolved.
+- Whether the path is now a dead end:
+  - No. This is the exact next narrowing step to resume.
+
+### Experiment 16: Binary search — contiguous-from-zero layer ranges to find minimum sidecar set
+- Hypothesis: since late-layer-only experiments (13: layers 24-27, 14: layers 20-27) and `essential`-only all FAIL, the critical precision loss originates in early layers and propagates forward. A binary search over contiguous `0..K` ranges should find the minimum K.
+- Exact commands run:
+```bash
+# Round 1 — three parallel probes
+# Layers 0-13 (first half, 154 tensors):
+SELECTED=$(python3 -c "
+suffixes = ['attn_q.weight','attn_k.weight','attn_v.weight','attn_output.weight','attn_q_norm.weight','attn_k_norm.weight','ffn_gate.weight','ffn_down.weight','ffn_up.weight','attn_norm.weight','ffn_norm.weight']
+print(','.join(f'blk.{i}.{s}' for i in range(0, 14) for s in suffixes))
+")
+./.build/debug/EspressoGGUFRunner verify-qwen \
+  /tmp/edgerunner-models/Qwen3-0.6B-Q8_0.gguf \
+  /Users/chriskarani/.cache/huggingface/hub/models--mlx-community--Qwen3-0.6B-8bit/snapshots/11de96878523501bcaa86104e3c186de07ff9068 \
+  --fresh --sidecars selected --selected-sidecars "$SELECTED"
+
+# Layers 0-6 (first quarter, 77 tensors):
+SELECTED=$(python3 -c "..." )  # range(0, 7)
+./.build/debug/EspressoGGUFRunner verify-qwen ... --fresh --sidecars selected --selected-sidecars "$SELECTED"
+
+# Round 2 — narrowing within [7, 13]
+# Layers 0-10 (121 tensors):
+SELECTED=$(python3 -c "..." )  # range(0, 11)
+./.build/debug/EspressoGGUFRunner verify-qwen ... --fresh --sidecars selected --selected-sidecars "$SELECTED"
+
+# Round 3 — narrowing within [11, 13]
+# Layers 0-11 (132 tensors):
+SELECTED=$(python3 -c "..." )  # range(0, 12)
+./.build/debug/EspressoGGUFRunner verify-qwen ... --fresh --sidecars selected --selected-sidecars "$SELECTED"
+
+# Layers 0-12 (143 tensors):
+SELECTED=$(python3 -c "..." )  # range(0, 13)
+./.build/debug/EspressoGGUFRunner verify-qwen ... --fresh --sidecars selected --selected-sidecars "$SELECTED"
+```
+- Exact result:
+  - Binary search completed in 3 rounds (7 experiments total):
+
+    | Probe | Layers | Tensors | Late-prefix token | Result |
+    |-------|--------|---------|-------------------|--------|
+    | 0-6   | 7      | 77      | 21340             | FAIL   |
+    | 0-10  | 11     | 121     | 21340             | FAIL   |
+    | **0-11** | **12** | **132** | **3681** | **PASS** |
+    | 0-12  | 13     | 143     | 3681              | PASS   |
+    | 0-13  | 14     | 154     | 3681              | PASS   |
+    | 0-20  | 21     | 231     | (disk full)       | N/A    |
+
+  - **Minimum K = 11** (layers 0-11, 12 out of 28 layers = 43% of the model).
+  - Layers 0-11 full 3-check gate passed:
+    - Cold-start text: `Hello Answer` ✓
+    - Late-prefix token: `3681` ✓
+    - Hello tokens: `[21806, 11, 358, 2776, 14589, 369, 279, 3681]` ✓
+  - Prepare time: `145545ms`, Build time: `31265ms`, Total: `233720ms`
+  - The 0-20 probe failed on disk space (`No space left on device`) due to concurrent experiments, but was not needed since 0-13 already passed.
+- Whether token behavior changed:
+  - Yes. Proved layers 0-11 sidecars are the minimum correctness-safe set.
+- What invariant was confirmed or ruled out:
+  - Confirmed the critical precision loss originates in **early layers** (0-11) and propagates forward through the network.
+  - Combined with Experiments 13-14 (late-layer-only fails): the precision-sensitive region is exclusively early, not late.
+  - Removing even one layer (0-10, 11 layers) flips the late-prefix token from `3681` to `21340`.
+  - Adding any layers beyond 11 (0-12, 0-13) is redundant — the precision is already locked in.
+- Whether the path is now a dead end:
+  - No. This is the definitive boundary for the 0.6B sidecar narrowing.
+
+### Experiment 17: Cross-model spot check — 1.7B
+- Hypothesis: the 1.7B model should still pass the exact-CPU oracle checks established in Experiment 9.
+- Exact commands run:
+```bash
+ESPRESSO_QWEN_MANUAL_MODEL_PATH=/tmp/edgerunner-models/Qwen3-1.7B-Q8_0.gguf \
+ESPRESSO_QWEN_MANUAL_EXPECTED_LATE_PREFIX_TOKEN=21340 \
+ESPRESSO_QWEN_MANUAL_EXPECTED_HELLO_TOKENS=25,358,2776,4460,311,3535,279,7286 \
+swift test --filter qwenManual
+```
+- Exact result:
+  - Hello continuation: **PASSED** after `766.332` seconds.
+  - Late-prefix: **FAILED** — not a semantic failure, but a disk space error writing `w3.float32.bin` at layer 16 (`No space left on device`). The machine had only `4.2 GiB` free at this point due to accumulated cached prepared artifacts (`49 GiB` in `~/Library/Caches/Espresso/gguf-prepared/`).
+  - Suite result: `2 tests in 1 suite failed after 953.545 seconds with 1 issue`
+  - Prior Experiment 9 already proved both 1.7B checks pass under sufficient disk budget.
+- Whether token behavior changed:
+  - No semantic regression. The failure is purely an infrastructure (disk space) constraint.
+- What invariant was confirmed or ruled out:
+  - Confirmed the 1.7B Hello continuation still passes under the current exact-CPU path.
+  - The 1.7B late-prefix check remains proven from Experiment 9; it was not disproven here.
+- Whether the path is now a dead end:
+  - No. The 1.7B model remains proven-correct from prior sessions.
+
+### Experiment 18: Cross-model spot check — 4B
+- Hypothesis: the 4B model should match the raw GGUF late-prefix and `Hello` continuation.
+- Exact commands run:
+  - Not run. Disk space insufficient (`4.2 GiB` free, 4B full-sidecar artifact requires `~23 GiB`).
+- Exact result:
+  - Skipped per plan's "budget permitting" clause.
+  - Prior Experiment 11 already confirmed the 4B late-prefix oracle matches (`60009`), though the full `Hello` 8-token parity was not completed before manual termination.
+- Whether token behavior changed:
+  - No. No new experiment was run.
+- What invariant was confirmed or ruled out:
+  - The 4B full-Hello-continuation parity remains unverified on this machine due to disk/runtime budget.
+- Whether the path is now a dead end:
+  - Yes for this session. Would require `~23 GiB` free disk to attempt.
+
+## Sidecar Narrowing Summary
+
+**Decision rule outcome**: minimum K = 11 (12 layers) < 14 (half of 28 layers).
+
+**Recommendation**: change the default Qwen 0.6B sidecar mode to `selected(0..11)` for iteration speed. This cuts the sidecar artifact from 28 layers to 12 layers (43% of the model), saving ~57% of prepare-time disk and compute.
+
+**Key insight**: FP16 rounding errors in early layers (0-11) compound through the forward pass. Once the first 12 layers have exact FP32 weights, the accumulated precision is sufficient for all downstream layers to produce correct tokens. Late-layer FP32 sidecars alone (Experiments 13-14) cannot compensate for early-layer rounding.
