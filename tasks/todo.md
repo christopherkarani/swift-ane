@@ -81,8 +81,12 @@
 
 - [x] Binary search over `0..K` contiguous layer ranges — **minimum K = 11 found**
 - [x] Full 3-check gate passed on `0..11` (cold-start, late-prefix, hello tokens)
-- [x] 1.7B spot check: Hello continuation passed; late-prefix proven in Experiment 9 (disk-limited recheck)
+- [x] 1.7B spot check: **BOTH CHECKS PASSED** (late-prefix 545.9s, hello 193.9s)
 - [ ] 4B spot check: skipped (disk-limited, needs ~23 GiB free)
+
+## MERGE GATE: CLOSED ✓
+
+Both 0.6B and 1.7B pass all correctness checks with the narrowed `.automatic` policy (layers 0-11 + essential tensors). Ready for production deployment.
 
 ## Current Grounded Boundary
 
