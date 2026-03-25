@@ -210,159 +210,6 @@ private struct NativeSplitMix64: RandomNumberGenerator {
     }
 }
 
-struct CoreMLReferenceArraySpec: Equatable, Sendable {
-    let name: String
-    let shape: [Int]
-    let dataType: MLMultiArrayDataType
-}
-
-struct StatelessCoreMLReferenceContract: Equatable, Sendable {
-    let tokenInput: CoreMLReferenceArraySpec
-    let outputFeatureName: String
-    let maxSequenceTokens: Int
-}
-
-struct StatefulCoreMLReferenceContract: Equatable, Sendable {
-    let tokenInput: CoreMLReferenceArraySpec
-    let cachePositionInput: CoreMLReferenceArraySpec
-    let outputFeatureName: String
-    let maxSequenceTokens: Int
-}
-
-enum CoreMLReferenceModelContract: Equatable, Sendable {
-    case stateless(StatelessCoreMLReferenceContract)
-    case stateful(StatefulCoreMLReferenceContract)
-
-    var outputFeatureName: String {
-        switch self {
-        case .stateless(let contract):
-            contract.outputFeatureName
-        case .stateful(let contract):
-            contract.outputFeatureName
-        }
-    }
-
-    var maxSequenceTokens: Int {
-        switch self {
-        case .stateless(let contract):
-            contract.maxSequenceTokens
-        case .stateful(let contract):
-            contract.maxSequenceTokens
-        }
-    }
-
-    var tokenInput: CoreMLReferenceArraySpec {
-        switch self {
-        case .stateless(let contract):
-            contract.tokenInput
-        case .stateful(let contract):
-            contract.tokenInput
-        }
-    }
-
-    var cachePositionInput: CoreMLReferenceArraySpec? {
-        switch self {
-        case .stateless:
-            nil
-        case .stateful(let contract):
-            contract.cachePositionInput
-        }
-    }
-
-    var isStateful: Bool {
-        if case .stateful = self {
-            true
-        } else {
-            false
-        }
-    }
-}
-
-func resolveCoreMLReferenceModelContract(
-    inputSpecs: [CoreMLReferenceArraySpec],
-    outputFeatureNames: [String],
-    stateSpecs: [CoreMLReferenceArraySpec],
-    requestedSequenceLength: Int
-) throws -> CoreMLReferenceModelContract {
-    guard requestedSequenceLength > 0 else {
-        throw CLIError.runtime("Core ML sequence length must be > 0")
-    }
-    guard outputFeatureNames.count == 1, let outputFeatureName = outputFeatureNames.first else {
-        throw CLIError.runtime("expected exactly one Core ML output, found \(outputFeatureNames.count)")
-    }
-
-    if stateSpecs.isEmpty {
-        guard inputSpecs.count == 1, let tokenInput = inputSpecs.first else {
-            throw CLIError.runtime("expected exactly one Core ML input, found \(inputSpecs.count)")
-        }
-        guard tokenInput.shape.count == 2 else {
-            throw CLIError.runtime("Expected a rank-2 Core ML input, found rank \(tokenInput.shape.count)")
-        }
-        guard tokenInput.shape[0] == 1 else {
-            throw CLIError.runtime("Expected Core ML input shape [1, seq], found \(tokenInput.shape)")
-        }
-        guard requestedSequenceLength <= tokenInput.shape[1] else {
-            throw CLIError.runtime(
-                "Requested Core ML sequence length \(requestedSequenceLength) exceeds model capacity \(tokenInput.shape[1])"
-            )
-        }
-        return .stateless(
-            StatelessCoreMLReferenceContract(
-                tokenInput: tokenInput,
-                outputFeatureName: outputFeatureName,
-                maxSequenceTokens: tokenInput.shape[1]
-            )
-        )
-    }
-
-    guard inputSpecs.count == 2 else {
-        throw CLIError.runtime("expected exactly two Core ML inputs for a stateful model, found \(inputSpecs.count)")
-    }
-
-    let tokenCandidates = inputSpecs.filter { spec in
-        spec.dataType == .int32 && spec.shape == [1, 1]
-    }
-    let cachePositionCandidates = inputSpecs.filter { spec in
-        spec.dataType == .int32 && spec.shape == [1]
-    }
-    guard tokenCandidates.count == 1, let tokenInput = tokenCandidates.first else {
-        throw CLIError.runtime("Could not identify stateful token input; expected one int32 [1, 1] input.")
-    }
-    guard cachePositionCandidates.count == 1, let cachePositionInput = cachePositionCandidates.first else {
-        throw CLIError.runtime("Could not identify stateful cache-position input; expected one int32 [1] input.")
-    }
-    guard tokenInput.name != cachePositionInput.name else {
-        throw CLIError.runtime("Stateful Core ML model reuses the same feature for token input and cache position.")
-    }
-
-    let stateCapacities = try Set(stateSpecs.map { spec -> Int in
-        guard spec.shape.count == 4 else {
-            throw CLIError.runtime("State buffer \(spec.name) must be rank-4, found shape \(spec.shape)")
-        }
-        guard spec.dataType == .float16 else {
-            throw CLIError.runtime("State buffer \(spec.name) must use float16, found dtype \(spec.dataType.rawValue)")
-        }
-        return spec.shape[2]
-    })
-    guard stateCapacities.count == 1, let maxSequenceTokens = stateCapacities.first else {
-        throw CLIError.runtime("Stateful Core ML states disagree on KV cache capacity.")
-    }
-    guard requestedSequenceLength <= maxSequenceTokens else {
-        throw CLIError.runtime(
-            "Requested Core ML sequence length \(requestedSequenceLength) exceeds stateful KV capacity \(maxSequenceTokens)"
-        )
-    }
-
-    return .stateful(
-        StatefulCoreMLReferenceContract(
-            tokenInput: tokenInput,
-            cachePositionInput: cachePositionInput,
-            outputFeatureName: outputFeatureName,
-            maxSequenceTokens: maxSequenceTokens
-        )
-    )
-}
-
 private struct NativeCoreMLReferenceRunner {
     let vocabSize: Int
     let maxSequenceTokens: Int
@@ -372,18 +219,16 @@ private struct NativeCoreMLReferenceRunner {
     private let hiddenSize: Int
     private let architecture: MultiModelConfig.Architecture
     private let model: MLModel
-    private let contract: CoreMLReferenceModelContract
-    private let tokenInputArray: MLMultiArray
-    private let tokenInputDataType: MLMultiArrayDataType
-    private let cachePositionArray: MLMultiArray?
-    private let cachePositionDataType: MLMultiArrayDataType?
+    private let inputFeatureName: String
+    private let outputFeatureName: String
+    private let inputArray: MLMultiArray
+    private let inputDataType: MLMultiArrayDataType
     private let epsilon: Float
     private let finalNormGamma: [Float]
     private let finalNormBeta: [Float]?
     private let lmHead: [Float]
 
     private var currentTokens: [TokenID]
-    private var modelState: MLState?
     private var stepHidden: [Float]
     private var stepNorm: [Float]
     private var stepLogits: [Float]
@@ -423,86 +268,62 @@ private struct NativeCoreMLReferenceRunner {
             throw CLIError.runtime("Core ML load failed: \(error)")
         }
 
-        let inputSpecs = try model.modelDescription.inputDescriptionsByName.map { name, description in
-            guard let constraint = description.multiArrayConstraint else {
-                throw CLIError.runtime("Core ML input '\(name)' is not an MLMultiArray")
-            }
-            return CoreMLReferenceArraySpec(
-                name: name,
-                shape: constraint.shape.map(\.intValue),
-                dataType: constraint.dataType
-            )
+        let inputNames = Array(model.modelDescription.inputDescriptionsByName.keys)
+        let outputNames = Array(model.modelDescription.outputDescriptionsByName.keys)
+        guard inputNames.count == 1, let inputFeatureName = inputNames.first else {
+            throw CLIError.runtime("expected exactly one Core ML input, found \(inputNames.count)")
         }
-        let stateSpecs = try model.modelDescription.stateDescriptionsByName.map { name, description in
-            guard let constraint = description.stateConstraint else {
-                throw CLIError.runtime("Core ML state '\(name)' is not an MLState buffer")
-            }
-            return CoreMLReferenceArraySpec(
-                name: name,
-                shape: constraint.bufferShape,
-                dataType: constraint.dataType
-            )
+        guard outputNames.count == 1, let outputFeatureName = outputNames.first else {
+            throw CLIError.runtime("expected exactly one Core ML output, found \(outputNames.count)")
         }
-        let contract = try resolveCoreMLReferenceModelContract(
-            inputSpecs: inputSpecs.sorted { $0.name < $1.name },
-            outputFeatureNames: Array(model.modelDescription.outputDescriptionsByName.keys).sorted(),
-            stateSpecs: stateSpecs.sorted { $0.name < $1.name },
-            requestedSequenceLength: sequenceLength
-        )
 
-        let tokenInputArray: MLMultiArray
+        guard let inputConstraint = model.modelDescription.inputDescriptionsByName[inputFeatureName]?.multiArrayConstraint else {
+            throw CLIError.runtime("Core ML input '\(inputFeatureName)' is not an MLMultiArray")
+        }
+        let inputShape = inputConstraint.shape.map(\.intValue)
+        guard inputShape.count == 2 else {
+            throw CLIError.runtime("Expected a rank-2 Core ML input, found rank \(inputShape.count)")
+        }
+        guard inputShape[0] == 1 else {
+            throw CLIError.runtime("Expected Core ML input shape [1, seq], found \(inputShape)")
+        }
+        guard sequenceLength <= inputShape[1] else {
+            throw CLIError.runtime(
+                "Requested Core ML sequence length \(sequenceLength) exceeds model capacity \(inputShape[1])"
+            )
+        }
+
+        let inputArray: MLMultiArray
         do {
-            tokenInputArray = try MLMultiArray(
-                shape: contract.tokenInput.shape.map(NSNumber.init(value:)),
-                dataType: contract.tokenInput.dataType
+            inputArray = try MLMultiArray(
+                shape: inputConstraint.shape,
+                dataType: inputConstraint.dataType
             )
         } catch {
-            throw CLIError.runtime("failed to allocate Core ML token input array: \(error)")
-        }
-
-        let cachePositionArray: MLMultiArray?
-        let cachePositionDataType: MLMultiArrayDataType?
-        if let cachePositionInput = contract.cachePositionInput {
-            do {
-                cachePositionArray = try MLMultiArray(
-                    shape: cachePositionInput.shape.map(NSNumber.init(value:)),
-                    dataType: cachePositionInput.dataType
-                )
-            } catch {
-                throw CLIError.runtime("failed to allocate Core ML cache-position array: \(error)")
-            }
-            cachePositionDataType = cachePositionInput.dataType
-        } else {
-            cachePositionArray = nil
-            cachePositionDataType = nil
+            throw CLIError.runtime("failed to allocate Core ML input array: \(error)")
         }
 
         self.vocabSize = weights.vocabSize
-        self.maxSequenceTokens = contract.maxSequenceTokens
+        self.maxSequenceTokens = inputShape[1]
         self.compileTimeMs = monotonicMilliseconds(since: compileStart)
         self.computeUnits = computeUnits
         self.hiddenSize = weights.hiddenSize
         self.architecture = architecture
         self.model = model
-        self.contract = contract
-        self.tokenInputArray = tokenInputArray
-        self.tokenInputDataType = contract.tokenInput.dataType
-        self.cachePositionArray = cachePositionArray
-        self.cachePositionDataType = cachePositionDataType
+        self.inputFeatureName = inputFeatureName
+        self.outputFeatureName = outputFeatureName
+        self.inputArray = inputArray
+        self.inputDataType = inputConstraint.dataType
         self.epsilon = epsilon
         self.finalNormGamma = weights.finalNormGamma
         self.finalNormBeta = weights.finalNormBeta
         self.lmHead = weights.lmHead
         self.currentTokens = []
-        self.modelState = nil
         self.stepHidden = [Float](repeating: 0, count: weights.hiddenSize)
         self.stepNorm = [Float](repeating: 0, count: weights.hiddenSize)
         self.stepLogits = [Float](repeating: 0, count: weights.vocabSize)
 
-        try zeroArray(tokenInputArray, dataType: tokenInputDataType, label: "token input")
-        if let cachePositionArray, let cachePositionDataType {
-            try zeroArray(cachePositionArray, dataType: cachePositionDataType, label: "cache position")
-        }
+        try zeroInputArray()
     }
 
     mutating func benchmark(
@@ -632,7 +453,6 @@ private struct NativeCoreMLReferenceRunner {
 
     private mutating func reset() throws {
         currentTokens.removeAll(keepingCapacity: true)
-        modelState = contract.isStateful ? model.makeState() : nil
         stepHidden.withUnsafeMutableBufferPointer { buffer in
             for index in buffer.indices {
                 buffer[index] = 0
@@ -648,58 +468,34 @@ private struct NativeCoreMLReferenceRunner {
                 buffer[index] = 0
             }
         }
-        try zeroArray(tokenInputArray, dataType: tokenInputDataType, label: "token input")
-        if let cachePositionArray, let cachePositionDataType {
-            try zeroArray(cachePositionArray, dataType: cachePositionDataType, label: "cache position")
-        }
+        try zeroInputArray()
     }
 
     private mutating func prefill(promptTokens: [TokenID]) throws -> [Float] {
         guard !promptTokens.isEmpty else {
             throw CLIError.runtime("Cannot compare Core ML without prompt tokens.")
         }
-        currentTokens.removeAll(keepingCapacity: true)
-
-        switch contract {
-        case .stateless:
-            currentTokens = promptTokens
-            for (position, token) in promptTokens.enumerated() {
-                try writeToken(token, at: position, into: tokenInputArray, dataType: tokenInputDataType)
-            }
-            return try runStatelessPrediction(sequenceLength: promptTokens.count)
-        case .stateful:
-            var logits: [Float] = []
-            logits.reserveCapacity(vocabSize)
-            for token in promptTokens {
-                logits = try runStatefulPrediction(token: token, cachePosition: currentTokens.count)
-                currentTokens.append(token)
-            }
-            return logits
+        currentTokens = promptTokens
+        for (position, token) in promptTokens.enumerated() {
+            try writeToken(token, at: position)
         }
+        return try runPrediction(sequenceLength: promptTokens.count)
     }
 
     private mutating func decode(nextToken: TokenID) throws -> [Float] {
         guard currentTokens.count < maxSequenceTokens else {
             throw CLIError.runtime("Core ML decode overflow at sequence length \(maxSequenceTokens)")
         }
-
-        switch contract {
-        case .stateless:
-            currentTokens.append(nextToken)
-            try writeToken(nextToken, at: currentTokens.count - 1, into: tokenInputArray, dataType: tokenInputDataType)
-            return try runStatelessPrediction(sequenceLength: currentTokens.count)
-        case .stateful:
-            let logits = try runStatefulPrediction(token: nextToken, cachePosition: currentTokens.count)
-            currentTokens.append(nextToken)
-            return logits
-        }
+        currentTokens.append(nextToken)
+        try writeToken(nextToken, at: currentTokens.count - 1)
+        return try runPrediction(sequenceLength: currentTokens.count)
     }
 
-    private mutating func runStatelessPrediction(sequenceLength: Int) throws -> [Float] {
+    private mutating func runPrediction(sequenceLength: Int) throws -> [Float] {
         let provider: MLDictionaryFeatureProvider
         do {
             provider = try MLDictionaryFeatureProvider(
-                dictionary: [contract.tokenInput.name: MLFeatureValue(multiArray: tokenInputArray)]
+                dictionary: [inputFeatureName: MLFeatureValue(multiArray: inputArray)]
             )
         } catch {
             throw CLIError.runtime("Core ML feature provider creation failed: \(error)")
@@ -712,50 +508,11 @@ private struct NativeCoreMLReferenceRunner {
             throw CLIError.runtime("Core ML prediction failed: \(error)")
         }
 
-        guard let outputArray = prediction.featureValue(for: contract.outputFeatureName)?.multiArrayValue else {
-            throw CLIError.runtime("Core ML output '\(contract.outputFeatureName)' missing MLMultiArray value")
+        guard let outputArray = prediction.featureValue(for: outputFeatureName)?.multiArrayValue else {
+            throw CLIError.runtime("Core ML output '\(outputFeatureName)' missing MLMultiArray value")
         }
 
         try extractLastHidden(from: outputArray, sequenceLength: sequenceLength)
-        projectCurrentLogits()
-        return stepLogits
-    }
-
-    private mutating func runStatefulPrediction(token: TokenID, cachePosition: Int) throws -> [Float] {
-        guard let cachePositionArray, let cachePositionDataType, let cachePositionInput = contract.cachePositionInput else {
-            throw CLIError.runtime("Stateful Core ML contract is missing cache-position input metadata.")
-        }
-        guard let state = modelState else {
-            throw CLIError.runtime("Stateful Core ML prediction requested before model state was initialized.")
-        }
-
-        try writeToken(token, at: 0, into: tokenInputArray, dataType: tokenInputDataType)
-        try writeScalar(Int32(cachePosition), into: cachePositionArray, dataType: cachePositionDataType, label: "cache position")
-
-        let provider: MLDictionaryFeatureProvider
-        do {
-            provider = try MLDictionaryFeatureProvider(
-                dictionary: [
-                    contract.tokenInput.name: MLFeatureValue(multiArray: tokenInputArray),
-                    cachePositionInput.name: MLFeatureValue(multiArray: cachePositionArray),
-                ]
-            )
-        } catch {
-            throw CLIError.runtime("Core ML feature provider creation failed: \(error)")
-        }
-
-        let prediction: MLFeatureProvider
-        do {
-            prediction = try model.prediction(from: provider, using: state)
-        } catch {
-            throw CLIError.runtime("Core ML stateful prediction failed: \(error)")
-        }
-
-        guard let outputArray = prediction.featureValue(for: contract.outputFeatureName)?.multiArrayValue else {
-            throw CLIError.runtime("Core ML output '\(contract.outputFeatureName)' missing MLMultiArray value")
-        }
-
-        try extractLastHidden(from: outputArray, sequenceLength: 1)
         projectCurrentLogits()
         return stepLogits
     }
@@ -839,28 +596,19 @@ private struct NativeCoreMLReferenceRunner {
         }
     }
 
-    private func zeroArray(
-        _ array: MLMultiArray,
-        dataType: MLMultiArrayDataType,
-        label: String
-    ) throws {
-        switch dataType {
+    private func zeroInputArray() throws {
+        switch inputDataType {
         case .int32:
-            let pointer = array.dataPointer.bindMemory(to: Int32.self, capacity: array.count)
-            for index in 0..<array.count {
+            let pointer = inputArray.dataPointer.bindMemory(to: Int32.self, capacity: inputArray.count)
+            for index in 0..<inputArray.count {
                 pointer[index] = 0
             }
         default:
-            throw CLIError.runtime("Unsupported Core ML \(label) dtype: \(dataType.rawValue)")
+            throw CLIError.runtime("Unsupported Core ML input dtype: \(inputDataType.rawValue)")
         }
     }
 
-    private func writeToken(
-        _ token: TokenID,
-        at position: Int,
-        into array: MLMultiArray,
-        dataType: MLMultiArrayDataType
-    ) throws {
+    private func writeToken(_ token: TokenID, at position: Int) throws {
         guard Int(token) < vocabSize else {
             throw CLIError.runtime("Token \(token) exceeds Core ML vocab size \(vocabSize)")
         }
@@ -868,36 +616,14 @@ private struct NativeCoreMLReferenceRunner {
             throw CLIError.runtime("Position \(position) exceeds Core ML sequence length \(maxSequenceTokens)")
         }
 
-        guard array.shape.count >= 2 else {
-            throw CLIError.runtime("Core ML token input must be rank-2, found shape \(array.shape)")
-        }
-        let sequenceStride = array.strides[1].intValue
+        let sequenceStride = inputArray.strides[1].intValue
 
-        switch dataType {
+        switch inputDataType {
         case .int32:
-            let pointer = array.dataPointer.bindMemory(to: Int32.self, capacity: array.count)
+            let pointer = inputArray.dataPointer.bindMemory(to: Int32.self, capacity: inputArray.count)
             pointer[position * sequenceStride] = Int32(token)
         default:
-            throw CLIError.runtime("Unsupported Core ML token input dtype: \(dataType.rawValue)")
-        }
-    }
-
-    private func writeScalar(
-        _ value: Int32,
-        into array: MLMultiArray,
-        dataType: MLMultiArrayDataType,
-        label: String
-    ) throws {
-        guard array.count == 1 else {
-            throw CLIError.runtime("Core ML \(label) array must contain exactly one value, found \(array.count)")
-        }
-
-        switch dataType {
-        case .int32:
-            let pointer = array.dataPointer.bindMemory(to: Int32.self, capacity: array.count)
-            pointer[0] = value
-        default:
-            throw CLIError.runtime("Unsupported Core ML \(label) dtype: \(dataType.rawValue)")
+            throw CLIError.runtime("Unsupported Core ML input dtype: \(inputDataType.rawValue)")
         }
     }
 }
