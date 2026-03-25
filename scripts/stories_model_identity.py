@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import struct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -30,9 +31,16 @@ DEFAULT_PROMPTS = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from espresso_llama_weights import load_espresso_llama_state_dict, load_espresso_metadata
+
 DEFAULT_NATIVE_TOKENIZER_DIR = (
     Path.home() / "Library/Application Support/Espresso/demo/stories110m"
 )
+DEFAULT_ESPRESSO_WEIGHTS_DIR = DEFAULT_NATIVE_TOKENIZER_DIR
 DEFAULT_NATIVE_CANDIDATES = [
     REPO_ROOT / "assets/models/stories110M.bin",
 ]
@@ -211,6 +219,22 @@ def resolve_native_tokenizer_dir(explicit_path: str | None = None) -> Path:
     )
 
 
+def resolve_espresso_weights_dir(explicit_path: str | None = None) -> Path:
+    candidates = []
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+    candidates.append(DEFAULT_ESPRESSO_WEIGHTS_DIR)
+
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+
+    searched = [str(candidate) for candidate in candidates]
+    raise FileNotFoundError(
+        "Unable to locate Espresso Stories weights directory. Tried: " + ", ".join(searched)
+    )
+
+
 def resolve_hf_snapshot(model_ref: str) -> Path:
     path = Path(model_ref).expanduser()
     if path.exists():
@@ -385,6 +409,64 @@ def compare_native_and_hf(
     }
 
 
+def compare_espresso_weights_and_hf(
+    espresso_metadata,
+    espresso_state_dict: dict[str, object],
+    hf_config,
+    hf_state_dict: dict[str, object],
+) -> dict[str, object]:
+    comparisons = compare_state_dicts(espresso_state_dict, hf_state_dict)
+    exact_tensors = [comparison for comparison in comparisons if comparison.matches_exactly]
+    mismatched_tensors = [comparison for comparison in comparisons if not comparison.matches_exactly]
+    first_mismatch = mismatched_tensors[0] if mismatched_tensors else None
+    metadata_matches = {
+        "dim": espresso_metadata.d_model == getattr(hf_config, "hidden_size"),
+        "hidden_dim": espresso_metadata.hidden_dim == getattr(hf_config, "intermediate_size"),
+        "n_layers": espresso_metadata.n_layer == getattr(hf_config, "num_hidden_layers"),
+        "n_heads": espresso_metadata.n_head == getattr(hf_config, "num_attention_heads"),
+        "n_kv_heads": espresso_metadata.n_kv_head == getattr(hf_config, "num_key_value_heads"),
+        "vocab_size": espresso_metadata.vocab == getattr(hf_config, "vocab_size"),
+        "max_seq": espresso_metadata.max_seq == getattr(hf_config, "max_position_embeddings"),
+        "rope_theta": espresso_metadata.rope_theta == float(getattr(hf_config, "rope_theta", 10_000.0)),
+    }
+    return {
+        "metadata_matches": metadata_matches,
+        "tensor_count": len(comparisons),
+        "exact_tensor_count": len(exact_tensors),
+        "mismatch_tensor_count": len(mismatched_tensors),
+        "all_tensors_exact": len(mismatched_tensors) == 0,
+        "first_mismatch": _comparison_payload(first_mismatch) if first_mismatch else None,
+    }
+
+
+def compare_state_dicts(
+    source_state_dict: dict[str, object],
+    hf_state_dict: dict[str, object],
+) -> list[TensorComparison]:
+    import numpy as np
+
+    comparisons: list[TensorComparison] = []
+    for name, source in source_state_dict.items():
+        hf = hf_state_dict.get(name)
+        if hf is None:
+            raise KeyError(f"HF snapshot missing tensor {name}")
+        source_array = np.asarray(source, dtype=np.float32)
+        hf_array = np.asarray(hf, dtype=np.float32)
+        if source_array.shape != hf_array.shape:
+            raise ValueError(f"shape mismatch for {name}: source {source_array.shape} vs hf {hf_array.shape}")
+        diff = np.abs(source_array - hf_array)
+        comparisons.append(
+            TensorComparison(
+                name=name,
+                matches_exactly=bool(np.array_equal(source_array, hf_array)),
+                max_abs_diff=float(diff.max(initial=0.0)),
+                mean_abs_diff=float(diff.mean() if diff.size else 0.0),
+                shape=list(source_array.shape),
+            )
+        )
+    return comparisons
+
+
 def _comparison_payload(comparison: TensorComparison | None) -> dict[str, object] | None:
     if comparison is None:
         return None
@@ -455,6 +537,10 @@ def parse_args() -> argparse.Namespace:
         help="Path to the Espresso Stories tokenizer directory (defaults to Application Support)",
     )
     parser.add_argument(
+        "--espresso-weights-dir",
+        help="Path to the Espresso Stories runtime weights directory (defaults to Application Support)",
+    )
+    parser.add_argument(
         "--hf-model",
         default=DEFAULT_HF_MODEL,
         help="Hugging Face repo id or local snapshot path for the reference model",
@@ -477,27 +563,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    native_model_path = resolve_native_stories_path(args.native_model)
     native_tokenizer_dir = resolve_native_tokenizer_dir(args.native_tokenizer_dir)
     hf_snapshot_dir = resolve_hf_snapshot(args.hf_model)
     prompts = args.prompts or DEFAULT_PROMPTS
-
-    header, native_weights = load_native_checkpoint(native_model_path)
     hf_config, hf_state_dict = load_hf_snapshot(hf_snapshot_dir)
 
     payload = {
-        "native_model_path": str(native_model_path),
         "native_tokenizer_dir": str(native_tokenizer_dir),
         "hf_snapshot_dir": str(hf_snapshot_dir),
-        "native_header": {
-            "dim": header.dim,
-            "hidden_dim": header.hidden_dim,
-            "n_layers": header.n_layers,
-            "n_heads": header.n_heads,
-            "n_kv_heads": header.n_kv_heads,
-            "vocab_size": header.vocab_size,
-            "seq_len": header.seq_len,
-        },
         "hf_config": {
             "hidden_size": getattr(hf_config, "hidden_size"),
             "intermediate_size": getattr(hf_config, "intermediate_size"),
@@ -508,9 +581,63 @@ def main() -> None:
             "max_position_embeddings": getattr(hf_config, "max_position_embeddings"),
             "rope_theta": float(getattr(hf_config, "rope_theta", 10_000.0)),
         },
-        "weight_identity": compare_native_and_hf(header, native_weights, hf_config, hf_state_dict),
         "tokenizer_identity": compare_tokenizers(native_tokenizer_dir, hf_snapshot_dir, prompts),
     }
+
+    native_model_path: Path | None = None
+    try:
+        native_model_path = resolve_native_stories_path(args.native_model)
+    except FileNotFoundError:
+        native_model_path = None
+
+    if native_model_path is not None:
+        header, native_weights = load_native_checkpoint(native_model_path)
+        payload.update(
+            {
+                "source_format": "native_checkpoint",
+                "native_model_path": str(native_model_path),
+                "native_header": {
+                    "dim": header.dim,
+                    "hidden_dim": header.hidden_dim,
+                    "n_layers": header.n_layers,
+                    "n_heads": header.n_heads,
+                    "n_kv_heads": header.n_kv_heads,
+                    "vocab_size": header.vocab_size,
+                    "seq_len": header.seq_len,
+                },
+                "weight_identity": compare_native_and_hf(header, native_weights, hf_config, hf_state_dict),
+            }
+        )
+    else:
+        espresso_weights_dir = resolve_espresso_weights_dir(args.espresso_weights_dir)
+        espresso_metadata = load_espresso_metadata(espresso_weights_dir)
+        espresso_state_dict = load_espresso_llama_state_dict(espresso_weights_dir, espresso_metadata)
+        payload.update(
+            {
+                "source_format": "espresso_weights_dir",
+                "espresso_weights_dir": str(espresso_weights_dir),
+                "espresso_metadata": {
+                    "name": espresso_metadata.name,
+                    "n_layer": espresso_metadata.n_layer,
+                    "n_head": espresso_metadata.n_head,
+                    "n_kv_head": espresso_metadata.n_kv_head,
+                    "d_model": espresso_metadata.d_model,
+                    "head_dim": espresso_metadata.head_dim,
+                    "hidden_dim": espresso_metadata.hidden_dim,
+                    "vocab": espresso_metadata.vocab,
+                    "max_seq": espresso_metadata.max_seq,
+                    "norm_eps": espresso_metadata.norm_eps,
+                    "rope_theta": espresso_metadata.rope_theta,
+                    "eos_token": espresso_metadata.eos_token,
+                },
+                "weight_identity": compare_espresso_weights_and_hf(
+                    espresso_metadata,
+                    espresso_state_dict,
+                    hf_config,
+                    hf_state_dict,
+                ),
+            }
+        )
 
     print(json.dumps(payload, indent=args.json_indent, sort_keys=True))
 

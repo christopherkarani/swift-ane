@@ -79,8 +79,12 @@ scripts/internal/**
 !scripts/setup_autoresearch_lane.sh
 !scripts/generate-benchmark-dashboard.sh
 !scripts/stories_model_identity.py
+!scripts/espresso_llama_weights.py
+!scripts/export_llama_coreml.py
+!scripts/stories_prompt_suite.txt
 !scripts/tests/
 !scripts/tests/test_stories_model_identity.py
+!scripts/tests/test_espresso_llama_weights.py
 !scripts/README.md
 tasks/
 AGENTS.md

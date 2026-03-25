@@ -1,0 +1,5 @@
+# Fixed Stories/Core ML prompt suite for parity and benchmark checks.
+hello:Hello
+hello_world:Hello, world!\n
+fox:The quick brown fox jumps over the lazy dog near the river
+lab:In a distant future where artificial intelligence has become deeply integrated into every aspect of daily life, researchers at a small university lab made an unexpected discovery

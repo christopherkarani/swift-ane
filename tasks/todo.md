@@ -1,13 +1,13 @@
 # Stories Stateful Core ML Exactness + ANE 2026-03-26
 
 - [ ] Establish native Stories source identity.
-- [ ] Discover the canonical native `stories110M.bin` checkpoint path (`STORIES_MODEL_PATH`, repo asset path, or explicit local path) and stop exporter work if it is unavailable.
+- [x] Discover the canonical native `stories110M.bin` checkpoint path (`STORIES_MODEL_PATH`, repo asset path, or explicit local path) and stop exporter work if it is unavailable.
 - [ ] Add env-gated identity coverage that compares the native Stories checkpoint against the cached HF `Xenova/llama2.c-stories110M` snapshot for tensor equality and tokenizer behavior on the fixed prompt suite.
 - [ ] Decide the exporter source of truth from measured evidence: keep HF input only if identity is proven exact; otherwise make the exporter consume the native Stories checkpoint directly.
 - [ ] Add a fixed Stories prompt suite for Core ML parity and benchmark runs.
 - [ ] Add CPU exactness coverage across Espresso native runtime, source Torch wrapper, and exported Core ML on `cpu_only`.
-- [ ] Restore and harden the stateful Core ML runner contract with explicit stateless/stateful detection plus public `MLState` execution.
-- [ ] Extend compare/report payloads with Core ML stateful/load/compute-plan diagnostics.
+- [x] Restore and harden the stateful Core ML runner contract with explicit stateless/stateful detection plus public `MLState` execution.
+- [x] Extend compare/report payloads with Core ML stateful/load/compute-plan diagnostics.
 - [ ] Investigate exporter/state lowering correctness if CPU parity fails, using first-mismatch token/tensor evidence rather than guesswork.
 - [ ] Require CPU exactness on the full fixed prompt suite before any ANE optimization work.
 - [ ] Probe `cpu_and_neural_engine` compute-plan generation and stateful prediction directly on the exact package.
@@ -17,7 +17,16 @@
 
 ## Review
 
-- Pending.
+- `stories110M.bin` is not present in `STORIES_MODEL_PATH`, repo `assets/models/`, `~/Library/Application Support/Espresso/`, or nearby project roots on this machine.
+- The actual local runtime artifact is `~/Library/Application Support/Espresso/demo/stories110m`, which contains the Stories BLOBFILE weights, metadata, and tokenizer used by Espresso today.
+- Kept runtime work:
+- restored explicit stateless/stateful Core ML contract detection
+- restored stateful `MLState` execution using the public async Core ML API
+- added load/compute-plan diagnostics to compare JSON payloads
+- added focused contract tests in `EspressoGenerateTests`
+- Verification:
+- `swift build`
+- `swift test --filter EspressoGenerateTests`
 
 # Qwen ANE Serving Execution Spec Review 2026-03-20
 
