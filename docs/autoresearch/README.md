@@ -118,6 +118,26 @@ ESPRESSO_FORCE_EXACT_HEAD_BACKEND=cpu_fp16_tiled \
   ./scripts/run_stories_generate_benchmark.sh --prompt "Hello"
 ```
 
+Stories now disables hybrid donor delta by default because the delta-reload lane
+was responsible for all measured compile retries on this model. Force the old
+behavior only when you want to compare it explicitly:
+
+```bash
+ESPRESSO_ENABLE_HYBRID_DONOR_DELTA=1 \
+  ./scripts/run_stories_generate_benchmark.sh --prompt "Hello"
+```
+
+For approximate long-context throughput experiments, cap hybrid decode attention
+to a suffix window while keeping the full KV cache intact:
+
+```bash
+ESPRESSO_HYBRID_ATTENTION_WINDOW=32 \
+  ./scripts/run_stories_generate_benchmark.sh --prompt "long prompt here" --max-tokens 32
+```
+
+This mode remains opt-in. It preserves exact output only while the live context
+fits inside the configured window.
+
 ## Scaffold A Lane
 
 From the repo root or any Espresso worktree:

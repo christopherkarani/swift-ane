@@ -989,11 +989,25 @@ Both 0.6B and 1.7B pass all correctness checks with the narrowed `.automatic` po
 - Stories exact decode now supports `cpu_fp16_tiled` directly from `lm_head.bin` when no exact float32 sidecar exists, while keeping `cpu_partitioned_fp32` as the exact fallback.
 - LLaMA greedy exact paths now use the compiled final RMSNorm head before CPU argmax, removing the old CPU-side final norm from that lane.
 - Added `scripts/run_stories_generate_benchmark.sh` for the fast Stories warm loop and `scripts/run_autoresearch_experiment.sh` for disposable-worktree keep-or-revert execution.
-- Measured on March 25, 2026 with prompt `Hello`, `max_tokens=16`, `warmup=1`, `iterations=2`:
-- default Stories exact path: `83.27 tok/s`, `exact_head_backend=cpu_fp16_tiled`, `cached_bindings_enabled=false`
-- cached bindings opt-in: `80.96 tok/s`, same generated tokens/text, so cached bindings remain opt-in
-- forced `cpu_partitioned_fp32`: `75.91 tok/s`, same generated tokens/text, so `cpu_fp16_tiled` stays the better Stories exact default on this sample
-- compile instability is now explicit in the benchmark contract on this hardware shape: `compile_retry_count=60`, `compile_failure_count=75`
+- Measured on March 25-26, 2026:
+- Kept:
+- `d1f2b3b` added the cached-binding Metal RoPE fast path and turned the cached-binding lane from a loss (`52.38 tok/s`) into a competitive path (`74.20 tok/s`) on the `Hello` Stories prompt while preserving exact output.
+- `e061f8a` enabled cached bindings by default for `stories110m`.
+- `a19c969` added labeled ANE compile telemetry and showed that the entire retry budget came from `hybrid.decodeQKVOnly.delta`, `hybrid.decodeProjectionFFN.delta`, and `hybrid.decodeFFN.delta`.
+- `9b8333d` disabled Stories hybrid donor delta by default. On `Hello`, the Stories default moved from `67.89` to `71.80 tok/s`, compile time dropped from `29.88s` to `2.51s`, and compile retries/failures fell from `60/75` to `0/0`. On `The quick brown fox jumps over the lazy dog near the river`, throughput improved from `59.73`/`70.14` baseline samples to `69.38` with exact token/text match and `0/0` compile retries/failures.
+- `4b912ff` added `ESPRESSO_HYBRID_ATTENTION_WINDOW` as an opt-in approximate suffix-attention mode. It stays exact when the live context never exceeds the window and improved a long-context Stories run from `59.03` to `67.62 tok/s` with `ESPRESSO_HYBRID_ATTENTION_WINDOW=32`.
+- Reverted:
+- `73db8d2` reverted persistent cached Metal bindings after they failed the keep gate.
+- `a1d3c2c` reverted fused post-attention compile-failure caching after it did not improve compile retries or throughput.
+- `fbdd3aa` reverted skipping CPU KV scatter in the Metal RoPE path after it won on `Hello` but regressed the medium prompt (`59.73 tok/s` vs `66.31 tok/s` with the old path forced on).
+- Re-measured rejected runtime knobs under the new donor-delta baseline:
+- `ESPRESSO_DISABLE_HYBRID_FUSED_POST_ATTENTION=1` regressed Stories `Hello` throughput to `57.83 tok/s`, so fused post-attention stays on.
+- `ESPRESSO_ENABLE_LLAMA_HYBRID_LAYER_INPUT_REBIND=1` improved `Hello` to `76.92 tok/s` but lost on the medium prompt (`68.32` vs `70.14 tok/s` baseline), so it remains opt-in rather than the Stories default.
 - Verification passed:
 - `swift build`
 - `swift test --filter 'ClassifierStrategyTests|HybridLlamaDecodeStepTests|RealModelInferenceTests/test_loadRawFP16WeightTableIfNoExactFloat32SidecarReadsBlobPayload|RealModelInferenceTests/test_loadRawFP16WeightTableIfNoExactFloat32SidecarDefersToExactSidecar|EspressoGenerateTests/test_makePromptSuiteSummaryAggregatesPerPromptVerdicts|EspressoGenerateTests/test_aggregateBenchmarkRunsUsesWarmupAndAggregatesMeasuredLatencySamples|EspressoGenerateTests/test_optionsParseGenerateBenchmarkFlags'`
+- `swift test --filter ANECompileStatsSnapshotTests`
+- `swift test --filter DecodeStateTests`
+- `swift test --filter hybridDonorDeltaDefaultsOffForStoriesButAllowsOverrides`
+- `swift test --filter HybridDecodeForwardPassTests`
+- `swift test --filter MetalAttentionKernelTests`

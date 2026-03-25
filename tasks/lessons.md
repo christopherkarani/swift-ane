@@ -41,3 +41,6 @@
 
 ## 2026-03-25
 - When a throughput idea does not clear the measured keep gate, revert it to an explicit experiment flag and preserve the measurement harness instead of shipping the faster-on-paper default.
+
+## 2026-03-26
+- When a baseline shifts materially, rerun previously rejected runtime knobs under the new baseline before treating the old verdict as permanent; donor-delta removal changed the sign of some Stories experiments even though the code in those knobs did not change.
