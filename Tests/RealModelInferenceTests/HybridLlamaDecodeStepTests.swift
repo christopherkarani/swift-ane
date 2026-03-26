@@ -225,7 +225,7 @@ import ModelSupport
     )
 }
 
-@Test func test_hybridDonorDeltaDefaultsOffForStoriesButAllowsOverrides() {
+@Test func test_hybridDonorDeltaDefaultsOnForStoriesAndAllowsDisableOverride() {
     let gpt2Config = ModelRegistry.gpt2_124m
     let storiesConfig = ModelRegistry.stories110m
     let otherLlamaConfig = ModelRegistry.tinyLlama_1_1b
@@ -245,13 +245,13 @@ import ModelSupport
         RealModelInferenceEngine.supportsHybridDonorDelta(
             config: storiesConfig,
             environment: [:]
-        ) == false
+        ) == true
     )
     #expect(
         RealModelInferenceEngine.supportsHybridDonorDelta(
             config: storiesConfig,
-            environment: ["ESPRESSO_ENABLE_HYBRID_DONOR_DELTA": "1"]
-        ) == true
+            environment: ["ESPRESSO_DISABLE_HYBRID_DONOR_DELTA": "1"]
+        ) == false
     )
     #expect(
         RealModelInferenceEngine.supportsHybridDonorDelta(

@@ -151,9 +151,6 @@ public struct RealModelInferenceEngine: ~Copyable {
         if environment["ESPRESSO_ENABLE_HYBRID_DONOR_DELTA"] == "1" {
             return true
         }
-        if config.architecture == .llama, config.name == "stories110m" {
-            return false
-        }
         return true
     }
 
