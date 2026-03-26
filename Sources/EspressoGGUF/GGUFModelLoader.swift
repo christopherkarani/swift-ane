@@ -129,6 +129,12 @@ public enum GGUFModelLoader {
         public let config: MultiModelConfig
         public let weightDir: String
         public let tensorCount: Int
+
+        public init(config: MultiModelConfig, weightDir: String, tensorCount: Int) {
+            self.config = config
+            self.weightDir = weightDir
+            self.tensorCount = tensorCount
+        }
     }
 
     private struct PreparedArtifactManifest: Codable {

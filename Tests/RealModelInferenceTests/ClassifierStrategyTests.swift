@@ -38,6 +38,27 @@ import Espresso
     #expect(ClassifierStrategy.select(for: config) == .cpuFP16Tiled)
 }
 
+@Test func stories110mUsesANEAllowlist() {
+    #expect(ClassifierStrategy.select(for: ModelRegistry.stories110m) == .ane)
+}
+
+@Test func storiesBundleStyleNameUsesANEAllowlist() {
+    let config = MultiModelConfig(
+        name: "llama2.c-stories110M",
+        nLayer: 12,
+        nHead: 12,
+        nKVHead: 12,
+        dModel: 768,
+        headDim: 64,
+        hiddenDim: 2_048,
+        vocab: 32_000,
+        maxSeq: 256,
+        normEps: 1e-5,
+        architecture: .llama
+    )
+    #expect(ClassifierStrategy.select(for: config) == .ane)
+}
+
 @Test func llamaLargeVocabWithExactSidecarSelectsPartitionedCPU() {
     let config = MultiModelConfig(
         name: "tinyllama-test",

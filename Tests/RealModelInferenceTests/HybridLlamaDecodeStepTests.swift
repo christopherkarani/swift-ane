@@ -164,6 +164,19 @@ import ModelSupport
 @Test func test_hybridCachedBindingsCanBeDisabledByEnvironment() {
     let gpt2Config = ModelRegistry.gpt2_124m
     let storiesConfig = ModelRegistry.stories110m
+    let storiesBundleConfig = MultiModelConfig(
+        name: "llama2.c-stories110M",
+        nLayer: 12,
+        nHead: 12,
+        nKVHead: 12,
+        dModel: 768,
+        headDim: 64,
+        hiddenDim: 2_048,
+        vocab: 32_000,
+        maxSeq: 256,
+        normEps: 1e-5,
+        architecture: .llama
+    )
     let otherLlamaConfig = ModelRegistry.tinyLlama_1_1b
     #expect(
         RealModelInferenceEngine.supportsHybridCachedBindings(
@@ -174,6 +187,12 @@ import ModelSupport
     #expect(
         RealModelInferenceEngine.supportsHybridCachedBindings(
             config: storiesConfig,
+            environment: [:]
+        ) == true
+    )
+    #expect(
+        RealModelInferenceEngine.supportsHybridCachedBindings(
+            config: storiesBundleConfig,
             environment: [:]
         ) == true
     )

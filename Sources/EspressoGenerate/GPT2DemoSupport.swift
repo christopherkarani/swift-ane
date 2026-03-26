@@ -917,7 +917,13 @@ func detectDemoDefaults() -> DemoDefaults {
 }
 
 func shouldUseDefaultGPT2Demo(_ options: Options) -> Bool {
-    if options.prepareDemo || options.command == .demo {
+    if options.prepareDemo {
+        return true
+    }
+    guard options.bundlePath == nil else {
+        return false
+    }
+    if options.command == .demo {
         return true
     }
     guard options.weightsDir == nil else {

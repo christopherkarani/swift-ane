@@ -2,6 +2,8 @@ import Foundation
 import Darwin
 import ANERuntime
 import ANETypes
+import ESPBenchSupport
+import ESPRuntime
 import ModelSupport
 import RealModelInference
 
@@ -23,6 +25,7 @@ enum PowerMode: Equatable {
 struct Options {
     var command: CommandName?
     var modelName: String? = ProcessInfo.processInfo.environment["ESPRESSO_MODEL"]
+    var bundlePath: String? = ProcessInfo.processInfo.environment["ESPRESSO_BUNDLE_PATH"]
     var weightsDir: String? = ProcessInfo.processInfo.environment["ESPRESSO_WEIGHTS_DIR"]
     var tokenizerDir: String? = ProcessInfo.processInfo.environment["ESPRESSO_TOKENIZER_DIR"]
     var coreMLModelPath: String? = ProcessInfo.processInfo.environment["ESPRESSO_COREML_MODEL"]
@@ -73,6 +76,8 @@ struct Options {
             switch flag {
             case "-m", "--model":
                 options.modelName = try value(for: flag, inlineValue: inlineValue, argv: argv, index: &index)
+            case "-b", "--bundle":
+                options.bundlePath = try value(for: flag, inlineValue: inlineValue, argv: argv, index: &index)
             case "-w", "--weights":
                 options.weightsDir = try value(for: flag, inlineValue: inlineValue, argv: argv, index: &index)
             case "-t", "--tokenizer":
@@ -319,6 +324,7 @@ struct MetadataConfigFile: Decodable {
 
 struct ResolvedInvocation {
     let config: MultiModelConfig
+    let bundlePath: String?
     let weightsDir: String
     let tokenizerDir: String
     let prompt: String
@@ -337,6 +343,7 @@ struct ResolvedInvocation {
 
     init(
         config: MultiModelConfig,
+        bundlePath: String?,
         weightsDir: String,
         tokenizerDir: String,
         prompt: String,
@@ -354,6 +361,7 @@ struct ResolvedInvocation {
         outputDir: String?
     ) {
         self.config = config
+        self.bundlePath = bundlePath
         self.weightsDir = weightsDir
         self.tokenizerDir = tokenizerDir
         self.prompt = prompt
@@ -381,6 +389,7 @@ extension ResolvedInvocation {
     ) -> ResolvedInvocation {
         ResolvedInvocation(
             config: config,
+            bundlePath: bundlePath,
             weightsDir: weightsDir,
             tokenizerDir: tokenizerDir,
             prompt: prompt ?? self.prompt,
@@ -590,6 +599,7 @@ private func printUsage() {
 
     Common options:
       -m, --model NAME         ModelRegistry key or alias
+      -b, --bundle PATH        `.esp` bundle directory (preferred runtime input)
       -w, --weights DIR        Weights directory
       -t, --tokenizer DIR      Tokenizer directory or tokenizer asset path
           --coreml-model PATH  Override the exported Core ML baseline (required for non-GPT2 models)
@@ -627,6 +637,7 @@ private func printUsage() {
       ESPRESSO_REPO_ROOT            Override repository root detection
       ESPRESSO_SCRIPTS_DIR          Override the helper scripts directory
       ESPRESSO_MODEL
+      ESPRESSO_BUNDLE_PATH
       ESPRESSO_WEIGHTS_DIR
       ESPRESSO_TOKENIZER_DIR
       ESPRESSO_COREML_MODEL
@@ -962,7 +973,36 @@ private func shouldUseTUI(command: CommandName, options: Options) -> Bool {
     }
 }
 
-private func resolveInvocation(from options: Options, demoDefaults: DemoDefaults, command: CommandName) throws -> ResolvedInvocation {
+func resolveInvocation(from options: Options, demoDefaults: DemoDefaults, command: CommandName) throws -> ResolvedInvocation {
+    if let bundleArgument = options.bundlePath, !bundleArgument.isEmpty {
+        if options.weightsDir != nil || options.tokenizerDir != nil {
+            throw CLIError.usage("Pass either --bundle or --weights/--tokenizer, not both.")
+        }
+
+        let bundlePath = try ensureDirectoryExists(bundleArgument, label: "Bundle")
+        let bundle = try ESPRuntimeBundle.open(at: URL(fileURLWithPath: bundlePath, isDirectory: true))
+        let prompt = (command == .doctor || command == .suite) ? "" : try resolvePrompt(options, command: command)
+        return ResolvedInvocation(
+            config: bundle.config,
+            bundlePath: bundlePath,
+            weightsDir: bundle.archive.weightsURL.path,
+            tokenizerDir: bundle.archive.tokenizerURL.path,
+            prompt: prompt,
+            maxTokens: options.maxTokens,
+            temperature: options.temperature,
+            showStats: options.showStats,
+            coreMLModelPath: options.coreMLModelPath,
+            coreMLSequenceLength: options.coreMLSequenceLength,
+            compareWarmup: options.compareWarmup,
+            compareIterations: options.compareIterations,
+            benchmarkGenerate: options.benchmarkGenerate,
+            coreMLComputeUnits: options.coreMLComputeUnits,
+            allowBootstrap: options.allowBootstrap,
+            seed: options.seed,
+            outputDir: options.outputDir
+        )
+    }
+
     var modelName = options.modelName
     var weightsArgument = options.weightsDir
     var tokenizerArgument = options.tokenizerDir
@@ -989,6 +1029,7 @@ private func resolveInvocation(from options: Options, demoDefaults: DemoDefaults
     let prompt = (command == .doctor || command == .suite) ? "" : try resolvePrompt(options, command: command)
     return ResolvedInvocation(
         config: config,
+        bundlePath: nil,
         weightsDir: weightsDir,
         tokenizerDir: tokenizerDir,
         prompt: prompt,
@@ -1012,6 +1053,43 @@ private func printPreparedDemoSummary(_ defaults: DemoDefaults) {
     stderrLine("weights=\(defaults.weightsDir.path)")
     stderrLine("tokenizer=\(defaults.tokenizerDir.path)")
     stderrLine("next=./espresso")
+}
+
+private func makeBundleRuntimeMetrics(bundle: ESPRuntimeBundle, invocation: ResolvedInvocation) throws -> BackendRunMetrics {
+    let selection = try ESPRuntimeRunner.resolve(bundle: bundle)
+    let compileStatsBefore = ANECompileStats.snapshot()
+    let started = DispatchTime.now().uptimeNanoseconds
+    let result = try ESPRuntimeRunner.generate(
+        bundle: bundle,
+        prompt: invocation.prompt,
+        maxTokens: invocation.maxTokens,
+        temperature: invocation.temperature
+    )
+    let totalTimeMs = millisecondsSince(started)
+    let compileStatsAfter = ANECompileStats.snapshot()
+    let compileStatsDelta = compileStatsAfter.subtracting(compileStatsBefore)
+    let tokenLatenciesMs = syntheticTokenLatencies(
+        tokensPerSecond: result.tokensPerSecond,
+        tokenCount: result.tokens.count
+    )
+    return BackendRunMetrics(
+        backend: selection.backend.rawValue,
+        text: result.text,
+        generatedTokens: result.tokens,
+        promptTokens: result.promptTokens,
+        compileTimeMs: result.compileTimeMs,
+        firstTokenLatencyMs: result.firstTokenLatencyMs,
+        tokensPerSecond: result.tokensPerSecond,
+        medianTokenMs: percentile(tokenLatenciesMs, percentile: 0.5),
+        p95TokenMs: percentile(tokenLatenciesMs, percentile: 0.95),
+        totalTimeMs: totalTimeMs,
+        tokenLatenciesMs: tokenLatenciesMs,
+        compileRetryCount: compileStatsDelta.retryCount,
+        compileFailureCount: compileStatsDelta.failureCount,
+        compileBreakdown: compileStatsDelta.labelStats.isEmpty ? nil : compileStatsDelta.labelStats,
+        exactHeadBackend: result.exactHeadBackend,
+        cachedBindingsEnabled: result.cachedBindingsEnabled
+    )
 }
 
 private func percentile(_ latencies: [Double], percentile: Double) -> Double {
@@ -1152,6 +1230,12 @@ func aggregateBenchmarkRuns(
 }
 
 private func runEspressoBenchmark(invocation: ResolvedInvocation) throws -> BackendRunMetrics {
+    if let bundlePath = invocation.bundlePath {
+        let bundle = try ESPRuntimeBundle.open(at: URL(fileURLWithPath: bundlePath, isDirectory: true))
+        return try aggregateBenchmarkRuns(warmup: invocation.compareWarmup, iterations: invocation.compareIterations) {
+            try makeBundleRuntimeMetrics(bundle: bundle, invocation: invocation)
+        }
+    }
     var engine = try makeEspressoEngine(invocation: invocation)
     return try aggregateBenchmarkRuns(warmup: invocation.compareWarmup, iterations: invocation.compareIterations) {
         try runEspressoGeneration(engine: &engine, invocation: invocation)
@@ -1317,6 +1401,9 @@ private func printGenerateStats(_ invocation: ResolvedInvocation, result: Backen
     if let compileBreakdown = result.compileBreakdown, !compileBreakdown.isEmpty {
         stderrLine("compile_breakdown=\(formatCompileBreakdown(compileBreakdown))")
     }
+    if let bundlePath = invocation.bundlePath {
+        stderrLine("bundle=\(bundlePath)")
+    }
     stderrLine("weights=\(invocation.weightsDir)")
     stderrLine("tokenizer=\(invocation.tokenizerDir)")
 }
@@ -1414,6 +1501,10 @@ private func writeCompareArtifacts(report: CompareReport, defaults: DemoDefaults
     let markdownURL = outputDir.appendingPathComponent("summary.md")
     let espressoLatenciesURL = outputDir.appendingPathComponent("espresso_token_latencies.csv")
     let coreMLLatenciesURL = outputDir.appendingPathComponent("coreml_token_latencies.csv")
+    let espressoFingerprintURL = outputDir.appendingPathComponent("espresso-benchmark-fingerprint.json")
+    let coreMLFingerprintURL = outputDir.appendingPathComponent("coreml-benchmark-fingerprint.json")
+    let espressoFingerprint = benchmarkFingerprint(for: report.espresso)
+    let coreMLFingerprint = benchmarkFingerprint(for: report.coreML)
 
     let payload: [String: Any] = [
         "model": report.model,
@@ -1426,6 +1517,10 @@ private func writeCompareArtifacts(report: CompareReport, defaults: DemoDefaults
         "coreml_sequence_length": report.coreMLSequenceLength,
         "espresso": backendPayload(report.espresso),
         "coreml": backendPayload(report.coreML),
+        "benchmark_fingerprints": [
+            "espresso": benchmarkFingerprintPayload(espressoFingerprint),
+            "coreml": benchmarkFingerprintPayload(coreMLFingerprint),
+        ],
         "power": [
             "espresso": powerPayload(report.espressoPower),
             "coreml": powerPayload(report.coreMLPower),
@@ -1460,11 +1555,52 @@ private func writeCompareArtifacts(report: CompareReport, defaults: DemoDefaults
 
     try writeLatencyCSV(latencies: report.espresso.tokenLatenciesMs, to: espressoLatenciesURL)
     try writeLatencyCSV(latencies: report.coreML.tokenLatenciesMs, to: coreMLLatenciesURL)
+    try writeBenchmarkFingerprint(espressoFingerprint, to: espressoFingerprintURL)
+    try writeBenchmarkFingerprint(coreMLFingerprint, to: coreMLFingerprintURL)
+    return outputDir.path
+}
+
+private func writeGenerateArtifacts(
+    invocation: ResolvedInvocation,
+    result: BackendRunMetrics,
+    defaults: DemoDefaults,
+    requestedOutputDir: String?
+) throws -> String? {
+    let requestedOutputDir = requestedOutputDir?.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let requestedOutputDir, !requestedOutputDir.isEmpty else {
+        return nil
+    }
+
+    let outputDir = URL(
+        fileURLWithPath: NSString(string: requestedOutputDir).expandingTildeInPath,
+        isDirectory: true
+    ).standardizedFileURL
+    try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+
+    let fingerprint = benchmarkFingerprint(for: result)
+    let payload: [String: Any] = [
+        "model": invocation.config.name,
+        "bundle": invocation.bundlePath ?? NSNull(),
+        "backend": backendPayload(result),
+        "benchmark_fingerprint": benchmarkFingerprintPayload(fingerprint),
+        "reports_root": defaults.reportsRoot.path,
+    ]
+    let jsonData = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+    try jsonData.write(to: outputDir.appendingPathComponent("generate.json"))
+    try writeLatencyCSV(
+        latencies: result.tokenLatenciesMs,
+        to: outputDir.appendingPathComponent("espresso_token_latencies.csv")
+    )
+    try writeBenchmarkFingerprint(
+        fingerprint,
+        to: outputDir.appendingPathComponent("benchmark-fingerprint.json")
+    )
     return outputDir.path
 }
 
 private func backendPayload(_ backend: BackendRunMetrics) -> [String: Any] {
-    [
+    let fingerprint = benchmarkFingerprint(for: backend)
+    return [
         "compile_time_ms": backend.compileTimeMs,
         "compile_retry_count": backend.compileRetryCount,
         "compile_failure_count": backend.compileFailureCount,
@@ -1476,6 +1612,7 @@ private func backendPayload(_ backend: BackendRunMetrics) -> [String: Any] {
         "generated_tokens": backend.generatedTokens.map(Int.init),
         "token_latencies_ms": backend.tokenLatenciesMs,
         "text": backend.text,
+        "benchmark_fingerprint": benchmarkFingerprintPayload(fingerprint),
         "compile_breakdown": backend.compileBreakdown?.mapValues { stats in
             [
                 "attempt_count": stats.attemptCount,
@@ -1487,6 +1624,13 @@ private func backendPayload(_ backend: BackendRunMetrics) -> [String: Any] {
         "exact_head_backend": backend.exactHeadBackend ?? NSNull(),
         "cached_bindings_enabled": backend.cachedBindingsEnabled ?? NSNull(),
     ]
+}
+
+private func writeBenchmarkFingerprint(_ fingerprint: ESPBenchmarkFingerprint, to url: URL) throws {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    let payload = benchmarkFingerprintPayload(fingerprint)
+    try encoder.encode(payload).write(to: url)
 }
 
 private func powerPayload(_ power: PowerSummary?) -> [String: Any] {
@@ -1925,9 +2069,60 @@ private func metricsOrZero(_ value: Double, fallback: Double) -> Double {
     value > 0 ? value : fallback
 }
 
+private func currentResidentMemoryBytes() -> UInt64 {
+    var info = mach_task_basic_info()
+    var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info_data_t>.size / MemoryLayout<natural_t>.size)
+    let status: kern_return_t = withUnsafeMutablePointer(to: &info) { pointer in
+        pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+            task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), rebound, &count)
+        }
+    }
+    guard status == KERN_SUCCESS else {
+        return 0
+    }
+    return UInt64(info.resident_size)
+}
+
+private func compileCacheHitRate(for backend: BackendRunMetrics) -> Double {
+    backend.compileTimeMs > 0 ? 0.0 : 1.0
+}
+
+func benchmarkFingerprint(for backend: BackendRunMetrics) -> ESPBenchmarkFingerprint {
+    ESPBenchmarkFingerprint(metrics: [
+        .ttftMilliseconds: backend.firstTokenLatencyMs,
+        .tokensPerSecond: backend.tokensPerSecond,
+        .coldLoadMilliseconds: backend.compileTimeMs + backend.firstTokenLatencyMs,
+        .warmLoadMilliseconds: backend.firstTokenLatencyMs,
+        .compileCacheHitRate: compileCacheHitRate(for: backend),
+        .peakResidentMemoryBytes: Double(currentResidentMemoryBytes()),
+    ])
+}
+
+private func benchmarkFingerprintPayload(_ fingerprint: ESPBenchmarkFingerprint) -> [String: Double] {
+    var payload: [String: Double] = [:]
+    for metric in ESPBenchmarkMetric.allCases {
+        if let value = fingerprint.metrics[metric] {
+            payload[metric.rawValue] = value
+        }
+    }
+    return payload
+}
+
+private func syntheticTokenLatencies(tokensPerSecond: Double, tokenCount: Int) -> [Double] {
+    guard tokenCount > 0, tokensPerSecond > 0 else {
+        return []
+    }
+    let tokenLatencyMs = 1000.0 / tokensPerSecond
+    return Array(repeating: tokenLatencyMs, count: tokenCount)
+}
+
 private func runGenerate(invocation: ResolvedInvocation) throws -> BackendRunMetrics {
     if invocation.benchmarkGenerate {
         return try runEspressoBenchmark(invocation: invocation)
+    }
+    if let bundlePath = invocation.bundlePath {
+        let bundle = try ESPRuntimeBundle.open(at: URL(fileURLWithPath: bundlePath, isDirectory: true))
+        return try makeBundleRuntimeMetrics(bundle: bundle, invocation: invocation)
     }
     var engine = try makeEspressoEngine(invocation: invocation)
     return try runEspressoGeneration(engine: &engine, invocation: invocation)
@@ -2099,14 +2294,14 @@ private func runPromptSuiteCompare(
     invocation: ResolvedInvocation,
     tokenizer: CLITokenizer,
     promptTokens: [TokenID],
-    engine: inout RealModelInferenceEngine,
+    espressoRun: () throws -> BackendRunMetrics,
     coreMLRunner: inout ReusableCoreMLBenchmarkRunner,
     sequenceLength: Int,
     powerEnabled: Bool
 ) throws -> CompareReport {
     let espressoMeasured = try maybeMeasurePower(enabled: powerEnabled) {
         try aggregateBenchmarkRuns(warmup: invocation.compareWarmup, iterations: invocation.compareIterations) {
-            try runEspressoGeneration(engine: &engine, invocation: invocation)
+            try espressoRun()
         }
     }
     let coreMLMeasured = try maybeMeasurePower(enabled: powerEnabled) {
@@ -2186,7 +2381,20 @@ private func runPromptSuite(
     try encoder.encode(metadata).write(to: outputRoot.appendingPathComponent("metadata.json"))
 
     let resultsTSVURL = try prepareResultsTSV(at: options.resultsTSV)
-    var engine = try makeEspressoEngine(invocation: invocation)
+    let bundle = try invocation.bundlePath.map {
+        try ESPRuntimeBundle.open(at: URL(fileURLWithPath: $0, isDirectory: true))
+    }
+    let espressoRun: (ResolvedInvocation) throws -> BackendRunMetrics
+    if let bundle {
+        espressoRun = { promptInvocation in
+            try makeBundleRuntimeMetrics(bundle: bundle, invocation: promptInvocation)
+        }
+    } else {
+        var engine = try makeEspressoEngine(invocation: invocation)
+        espressoRun = { promptInvocation in
+            try runEspressoGeneration(engine: &engine, invocation: promptInvocation)
+        }
+    }
     var coreMLRunner = try ReusableCoreMLBenchmarkRunner(
         modelPath: coreMLModelPath,
         weightsDir: invocation.weightsDir,
@@ -2201,7 +2409,7 @@ private func runPromptSuite(
             invocation: coldInvocation,
             tokenizer: tokenizer,
             promptTokens: coldTokens,
-            engine: &engine,
+            espressoRun: { try espressoRun(coldInvocation) },
             coreMLRunner: &coreMLRunner,
             sequenceLength: sequenceLength,
             powerEnabled: powerEnabled
@@ -2225,7 +2433,7 @@ private func runPromptSuite(
                 invocation: promptInvocation,
                 tokenizer: tokenizer,
                 promptTokens: promptTokens,
-                engine: &engine,
+                espressoRun: { try espressoRun(promptInvocation) },
                 coreMLRunner: &coreMLRunner,
                 sequenceLength: sequenceLength,
                 powerEnabled: powerEnabled
@@ -2314,21 +2522,39 @@ enum EspressoGenerateCLI {
             switch command {
             case .generate:
                 let result = try runGenerate(invocation: invocation)
+                let artifactDirectory = try writeGenerateArtifacts(
+                    invocation: invocation,
+                    result: result,
+                    defaults: defaults,
+                    requestedOutputDir: invocation.outputDir
+                )
                 if options.jsonOutput {
-                    let payload = try JSONSerialization.data(withJSONObject: [
+                    var payloadObject: [String: Any] = [
                         "model": invocation.config.name,
                         "backend": backendPayload(result),
-                    ], options: [.prettyPrinted, .sortedKeys])
+                    ]
+                    if let artifactDirectory {
+                        payloadObject["report_dir"] = artifactDirectory
+                    }
+                    let payload = try JSONSerialization.data(
+                        withJSONObject: payloadObject,
+                        options: [.prettyPrinted, .sortedKeys]
+                    )
                     print(String(decoding: payload, as: UTF8.self))
                 } else {
                     print(result.text)
                     if invocation.showStats {
                         printGenerateStats(invocation, result: result)
                     }
+                    if let artifactDirectory {
+                        stderrLine("report_dir=\(artifactDirectory)")
+                    }
                 }
                 return 0
             case .demo, .compare:
-                let useTUI = invocation.config.architecture == .gpt2 && shouldUseTUI(command: command, options: options)
+                let useTUI = invocation.bundlePath == nil
+                    && invocation.config.architecture == .gpt2
+                    && shouldUseTUI(command: command, options: options)
                 let report = if useTUI {
                     try runLiveCompare(invocation: invocation, defaults: defaults, powerEnabled: powerEnabled)
                 } else {

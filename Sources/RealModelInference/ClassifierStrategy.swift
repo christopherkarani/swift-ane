@@ -48,6 +48,16 @@ public enum ClassifierStrategy: Sendable, Equatable {
         for config: MultiModelConfig,
         hasExactFloat32LMHead: Bool = false
     ) -> ClassifierStrategy {
+        // Stories 110M benefits from the ANE classifier path even though the
+        // raw vocab*dModel product exceeds the conservative global SRAM cutoff.
+        // Keep this as an explicit allowlist entry until a broader policy is proven.
+        let normalizedName = config.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if config.architecture == .llama,
+           (normalizedName == "stories110m" || normalizedName.contains("stories110m")) {
+            return .ane
+        }
         let elements = config.vocab * config.dModel
         if elements <= aneSRAMElementLimit {
             return .ane

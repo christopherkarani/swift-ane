@@ -1,6 +1,8 @@
 import Foundation
 import Testing
 import ANETypes
+import ESPBenchSupport
+import ESPBundle
 import ModelSupport
 @testable import EspressoGenerate
 
@@ -107,6 +109,41 @@ import ModelSupport
     #expect(options.positionalPrompt == ["Hello"])
 }
 
+@Test func test_optionsParseBundleFlag() throws {
+    let options = try Options.parse([
+        "espresso-generate",
+        "generate",
+        "--bundle", "/tmp/model.esp",
+        "--prompt", "Hello",
+    ])
+
+    #expect(options.bundlePath == "/tmp/model.esp")
+    #expect(options.prompt == "Hello")
+}
+
+@Test func test_benchmarkFingerprintIncludesRequiredMetrics() {
+    let metrics = BackendRunMetrics(
+        backend: "ane-private",
+        text: "Hello,",
+        generatedTokens: [11],
+        promptTokens: [1, 2, 3],
+        compileTimeMs: 250,
+        firstTokenLatencyMs: 12,
+        tokensPerSecond: 80,
+        medianTokenMs: 12,
+        p95TokenMs: 12,
+        totalTimeMs: 320,
+        tokenLatenciesMs: [12],
+        compileRetryCount: 0,
+        compileFailureCount: 0
+    )
+
+    let fingerprint = benchmarkFingerprint(for: metrics)
+    #expect(fingerprint.missingRequiredMetrics().isEmpty)
+    #expect(fingerprint.metrics[.ttftMilliseconds] == 12)
+    #expect(fingerprint.metrics[.tokensPerSecond] == 80)
+}
+
 @Test func test_metadataConfigFilePreservesOptionalRopeThetaAndEOSToken() throws {
     let metadata = MetadataConfigFile(
         name: "qwen3",
@@ -155,6 +192,7 @@ import ModelSupport
     )
     let invocation = ResolvedInvocation(
         config: try #require(ModelRegistry.config(named: "llama3_2_1b")),
+        bundlePath: nil,
         weightsDir: weightsDir.path,
         tokenizerDir: tokenizerDir.path,
         prompt: "",
@@ -215,6 +253,7 @@ import ModelSupport
     )
     let invocation = ResolvedInvocation(
         config: try #require(ModelRegistry.config(named: "llama3_2_1b")),
+        bundlePath: nil,
         weightsDir: weightsDir.path,
         tokenizerDir: tokenizerDir.path,
         prompt: "",
@@ -267,6 +306,7 @@ import ModelSupport
     )
     let invocation = ResolvedInvocation(
         config: try #require(ModelRegistry.config(named: "gpt2_124m")),
+        bundlePath: nil,
         weightsDir: weightsDir.path,
         tokenizerDir: tokenizerDir.path,
         prompt: "",
@@ -296,6 +336,12 @@ import ModelSupport
     var explicit = Options()
     explicit.weightsDir = "/tmp/weights"
     #expect(!shouldUseDefaultGPT2Demo(explicit))
+}
+
+@Test func test_shouldUseDefaultGPT2DemoIsDisabledForBundleInput() {
+    var options = Options()
+    options.bundlePath = "/tmp/model.esp"
+    #expect(!shouldUseDefaultGPT2Demo(options))
 }
 
 @Test func test_demoDefaultsTreatReferenceRunnerAsOptional() throws {
@@ -337,6 +383,113 @@ import ModelSupport
     var explicit = Options()
     explicit.weightsDir = "/tmp/weights"
     #expect(implicitPrompt(command: .demo, options: explicit) == nil)
+}
+
+@Test func test_resolveInvocationUsesBundlePathsWhenBundleProvided() throws {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let weightsDir = root.appendingPathComponent("weights-src", isDirectory: true)
+    let tokenizerDir = root.appendingPathComponent("tokenizer-src", isDirectory: true)
+    let bundleURL = root.appendingPathComponent("stories.esp", isDirectory: true)
+    try fileManager.createDirectory(at: weightsDir, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: tokenizerDir, withIntermediateDirectories: true)
+    try """
+    {
+      "name": "llama2.c-stories110M",
+      "nLayer": 12,
+      "nHead": 12,
+      "nKVHead": 12,
+      "dModel": 768,
+      "headDim": 64,
+      "hiddenDim": 2048,
+      "vocab": 32000,
+      "maxSeq": 256,
+      "normEps": 0.00001,
+      "architecture": "llama"
+    }
+    """.write(to: weightsDir.appendingPathComponent("metadata.json"), atomically: true, encoding: .utf8)
+    try Data("weights".utf8).write(to: weightsDir.appendingPathComponent("lm_head.bin"))
+    try Data("tokenizer".utf8).write(to: tokenizerDir.appendingPathComponent("tokenizer.model"))
+
+    let manifest = ESPManifest(
+        formatVersion: "1.0.0",
+        modelID: "llama2.c-stories110M",
+        modelFamily: .llama,
+        architectureVersion: "decoder-v1",
+        tokenizerContract: "sentencepiece-v1",
+        supportedBackends: [.anePrivate, .cpuSafe],
+        supportedProfiles: [.prefill256, .decode1],
+        maxContext: 256,
+        compressionPolicy: .init(name: "native-ane-fp16", weightBits: 16, activationBits: nil),
+        adapterSlots: 0,
+        accuracyBaselineRef: "benchmarks/accuracy.json",
+        performanceBaselineRef: "benchmarks/perf.json",
+        signatureRef: "signatures/content-hashes.json"
+    )
+    _ = try ESPBundleArchive.create(
+        at: bundleURL,
+        manifest: manifest,
+        weightsDirectory: weightsDir,
+        tokenizerDirectory: tokenizerDir
+    )
+
+    let defaults = DemoDefaults(
+        repoRoot: root,
+        workingDirectory: root,
+        stateRoot: root,
+        cacheRoot: root,
+        reportsRoot: root,
+        hfCacheRoot: root,
+        weightsDir: root,
+        tokenizerDir: root,
+        coreMLDir: root,
+        toolsVenvDir: root,
+        scriptsDir: nil,
+        legacyArtifactsRoot: nil
+    )
+    var options = Options()
+    options.bundlePath = bundleURL.path
+    options.prompt = "Hello"
+
+    let invocation = try resolveInvocation(from: options, demoDefaults: defaults, command: .generate)
+    #expect(invocation.bundlePath == bundleURL.path)
+    #expect(invocation.weightsDir == bundleURL.appendingPathComponent("weights", isDirectory: true).path)
+    #expect(invocation.tokenizerDir == bundleURL.appendingPathComponent("tokenizer", isDirectory: true).path)
+    #expect(invocation.config.name == "llama2.c-stories110M")
+}
+
+@Test func test_resolveInvocationRejectsBundleMixedWithWeights() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let defaults = DemoDefaults(
+        repoRoot: root,
+        workingDirectory: root,
+        stateRoot: root,
+        cacheRoot: root,
+        reportsRoot: root,
+        hfCacheRoot: root,
+        weightsDir: root,
+        tokenizerDir: root,
+        coreMLDir: root,
+        toolsVenvDir: root,
+        scriptsDir: nil,
+        legacyArtifactsRoot: nil
+    )
+    var options = Options()
+    options.bundlePath = "/tmp/model.esp"
+    options.weightsDir = "/tmp/weights"
+    options.prompt = "Hello"
+
+    do {
+        _ = try resolveInvocation(from: options, demoDefaults: defaults, command: .generate)
+        Issue.record("Expected bundle + weights to be rejected")
+    } catch let error as CLIError {
+        guard case let .usage(message) = error else {
+            Issue.record("Expected usage error, got \(error)")
+            return
+        }
+        #expect(message.contains("--bundle"))
+    }
 }
 
 @Test func test_parsePowermetricsSamplesParsesWattsAndMilliwatts() {

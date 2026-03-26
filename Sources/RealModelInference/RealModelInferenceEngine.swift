@@ -124,7 +124,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             return false
         }
         if config.architecture == .llama {
-            if config.name == "stories110m" {
+            if isStories110MVariant(config) {
                 return true
             }
             return environment["ESPRESSO_ENABLE_LLAMA_HYBRID_CACHED_BINDINGS"] == "1"
@@ -146,6 +146,13 @@ public struct RealModelInferenceEngine: ~Copyable {
             return false
         }
         return true
+    }
+
+    static func isStories110MVariant(_ config: MultiModelConfig) -> Bool {
+        let normalizedName = config.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalizedName == "stories110m" || normalizedName.contains("stories110m")
     }
 
     static func resolveClassifierStrategy(
@@ -434,7 +441,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
     }
 
-    private struct CompiledLayer: ~Copyable {
+    struct CompiledLayer: ~Copyable {
         let attentionKernel: ANEKernel
         let attentionOutputSurface: IOSurfaceRef
         let ffnKernel: ANEKernel
@@ -453,7 +460,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
     }
 
-    private struct CompiledHead: ~Copyable {
+    struct CompiledHead: ~Copyable {
         let kernel: ANEKernel
         let inputSurface: IOSurfaceRef
         let outputSurface: IOSurfaceRef
@@ -465,7 +472,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
     }
 
-    private struct CompiledClassifier: ~Copyable {
+    struct CompiledClassifier: ~Copyable {
         let kernel: ANEKernel
         let inputSurface: IOSurfaceRef
         let outputSurface: IOSurfaceRef
@@ -5650,19 +5657,16 @@ public struct RealModelInferenceEngine: ~Copyable {
         precondition(vector.count == cols)
         precondition(output.count == rows)
         matrix.withUnsafeBufferPointer { matrixBuffer in
-            cblas_sgemv(
-                CblasRowMajor,
-                CblasNoTrans,
-                Int32(rows),
-                Int32(cols),
-                1,
+            vDSP_mmul(
                 matrixBuffer.baseAddress!,
-                Int32(cols),
+                1,
                 vector.baseAddress!,
                 1,
-                0,
                 output.baseAddress!,
-                1
+                1,
+                vDSP_Length(rows),
+                1,
+                vDSP_Length(cols)
             )
         }
     }
@@ -6975,21 +6979,16 @@ public struct RealModelInferenceEngine: ~Copyable {
                 }
             }
 
-            cblas_sgemm(
-                CblasRowMajor,
-                CblasNoTrans,
-                CblasNoTrans,
-                Int32(blockCount),
-                1,
-                Int32(dim),
-                1.0,
+            vDSP_mmul(
                 classifier.advanced(by: blockStart * dim),
-                Int32(dim),
+                1,
                 input,
                 1,
-                0.0,
                 logitsScratch,
-                1
+                1,
+                vDSP_Length(blockCount),
+                1,
+                vDSP_Length(dim)
             )
 
             var blockMaxValue: Float = 0

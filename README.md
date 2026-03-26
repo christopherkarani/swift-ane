@@ -59,7 +59,26 @@ Other entry points:
 ./espresso compare --no-power "Hello"       # side-by-side vs CoreML
 ./espresso install                          # install to ~/.local/bin
 swift run espresso-bench --ane-only --inference --layers 6
+swift run espc pack-native /path/to/model /tmp/model.esp --overwrite
+swift run esprun inspect /tmp/model.esp
+swift run esprun generate /tmp/model.esp "Hello" 32
 ```
+
+## ESP Model Platform
+
+Espresso now ships a private-only model platform around portable `.esp` bundles and bundle-aware runtime selection.
+
+- `.esp` is the canonical portable model bundle
+- `.espc` is the derived compiled-cache layer
+- `espc` packs native model directories into `.esp`
+- `esprun` inspects, resolves, and runs bundle artifacts
+- `espresso-generate --bundle <path>` runs the same bundle boundary used by the runtime
+
+Current public docs for this layer:
+
+- [Convert / Optimize / Native-Fast strategy](docs/platform/2026-03-26-convert-optimize-native-fast-plan.md)
+- [Stories Convert -> Optimize execution plan](docs/platform/2026-03-26-stories-convert-optimize-execution-plan.md)
+- [Stories agent prompt](docs/platform/2026-03-26-stories-convert-optimize-agent-prompt.md)
 
 ## Benchmark
 

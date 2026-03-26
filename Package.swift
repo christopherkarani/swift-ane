@@ -9,7 +9,14 @@ let package = Package(
         .executable(name: "espresso-bench", targets: ["EspressoBench"]),
         .executable(name: "espresso-generate", targets: ["EspressoGenerate"]),
         .executable(name: "espresso-multitoken-probe", targets: ["EspressoMultitokenProbe"]),
+        .executable(name: "espc", targets: ["ESPCompilerCLI"]),
+        .executable(name: "esprun", targets: ["ESPRuntimeCLI"]),
         .library(name: "Espresso", targets: ["Espresso"]),
+        .library(name: "ESPBundle", targets: ["ESPBundle"]),
+        .library(name: "ESPCompiler", targets: ["ESPCompiler"]),
+        .library(name: "ESPRuntime", targets: ["ESPRuntime"]),
+        .library(name: "ESPConvert", targets: ["ESPConvert"]),
+        .library(name: "ESPBenchSupport", targets: ["ESPBenchSupport"]),
         .library(name: "ModelSupport", targets: ["ModelSupport"]),
         .library(name: "RealModelInference", targets: ["RealModelInference"]),
     ],
@@ -229,20 +236,20 @@ let package = Package(
         ),
         .executableTarget(
             name: "EspressoGenerate",
-            dependencies: ["RealModelInference", "ModelSupport", "ANETypes", "ANERuntime"],
+            dependencies: ["RealModelInference", "ModelSupport", "ANETypes", "ANERuntime", "ESPRuntime", "ESPBenchSupport"],
             path: "Sources/EspressoGenerate",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "EspressoGenerateTests",
-            dependencies: ["EspressoGenerate", "ModelSupport", "ANETypes"],
+            dependencies: ["EspressoGenerate", "ModelSupport", "ANETypes", "ESPBundle", "ESPBenchSupport"],
             path: "Tests/EspressoGenerateTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "RealModelInferenceTests",
             dependencies: [
-                "RealModelInference", "ModelSupport", "ANEGraphIR", "ANETypes", "Espresso",
+                "RealModelInference", "ModelSupport", "ANEGraphIR", "ANETypes", "Espresso", "EspressoGGUF",
                 .product(name: "EspressoEdgeRunner", package: "Edgerunner"),
                 .product(name: "EdgeRunner", package: "Edgerunner"),
             ],
@@ -269,6 +276,79 @@ let package = Package(
             name: "EspressoGGUFRunner",
             dependencies: ["EspressoGGUF", "RealModelInference", "ModelSupport"],
             path: "Sources/EspressoGGUFRunner",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "ESPBundle",
+            dependencies: [],
+            path: "Sources/ESPBundle",
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [.linkedFramework("Foundation")]
+        ),
+        .testTarget(
+            name: "ESPBundleTests",
+            dependencies: ["ESPBundle"],
+            path: "Tests/ESPBundleTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "ESPCompiler",
+            dependencies: ["ESPBundle", "ModelSupport", "ANETypes"],
+            path: "Sources/ESPCompiler",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "ESPCompilerTests",
+            dependencies: ["ESPCompiler", "ESPBundle"],
+            path: "Tests/ESPCompilerTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "ESPRuntime",
+            dependencies: ["ESPBundle", "ESPCompiler", "ModelSupport", "RealModelInference"],
+            path: "Sources/ESPRuntime",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "ESPRuntimeTests",
+            dependencies: ["ESPRuntime", "ESPBundle"],
+            path: "Tests/ESPRuntimeTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "ESPConvert",
+            dependencies: ["ESPBundle", "ESPCompiler", "ModelSupport"],
+            path: "Sources/ESPConvert",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "ESPConvertTests",
+            dependencies: ["ESPConvert", "ESPBundle", "ESPCompiler"],
+            path: "Tests/ESPConvertTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "ESPBenchSupport",
+            dependencies: ["ESPBundle"],
+            path: "Sources/ESPBenchSupport",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "ESPBenchSupportTests",
+            dependencies: ["ESPBenchSupport", "ESPBundle"],
+            path: "Tests/ESPBenchSupportTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .executableTarget(
+            name: "ESPCompilerCLI",
+            dependencies: ["ESPBundle", "ESPConvert"],
+            path: "Sources/ESPCompilerCLI",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .executableTarget(
+            name: "ESPRuntimeCLI",
+            dependencies: ["ESPBundle", "ESPRuntime"],
+            path: "Sources/ESPRuntimeCLI",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

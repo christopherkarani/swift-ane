@@ -1,0 +1,495 @@
+import CryptoKit
+import Foundation
+
+public enum ESPModelFamily: String, Sendable, Codable, CaseIterable {
+    case gpt2
+    case llama
+    case qwen
+}
+
+public enum ESPBackendKind: String, Sendable, Codable, CaseIterable {
+    case anePrivate = "ane-private"
+    case cpuSafe = "cpu-safe"
+}
+
+public enum ESPProfile: String, Sendable, Codable, CaseIterable {
+    case prefill256 = "prefill_256"
+    case prefill2048 = "prefill_2048"
+    case decode1 = "decode_1"
+    case decode2 = "decode_2"
+}
+
+public struct ESPCompressionPolicy: Sendable, Codable, Equatable {
+    public let name: String
+    public let weightBits: Int
+    public let activationBits: Int?
+
+    public init(name: String, weightBits: Int, activationBits: Int?) {
+        self.name = name
+        self.weightBits = weightBits
+        self.activationBits = activationBits
+    }
+}
+
+public enum ESPBundleValidationError: Error, Equatable {
+    case emptyField(String)
+    case invalidMaxContext(Int)
+    case invalidAdapterSlots(Int)
+    case missingBackends
+    case missingProfiles
+    case invalidWeightBits(Int)
+    case invalidActivationBits(Int)
+    case missingTopLevelEntry(String)
+    case missingManifest
+    case malformedLine(String)
+    case malformedSection(String)
+    case unsupportedValue(String)
+    case signatureMismatch(path: String)
+}
+
+public struct ESPManifest: Sendable, Codable, Equatable {
+    public let formatVersion: String
+    public let modelID: String
+    public let modelFamily: ESPModelFamily
+    public let architectureVersion: String
+    public let tokenizerContract: String
+    public let supportedBackends: [ESPBackendKind]
+    public let supportedProfiles: [ESPProfile]
+    public let maxContext: Int
+    public let compressionPolicy: ESPCompressionPolicy
+    public let adapterSlots: Int
+    public let accuracyBaselineRef: String
+    public let performanceBaselineRef: String
+    public let signatureRef: String
+
+    public init(
+        formatVersion: String,
+        modelID: String,
+        modelFamily: ESPModelFamily,
+        architectureVersion: String,
+        tokenizerContract: String,
+        supportedBackends: [ESPBackendKind],
+        supportedProfiles: [ESPProfile],
+        maxContext: Int,
+        compressionPolicy: ESPCompressionPolicy,
+        adapterSlots: Int,
+        accuracyBaselineRef: String,
+        performanceBaselineRef: String,
+        signatureRef: String
+    ) {
+        self.formatVersion = formatVersion
+        self.modelID = modelID
+        self.modelFamily = modelFamily
+        self.architectureVersion = architectureVersion
+        self.tokenizerContract = tokenizerContract
+        self.supportedBackends = supportedBackends
+        self.supportedProfiles = supportedProfiles
+        self.maxContext = maxContext
+        self.compressionPolicy = compressionPolicy
+        self.adapterSlots = adapterSlots
+        self.accuracyBaselineRef = accuracyBaselineRef
+        self.performanceBaselineRef = performanceBaselineRef
+        self.signatureRef = signatureRef
+    }
+
+    public func validate() throws {
+        try validateNonEmpty(formatVersion, field: "format_version")
+        try validateNonEmpty(modelID, field: "model_id")
+        try validateNonEmpty(architectureVersion, field: "architecture_version")
+        try validateNonEmpty(tokenizerContract, field: "tokenizer_contract")
+        try validateNonEmpty(accuracyBaselineRef, field: "accuracy_baseline_ref")
+        try validateNonEmpty(performanceBaselineRef, field: "performance_baseline_ref")
+        try validateNonEmpty(signatureRef, field: "signature_ref")
+
+        guard !supportedBackends.isEmpty else {
+            throw ESPBundleValidationError.missingBackends
+        }
+
+        guard !supportedProfiles.isEmpty else {
+            throw ESPBundleValidationError.missingProfiles
+        }
+
+        guard maxContext > 0 else {
+            throw ESPBundleValidationError.invalidMaxContext(maxContext)
+        }
+
+        guard adapterSlots >= 0 else {
+            throw ESPBundleValidationError.invalidAdapterSlots(adapterSlots)
+        }
+
+        guard compressionPolicy.weightBits > 0 else {
+            throw ESPBundleValidationError.invalidWeightBits(compressionPolicy.weightBits)
+        }
+
+        if let activationBits = compressionPolicy.activationBits, activationBits <= 0 {
+            throw ESPBundleValidationError.invalidActivationBits(activationBits)
+        }
+    }
+
+    public func renderTOML() -> String {
+        let backendValues = supportedBackends.map(\.rawValue)
+        let profileValues = supportedProfiles.map(\.rawValue)
+        let rawLines: [String?] = [
+            "format_version = \(quoted(formatVersion))",
+            "model_id = \(quoted(modelID))",
+            "model_family = \(quoted(modelFamily.rawValue))",
+            "architecture_version = \(quoted(architectureVersion))",
+            "tokenizer_contract = \(quoted(tokenizerContract))",
+            "supported_backends = \(quotedArray(backendValues))",
+            "supported_profiles = \(quotedArray(profileValues))",
+            "max_context = \(maxContext)",
+            "adapter_slots = \(adapterSlots)",
+            "accuracy_baseline_ref = \(quoted(accuracyBaselineRef))",
+            "performance_baseline_ref = \(quoted(performanceBaselineRef))",
+            "signature_ref = \(quoted(signatureRef))",
+            "[compression_policy]",
+            "name = \(quoted(compressionPolicy.name))",
+            "weight_bits = \(compressionPolicy.weightBits)",
+            compressionPolicy.activationBits.map { "activation_bits = \($0)" },
+        ]
+        let lines = rawLines.compactMap { $0 }
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    public static func parseTOML(_ text: String) throws -> ESPManifest {
+        var topLevel: [String: String] = [:]
+        var compressionSection: [String: String] = [:]
+        var currentSection: String?
+
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty || line.hasPrefix("#") {
+                continue
+            }
+            if line.hasPrefix("[") {
+                guard line == "[compression_policy]" else {
+                    throw ESPBundleValidationError.malformedSection(line)
+                }
+                currentSection = "compression_policy"
+                continue
+            }
+
+            guard let separator = line.firstIndex(of: "=") else {
+                throw ESPBundleValidationError.malformedLine(line)
+            }
+
+            let key = String(line[..<separator]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if currentSection == "compression_policy" {
+                compressionSection[key] = value
+            } else {
+                topLevel[key] = value
+            }
+        }
+
+        let manifest = ESPManifest(
+            formatVersion: try parseString(topLevel, key: "format_version"),
+            modelID: try parseString(topLevel, key: "model_id"),
+            modelFamily: try parseEnum(topLevel, key: "model_family", as: ESPModelFamily.self),
+            architectureVersion: try parseString(topLevel, key: "architecture_version"),
+            tokenizerContract: try parseString(topLevel, key: "tokenizer_contract"),
+            supportedBackends: try parseArray(topLevel, key: "supported_backends", as: ESPBackendKind.self),
+            supportedProfiles: try parseArray(topLevel, key: "supported_profiles", as: ESPProfile.self),
+            maxContext: try parseInt(topLevel, key: "max_context"),
+            compressionPolicy: ESPCompressionPolicy(
+                name: try parseString(compressionSection, key: "name"),
+                weightBits: try parseInt(compressionSection, key: "weight_bits"),
+                activationBits: compressionSection["activation_bits"].flatMap(Int.init)
+            ),
+            adapterSlots: try parseInt(topLevel, key: "adapter_slots"),
+            accuracyBaselineRef: try parseString(topLevel, key: "accuracy_baseline_ref"),
+            performanceBaselineRef: try parseString(topLevel, key: "performance_baseline_ref"),
+            signatureRef: try parseString(topLevel, key: "signature_ref")
+        )
+        try manifest.validate()
+        return manifest
+    }
+
+    private func validateNonEmpty(_ value: String, field: String) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ESPBundleValidationError.emptyField(field)
+        }
+    }
+}
+
+public enum ESPBundleLayout {
+    public static let manifestFileName = "manifest.toml"
+    public static let signatureCatalogFileName = "content-hashes.json"
+
+    public static let requiredTopLevelEntries = [
+        "arch",
+        "tokenizer",
+        "weights",
+        "graphs",
+        "states",
+        "adapters",
+        "compiled",
+        "benchmarks",
+        "licenses",
+        "signatures",
+    ]
+}
+
+public struct ESPSignatureCatalog: Sendable, Codable, Equatable {
+    public let algorithm: String
+    public let manifestHash: String
+    public let fileHashes: [String: String]
+
+    public init(algorithm: String = "sha256", manifestHash: String, fileHashes: [String: String]) {
+        self.algorithm = algorithm
+        self.manifestHash = manifestHash
+        self.fileHashes = fileHashes
+    }
+}
+
+public struct ESPBundleArchive: Sendable, Equatable {
+    public let bundleURL: URL
+    public let manifest: ESPManifest
+
+    public init(bundleURL: URL, manifest: ESPManifest) {
+        self.bundleURL = bundleURL
+        self.manifest = manifest
+    }
+
+    public var manifestURL: URL {
+        bundleURL.appendingPathComponent(ESPBundleLayout.manifestFileName)
+    }
+
+    public var weightsURL: URL {
+        bundleURL.appendingPathComponent("weights", isDirectory: true)
+    }
+
+    public var tokenizerURL: URL {
+        bundleURL.appendingPathComponent("tokenizer", isDirectory: true)
+    }
+
+    public var signaturesURL: URL {
+        bundleURL.appendingPathComponent("signatures", isDirectory: true)
+    }
+
+    public var signatureCatalogURL: URL {
+        signaturesURL.appendingPathComponent(ESPBundleLayout.signatureCatalogFileName)
+    }
+
+    public static func create(
+        at bundleURL: URL,
+        manifest: ESPManifest,
+        weightsDirectory: URL,
+        tokenizerDirectory: URL,
+        overwriteExisting: Bool = false,
+        fileManager: FileManager = .default
+    ) throws -> ESPBundleArchive {
+        try manifest.validate()
+
+        if fileManager.fileExists(atPath: bundleURL.path) {
+            guard overwriteExisting else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+            try fileManager.removeItem(at: bundleURL)
+        }
+
+        try fileManager.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+
+        for entry in ESPBundleLayout.requiredTopLevelEntries {
+            try fileManager.createDirectory(
+                at: bundleURL.appendingPathComponent(entry, isDirectory: true),
+                withIntermediateDirectories: true
+            )
+        }
+
+        let archive = ESPBundleArchive(bundleURL: bundleURL, manifest: manifest)
+        try manifest.renderTOML().write(to: archive.manifestURL, atomically: true, encoding: .utf8)
+        try copyDirectoryContents(from: weightsDirectory, to: archive.weightsURL, fileManager: fileManager)
+        try copyDirectoryContents(from: tokenizerDirectory, to: archive.tokenizerURL, fileManager: fileManager)
+        try archive.writeSignatureCatalog(fileManager: fileManager)
+        return archive
+    }
+
+    public static func open(
+        at bundleURL: URL,
+        verifySignatures: Bool = true,
+        fileManager: FileManager = .default
+    ) throws -> ESPBundleArchive {
+        let manifestURL = bundleURL.appendingPathComponent(ESPBundleLayout.manifestFileName)
+        guard fileManager.fileExists(atPath: manifestURL.path) else {
+            throw ESPBundleValidationError.missingManifest
+        }
+
+        for entry in ESPBundleLayout.requiredTopLevelEntries {
+            let url = bundleURL.appendingPathComponent(entry, isDirectory: true)
+            var isDirectory = ObjCBool(false)
+            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw ESPBundleValidationError.missingTopLevelEntry(entry)
+            }
+        }
+
+        let manifest = try ESPManifest.parseTOML(String(contentsOf: manifestURL, encoding: .utf8))
+        let archive = ESPBundleArchive(bundleURL: bundleURL, manifest: manifest)
+        if verifySignatures {
+            try archive.verifySignatures(fileManager: fileManager)
+        }
+        return archive
+    }
+
+    public func writeSignatureCatalog(fileManager: FileManager = .default) throws {
+        let catalog = try computeSignatureCatalog(fileManager: fileManager)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(catalog)
+        try data.write(to: signatureCatalogURL, options: .atomic)
+    }
+
+    public func verifySignatures(fileManager: FileManager = .default) throws {
+        let data = try Data(contentsOf: signatureCatalogURL)
+        let catalog = try JSONDecoder().decode(ESPSignatureCatalog.self, from: data)
+        let computed = try computeSignatureCatalog(fileManager: fileManager)
+
+        guard catalog.manifestHash == computed.manifestHash else {
+            throw ESPBundleValidationError.signatureMismatch(path: ESPBundleLayout.manifestFileName)
+        }
+
+        for (path, expectedHash) in catalog.fileHashes.sorted(by: { $0.key < $1.key }) {
+            guard computed.fileHashes[path] == expectedHash else {
+                throw ESPBundleValidationError.signatureMismatch(path: path)
+            }
+        }
+    }
+
+    private func computeSignatureCatalog(fileManager: FileManager) throws -> ESPSignatureCatalog {
+        let manifestHash = try sha256(of: manifestURL)
+        var hashes: [String: String] = [:]
+        for fileURL in try enumeratedFiles(fileManager: fileManager) {
+            let relativePath = relativePath(from: bundleURL, to: fileURL)
+            hashes[relativePath] = try sha256(of: fileURL)
+        }
+        return ESPSignatureCatalog(manifestHash: manifestHash, fileHashes: hashes)
+    }
+
+    private func enumeratedFiles(fileManager: FileManager) throws -> [URL] {
+        guard let enumerator = fileManager.enumerator(at: bundleURL, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return []
+        }
+
+        var urls: [URL] = []
+        for case let url as URL in enumerator {
+            if url.lastPathComponent == ESPBundleLayout.manifestFileName ||
+                url.path == signatureCatalogURL.path {
+                continue
+            }
+
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+            if values.isRegularFile == true {
+                urls.append(url)
+            }
+        }
+        return urls.sorted { $0.path < $1.path }
+    }
+}
+
+private func quoted(_ value: String) -> String {
+    "\"\(value)\""
+}
+
+private func quotedArray(_ values: [String]) -> String {
+    "[\(values.map(quoted).joined(separator: ", "))]"
+}
+
+private func parseString(_ dictionary: [String: String], key: String) throws -> String {
+    guard let raw = dictionary[key] else {
+        throw ESPBundleValidationError.emptyField(key)
+    }
+    return try unquote(raw)
+}
+
+private func parseInt(_ dictionary: [String: String], key: String) throws -> Int {
+    guard let raw = dictionary[key], let value = Int(raw) else {
+        throw ESPBundleValidationError.unsupportedValue(key)
+    }
+    return value
+}
+
+private func parseEnum<T: RawRepresentable>(
+    _ dictionary: [String: String],
+    key: String,
+    as type: T.Type
+) throws -> T where T.RawValue == String {
+    let raw = try parseString(dictionary, key: key)
+    guard let value = T(rawValue: raw) else {
+        throw ESPBundleValidationError.unsupportedValue(raw)
+    }
+    return value
+}
+
+private func parseArray<T: RawRepresentable>(
+    _ dictionary: [String: String],
+    key: String,
+    as type: T.Type
+) throws -> [T] where T.RawValue == String {
+    guard let raw = dictionary[key] else {
+        throw ESPBundleValidationError.emptyField(key)
+    }
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("["), trimmed.hasSuffix("]") else {
+        throw ESPBundleValidationError.unsupportedValue(raw)
+    }
+
+    let body = String(trimmed.dropFirst().dropLast())
+    if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return []
+    }
+
+    return try body
+        .split(separator: ",")
+        .map { try unquote(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+        .map {
+            guard let value = T(rawValue: $0) else {
+                throw ESPBundleValidationError.unsupportedValue($0)
+            }
+            return value
+        }
+}
+
+private func unquote(_ value: String) throws -> String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("\""), trimmed.hasSuffix("\"") else {
+        throw ESPBundleValidationError.unsupportedValue(value)
+    }
+    return String(trimmed.dropFirst().dropLast())
+}
+
+private func copyDirectoryContents(from source: URL, to destination: URL, fileManager: FileManager) throws {
+    guard let enumerator = fileManager.enumerator(at: source, includingPropertiesForKeys: [.isDirectoryKey]) else {
+        return
+    }
+
+    for case let itemURL as URL in enumerator {
+        let relativePath = relativePath(from: source, to: itemURL)
+        let targetURL = destination.appendingPathComponent(relativePath)
+        let values = try itemURL.resourceValues(forKeys: [.isDirectoryKey])
+        if values.isDirectory == true {
+            try fileManager.createDirectory(at: targetURL, withIntermediateDirectories: true)
+        } else {
+            try fileManager.createDirectory(
+                at: targetURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if fileManager.fileExists(atPath: targetURL.path) {
+                try fileManager.removeItem(at: targetURL)
+            }
+            try fileManager.copyItem(at: itemURL, to: targetURL)
+        }
+    }
+}
+
+private func sha256(of url: URL) throws -> String {
+    let digest = SHA256.hash(data: try Data(contentsOf: url))
+    return digest.map { String(format: "%02x", $0) }.joined()
+}
+
+private func relativePath(from baseURL: URL, to fileURL: URL) -> String {
+    let baseComponents = baseURL.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+    let fileComponents = fileURL.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+    let relativeComponents = fileComponents.dropFirst(baseComponents.count)
+    return relativeComponents.joined(separator: "/")
+}
