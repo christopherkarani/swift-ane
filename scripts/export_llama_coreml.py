@@ -107,11 +107,15 @@ class StatefulLlamaDecodeStepBeforeNorm(torch.nn.Module):
             torch.tensor(torch.finfo(self.dtype).min, dtype=self.dtype),
             persistent=False,
         )
+        self.register_buffer(
+            "layer_positions",
+            torch.arange(len(self.layers), dtype=torch.long),
+            persistent=False,
+        )
 
-        cache_shape = (1, self.n_kv_heads, max_cache_len, self.head_dim)
-        for idx in range(len(self.layers)):
-            self.register_buffer(f"key_cache_{idx}", torch.zeros(cache_shape, dtype=self.dtype))
-            self.register_buffer(f"value_cache_{idx}", torch.zeros(cache_shape, dtype=self.dtype))
+        cache_shape = (len(self.layers), self.n_kv_heads, max_cache_len, self.head_dim)
+        self.register_buffer("key_cache", torch.zeros(cache_shape, dtype=self.dtype))
+        self.register_buffer("value_cache", torch.zeros(cache_shape, dtype=self.dtype))
 
     def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
         half = self.head_dim // 2
@@ -144,21 +148,22 @@ class StatefulLlamaDecodeStepBeforeNorm(torch.nn.Module):
         v: torch.Tensor,
         cache_position: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        key_cache = getattr(self, f"key_cache_{idx}")
-        value_cache = getattr(self, f"value_cache_{idx}")
-
-        slot = (self.mask_positions.unsqueeze(0) == cache_position.reshape(-1, 1)).to(self.dtype)
-        slot = slot.unsqueeze(1).unsqueeze(-1)
-        keep = 1.0 - slot
-        next_key_cache = (key_cache * keep) + (k.to(self.dtype) * slot)
-        next_value_cache = (value_cache * keep) + (v.to(self.dtype) * slot)
+        layer_slot = (self.layer_positions == idx).to(self.dtype).view(len(self.layers), 1, 1, 1)
+        position_slot = (self.mask_positions.unsqueeze(0) == cache_position.reshape(-1, 1)).to(self.dtype)
+        position_slot = position_slot.unsqueeze(1).unsqueeze(-1)
+        write_slot = layer_slot * position_slot
+        keep = 1.0 - write_slot
+        key_update = k.squeeze(0).unsqueeze(0).to(self.dtype)
+        value_update = v.squeeze(0).unsqueeze(0).to(self.dtype)
+        next_key_cache = (self.key_cache * keep) + (key_update * write_slot)
+        next_value_cache = (self.value_cache * keep) + (value_update * write_slot)
 
         # Whole-buffer state updates convert cleanly to Core ML state ops.
-        key_cache.mul_(0)
-        key_cache.add_(next_key_cache)
-        value_cache.mul_(0)
-        value_cache.add_(next_value_cache)
-        return next_key_cache, next_value_cache
+        self.key_cache.mul_(0)
+        self.key_cache.add_(next_key_cache)
+        self.value_cache.mul_(0)
+        self.value_cache.add_(next_value_cache)
+        return next_key_cache[idx : idx + 1], next_value_cache[idx : idx + 1]
 
     def forward(self, input_ids: torch.Tensor, cache_position: torch.Tensor) -> torch.Tensor:
         input_ids = input_ids.long()
@@ -229,10 +234,10 @@ def minimum_target(name: str):
     return ct.target.macOS15
 
 
-def build_state_specs(traced: torch.jit.ScriptModule) -> list[ct.StateType]:
+def build_state_specs(module: torch.nn.Module) -> list[ct.StateType]:
     states: list[ct.StateType] = []
-    for name, buffer in traced.named_buffers():
-        if not (name.startswith("key_cache_") or name.startswith("value_cache_")):
+    for name, buffer in module.named_buffers():
+        if not (name.startswith("key_cache") or name.startswith("value_cache")):
             continue
         if buffer.dtype != torch.float16:
             raise ValueError(f"State buffer {name} must be float16, got {buffer.dtype}")
