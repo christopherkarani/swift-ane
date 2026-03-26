@@ -1,4 +1,5 @@
 import json
+import struct
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,8 @@ class DistillStoriesNativeTests(unittest.TestCase):
     def test_load_config_parses_student_and_export_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
+            prompts_path = Path(directory) / "prompts.txt"
+            prompts_path.write_text("hello:Hello\nlab:Long prompt\n", encoding="utf-8")
             config_path.write_text(
                 json.dumps(
                     {
@@ -40,6 +43,8 @@ class DistillStoriesNativeTests(unittest.TestCase):
                         },
                         "train": {
                             "texts": ["Hello world"],
+                            "texts_file": str(prompts_path),
+                            "text_globs": [str(Path(directory) / "*.story.txt")],
                             "sequence_length": 32,
                             "window_stride": 8,
                             "max_samples": 1,
@@ -57,6 +62,11 @@ class DistillStoriesNativeTests(unittest.TestCase):
                         "initialization": {
                             "mode": "teacher_copy",
                         },
+                        "future_head": {
+                            "steps": 3,
+                            "learning_rate": 2e-5,
+                            "output_path": "/tmp/future-sidecar.bin",
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -70,6 +80,34 @@ class DistillStoriesNativeTests(unittest.TestCase):
         self.assertEqual(config.export.optimization_recipe, "stories-gqa4-proof")
         self.assertEqual(config.initialization.mode, "teacher_copy")
         self.assertEqual(config.train.window_stride, 8)
+        self.assertEqual(config.train.texts[:3], ["Hello world", "Hello", "Long prompt"])
+        self.assertEqual(config.train.text_globs, [str(Path(directory) / "*.story.txt")])
+        self.assertIsNotNone(config.future_head)
+        self.assertEqual(config.future_head.output_path, "/tmp/future-sidecar.bin")
+
+    def test_generated_corpus_spec_parses_prompt_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            prompts_path = Path(directory) / "prompts.txt"
+            prompts_path.write_text("# comment\nhello:Hello\nfox:The quick brown fox\n", encoding="utf-8")
+
+            spec = script.GeneratedCorpusSpec.from_dict(
+                {
+                    "prompts_file": str(prompts_path),
+                    "samples_per_prompt": 3,
+                    "max_new_tokens": 40,
+                    "temperature": 0.7,
+                    "top_k": 12,
+                    "seed": 99,
+                }
+            )
+
+        self.assertIsNotNone(spec)
+        assert spec is not None
+        self.assertEqual(spec.prompts, ["Hello", "The quick brown fox"])
+        self.assertEqual(spec.samples_per_prompt, 3)
+        self.assertEqual(spec.max_new_tokens, 40)
+        self.assertEqual(spec.top_k, 12)
+        self.assertEqual(spec.seed, 99)
 
     def test_initialize_student_from_teacher_supports_truncate_prefix(self) -> None:
         class TinyModel:
@@ -142,6 +180,58 @@ class DistillStoriesNativeTests(unittest.TestCase):
 
         self.assertEqual(len(examples), 3)
         self.assertEqual([example.tolist() for example in examples], [[0, 1, 2, 3, 4], [2, 3, 4, 5, 6], [4, 5, 6, 7, 8]])
+
+    def test_load_texts_from_globs_reads_unique_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "one.story.txt").write_text("first file", encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / "two.story.txt").write_text("second file", encoding="utf-8")
+
+            texts, matched_paths = script.load_texts_from_globs([str(root / "**" / "*.story.txt")])
+
+        self.assertCountEqual(texts, ["first file", "second file"])
+        self.assertEqual(len(matched_paths), 2)
+        self.assertTrue(all(path.endswith(".story.txt") for path in matched_paths))
+
+    def test_export_future_sidecar_writes_expected_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "future-sidecar.bin"
+            student = script.StudentSpec(
+                name="stories",
+                n_layer=12,
+                n_head=12,
+                n_kv_head=12,
+                d_model=4,
+                head_dim=2,
+                hidden_dim=8,
+                vocab=6,
+                max_seq=16,
+                norm_eps=1e-5,
+                rope_theta=10000.0,
+                eos_token=None,
+            )
+
+            exported_path = script.export_future_sidecar(
+                path=path,
+                student=student,
+                future_rms=torch.arange(4, dtype=torch.float32),
+                future_classifier=torch.arange(24, dtype=torch.float32).reshape(6, 4),
+                teacher_classifier_was_shared=True,
+            )
+
+            payload = exported_path.read_bytes()
+
+        header = struct.unpack("<iiiiiiII", payload[:32])
+        self.assertEqual(header[0], 0x32535446)
+        self.assertEqual(header[1], 1)
+        self.assertEqual(header[2], 4)
+        self.assertEqual(header[3], 6)
+        self.assertEqual(header[4], 12)
+        self.assertEqual(header[5], 2)
+        self.assertEqual(header[6], 0b111)
+        self.assertEqual(len(payload), 32 + (4 * 4) + (24 * 4))
 
 
 if __name__ == "__main__":
