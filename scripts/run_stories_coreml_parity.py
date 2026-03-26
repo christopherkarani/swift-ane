@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ DEFAULT_WEIGHTS_DIR = Path.home() / "Library/Application Support/Espresso/demo/s
 DEFAULT_TOKENIZER_DIR = DEFAULT_WEIGHTS_DIR
 DEFAULT_PROMPT_SUITE = REPO_ROOT / "scripts" / "stories_prompt_suite.txt"
 DEFAULT_ESPRESSO_BIN = REPO_ROOT / "espresso"
+CPU_EXACT_ENV_KEY = "ESPRESSO_USE_CPU_EXACT_DECODE"
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,7 +128,28 @@ def run_espresso_compare(
         str(seed),
         prompt,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=True)
+    environment = os.environ.copy()
+    environment[CPU_EXACT_ENV_KEY] = "1"
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    if result.returncode != 0:
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        details = [
+            f"espresso compare failed with exit code {result.returncode}",
+            f"command: {' '.join(command)}",
+            f"{CPU_EXACT_ENV_KEY}=1",
+        ]
+        if stdout:
+            details.append(f"stdout:\n{stdout}")
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        raise RuntimeError("\n\n".join(details))
     return json.loads(result.stdout)
 
 

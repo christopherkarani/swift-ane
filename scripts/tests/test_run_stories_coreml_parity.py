@@ -1,7 +1,9 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -62,6 +64,64 @@ class StoriesCoreMLParityTests(unittest.TestCase):
         self.assertTrue(result["torch_matches_coreml_text"])
         self.assertTrue(result["espresso_matches_coreml_tokens"])
         self.assertTrue(result["espresso_matches_coreml_text"])
+
+    def test_run_espresso_compare_forces_cpu_exact_decode(self) -> None:
+        completed = subprocess_completed_process(
+            returncode=0,
+            stdout=json.dumps({"espresso": {}, "coreml": {}, "token_match": True, "text_match": True}),
+            stderr="",
+        )
+        with mock.patch.object(script.subprocess, "run", return_value=completed) as mocked:
+            payload = script.run_espresso_compare(
+                espresso_bin=Path("/tmp/espresso"),
+                weights_dir=Path("/tmp/weights"),
+                tokenizer_dir=Path("/tmp/tokenizer"),
+                coreml_model=Path("/tmp/model.mlpackage"),
+                seq_len=128,
+                compute_units="cpu_only",
+                max_tokens=8,
+                seed=1234,
+                compare_warmup=0,
+                compare_iterations=1,
+                prompt="Hello",
+            )
+
+        self.assertTrue(payload["token_match"])
+        _, kwargs = mocked.call_args
+        self.assertEqual(kwargs["env"][script.CPU_EXACT_ENV_KEY], "1")
+        self.assertFalse(kwargs["check"])
+
+    def test_run_espresso_compare_includes_subprocess_output_on_failure(self) -> None:
+        completed = subprocess_completed_process(
+            returncode=3,
+            stdout="stdout detail",
+            stderr="stderr detail",
+        )
+        with mock.patch.object(script.subprocess, "run", return_value=completed):
+            with self.assertRaises(RuntimeError) as context:
+                script.run_espresso_compare(
+                    espresso_bin=Path("/tmp/espresso"),
+                    weights_dir=Path("/tmp/weights"),
+                    tokenizer_dir=Path("/tmp/tokenizer"),
+                    coreml_model=Path("/tmp/model.mlpackage"),
+                    seq_len=128,
+                    compute_units="cpu_and_neural_engine",
+                    max_tokens=8,
+                    seed=1234,
+                    compare_warmup=0,
+                    compare_iterations=1,
+                    prompt="Hello",
+                )
+
+        message = str(context.exception)
+        self.assertIn("exit code 3", message)
+        self.assertIn(script.CPU_EXACT_ENV_KEY, message)
+        self.assertIn("stdout detail", message)
+        self.assertIn("stderr detail", message)
+
+
+def subprocess_completed_process(*, returncode: int, stdout: str, stderr: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=["espresso"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 if __name__ == "__main__":
