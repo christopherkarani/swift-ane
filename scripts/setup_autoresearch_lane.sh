@@ -68,6 +68,8 @@ CANONICAL_LANE="$(canonical_lane "$LANE")"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=./autoresearch_results_schema.sh
+source "$SCRIPT_DIR/autoresearch_results_schema.sh"
 TARGET_ROOT="$REPO_ROOT"
 CREATE_WORKTREE=""
 BRANCH_NAME=""
@@ -233,22 +235,9 @@ and \`./scripts/judge_suite_results.sh --baseline ...\`. The TSV log is a raw pe
 EOF
 
 if [[ ! -f "$RESULTS_PATH" ]]; then
-  cat >"$RESULTS_PATH" <<'EOF'
-timestamp	commit	status	primary_metric	espresso_tokens_per_second	coreml_tokens_per_second	speedup_vs_coreml	token_match	text_match	espresso_first_token_ms	coreml_first_token_ms	espresso_median_token_ms	coreml_median_token_ms	espresso_p95_token_ms	coreml_p95_token_ms	espresso_compile_ms	coreml_compile_ms	output_dir	prompt_id	change_summary
-EOF
+  write_autoresearch_results_header >"$RESULTS_PATH"
 else
-  RESULTS_HEADER_EXPECTED="timestamp	commit	status	primary_metric	espresso_tokens_per_second	coreml_tokens_per_second	speedup_vs_coreml	token_match	text_match	espresso_first_token_ms	coreml_first_token_ms	espresso_median_token_ms	coreml_median_token_ms	espresso_p95_token_ms	coreml_p95_token_ms	espresso_compile_ms	coreml_compile_ms	output_dir	prompt_id	change_summary"
-  RESULTS_HEADER_LEGACY="timestamp	commit	status	primary_metric	espresso_tokens_per_second	coreml_tokens_per_second	speedup_vs_coreml	token_match	text_match	espresso_first_token_ms	coreml_first_token_ms	espresso_median_token_ms	coreml_median_token_ms	espresso_p95_token_ms	coreml_p95_token_ms	espresso_compile_ms	coreml_compile_ms	output_dir	change_summary"
-
-  RESULTS_HEADER="$(head -n 1 "$RESULTS_PATH")"
-  if [[ "$RESULTS_HEADER" == "$RESULTS_HEADER_LEGACY" ]]; then
-    TMP_PATH="$(mktemp)"
-    {
-      echo "$RESULTS_HEADER_EXPECTED"
-      tail -n +2 "$RESULTS_PATH"
-    } >"$TMP_PATH"
-    mv "$TMP_PATH" "$RESULTS_PATH"
-  fi
+  normalize_autoresearch_results_tsv "$RESULTS_PATH"
 fi
 
 EXCLUDE_FILE="$(git -C "$TARGET_ROOT" rev-parse --git-path info/exclude)"

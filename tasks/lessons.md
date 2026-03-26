@@ -47,3 +47,6 @@
 
 ## 2026-03-26
 - When a stateful Core ML LLM package is exact on `cpu_only` but `cpu_and_neural_engine` fails with Core ML `-14`, bisect the recurrent layer count before changing math; on this Apple runtime the failure boundary appeared at 3 stateful layers, so further exporter tweaks inside the same single-package stateful format are low-probability.
+
+## 2026-03-26
+- When a classifier path is labeled exact CPU, keep the final normalization and classifier input on the CPU in `Float`; routing the hidden state through an FP16 ANE norm first silently breaks exact greedy generation on borderline logits.

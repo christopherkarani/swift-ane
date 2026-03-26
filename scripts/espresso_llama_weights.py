@@ -66,6 +66,7 @@ def load_espresso_llama_state_dict(
 ) -> dict[str, np.ndarray]:
     weights_dir = weights_dir.expanduser().resolve()
     metadata = metadata or load_espresso_metadata(weights_dir)
+    kv_dim = metadata.n_kv_head * metadata.head_dim
 
     state_dict: dict[str, np.ndarray] = {
         "model.embed_tokens.weight": read_blobfile_array(
@@ -99,11 +100,11 @@ def load_espresso_llama_state_dict(
         )
         state_dict[f"{prefix}.self_attn.k_proj.weight"] = read_blobfile_array(
             layer_dir / "wk.bin",
-            (metadata.d_model, metadata.d_model),
+            (kv_dim, metadata.d_model),
         )
         state_dict[f"{prefix}.self_attn.v_proj.weight"] = read_blobfile_array(
             layer_dir / "wv.bin",
-            (metadata.d_model, metadata.d_model),
+            (kv_dim, metadata.d_model),
         )
         state_dict[f"{prefix}.self_attn.o_proj.weight"] = read_blobfile_array(
             layer_dir / "wo.bin",

@@ -29,14 +29,17 @@ def make_blobfile(path: Path, values: np.ndarray) -> None:
     path.write_bytes(bytes(header) + payload)
 
 
-def write_fixture(weights_dir: Path) -> None:
+def write_fixture(weights_dir: Path, *, n_kv_head: int = 2) -> None:
+    d_model = 4
+    head_dim = 2
+    kv_dim = n_kv_head * head_dim
     metadata = {
         "name": "stories110m",
         "nLayer": 2,
         "nHead": 2,
-        "nKVHead": 2,
-        "dModel": 4,
-        "headDim": 2,
+        "nKVHead": n_kv_head,
+        "dModel": d_model,
+        "headDim": head_dim,
         "hiddenDim": 6,
         "vocab": 8,
         "maxSeq": 16,
@@ -55,8 +58,14 @@ def write_fixture(weights_dir: Path) -> None:
         make_blobfile(layer_dir / "rms_att.bin", np.arange(offset, offset + 4, dtype=np.float32))
         make_blobfile(layer_dir / "rms_ffn.bin", np.arange(offset + 4, offset + 8, dtype=np.float32))
         make_blobfile(layer_dir / "wq.bin", np.arange(offset + 8, offset + 24, dtype=np.float32).reshape(4, 4))
-        make_blobfile(layer_dir / "wk.bin", np.arange(offset + 24, offset + 40, dtype=np.float32).reshape(4, 4))
-        make_blobfile(layer_dir / "wv.bin", np.arange(offset + 40, offset + 56, dtype=np.float32).reshape(4, 4))
+        make_blobfile(
+            layer_dir / "wk.bin",
+            np.arange(offset + 24, offset + 24 + (kv_dim * d_model), dtype=np.float32).reshape(kv_dim, d_model),
+        )
+        make_blobfile(
+            layer_dir / "wv.bin",
+            np.arange(offset + 40, offset + 40 + (kv_dim * d_model), dtype=np.float32).reshape(kv_dim, d_model),
+        )
         make_blobfile(layer_dir / "wo.bin", np.arange(offset + 56, offset + 72, dtype=np.float32).reshape(4, 4))
         make_blobfile(layer_dir / "w1.bin", np.arange(offset + 72, offset + 96, dtype=np.float32).reshape(6, 4))
         make_blobfile(layer_dir / "w2.bin", np.arange(offset + 96, offset + 120, dtype=np.float32).reshape(4, 6))
@@ -99,6 +108,19 @@ class EspressoLlamaWeightsTests(unittest.TestCase):
         self.assertEqual(state_dict["model.layers.1.mlp.gate_proj.weight"].shape, (6, 4))
         self.assertEqual(state_dict["model.norm.weight"].shape, (4,))
         self.assertEqual(state_dict["lm_head.weight"].shape, (8, 4))
+
+    def test_load_espresso_llama_state_dict_uses_kv_head_shape_for_grouped_query_attention(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            weights_dir = Path(directory)
+            write_fixture(weights_dir, n_kv_head=1)
+
+            state_dict = script.load_espresso_llama_state_dict(weights_dir)
+            metadata = script.load_espresso_metadata(weights_dir)
+
+        self.assertEqual(metadata.n_kv_head, 1)
+        self.assertEqual(state_dict["model.layers.0.self_attn.q_proj.weight"].shape, (4, 4))
+        self.assertEqual(state_dict["model.layers.0.self_attn.k_proj.weight"].shape, (2, 4))
+        self.assertEqual(state_dict["model.layers.0.self_attn.v_proj.weight"].shape, (2, 4))
 
     def test_llama_config_kwargs_from_metadata_sets_llama_specific_fields(self) -> None:
         metadata = script.EspressoLlamaMetadata(

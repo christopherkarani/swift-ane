@@ -3954,25 +3954,22 @@ public struct RealModelInferenceEngine: ~Copyable {
             didCompile = true
         }
 
-        // Compile the greedy fp16 RMSNorm head once for both ANE and CPU-exact
-        // classifier backends. Stories uses this path to keep final normalization
-        // on ANE while preserving exact CPU token selection.
-        if compiledHybridGreedyNorm.count != 1 || compiledHybridGreedySpatial != hybridHeadSpatial {
-            compiledHybridGreedyNorm = try LayerStorage<CompiledHead>(count: 1, throwingInitializer: { _ in
-                try Self.compileLlamaHead(
-                    config: config,
-                    weightDirURL: weightDirURL,
-                    assets: llamaAssets,
-                    spatial: hybridHeadSpatial,
-                    inputDType: .fp16,
-                    outputDType: .fp16
-                )
-            })
-            compiledHybridGreedySpatial = hybridHeadSpatial
-            didCompile = true
-        }
-
         if classifierStrategy.usesANEClassifier {
+            if compiledHybridGreedyNorm.count != 1 || compiledHybridGreedySpatial != hybridHeadSpatial {
+                compiledHybridGreedyNorm = try LayerStorage<CompiledHead>(count: 1, throwingInitializer: { _ in
+                    try Self.compileLlamaHead(
+                        config: config,
+                        weightDirURL: weightDirURL,
+                        assets: llamaAssets,
+                        spatial: hybridHeadSpatial,
+                        inputDType: .fp16,
+                        outputDType: .fp16
+                    )
+                })
+                compiledHybridGreedySpatial = hybridHeadSpatial
+                didCompile = true
+            }
+
             if compiledHybridGreedyClassifier.count != 1 {
                 compiledHybridGreedyClassifier = try LayerStorage<CompiledClassifier>(count: 1, throwingInitializer: { _ in
                     try Self.compileLlamaClassifier(
@@ -4954,7 +4951,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                     ),
                     qkvOverride: cpuExactQKV,
                     postQKVHook: metalRoPEConfig != nil ? nil : ropeHook,
-                    readFinalOutputIntoXCur: !useANEGreedyHead && !useCPUExactGreedyHead,
+                    readFinalOutputIntoXCur: !useANEGreedyHead,
                     cachedBindings: cachedBindings,
                     metalRoPEConfig: metalRoPEConfig,
                     timings: &timings
@@ -5006,24 +5003,8 @@ public struct RealModelInferenceEngine: ~Copyable {
                     throw RealModelInferenceError.runtimeFailure("Llama hybrid greedy ANE head evaluation failed: \(error)")
                 }
             } else if useCPUExactGreedyHead {
-                guard compiledHybridGreedyNorm.count == 1 else {
-                    throw RealModelInferenceError.runtimeFailure("Llama CPU exact head: greedy RMSNorm kernel unavailable")
-                }
-
-                do {
-                    try compiledHybridGreedyNorm[0].kernel.eval()
-                    try normalized.withUnsafeMutableBufferPointer { buffer in
-                        try SurfaceIO.readFP16SpatialSlice(
-                            from: compiledHybridGreedyNorm[0].outputSurface,
-                            channelOffset: 0,
-                            spatialIndex: 0,
-                            spatial: headSpatial,
-                            into: buffer,
-                            channels: config.dModel
-                        )
-                    }
-                } catch {
-                    throw RealModelInferenceError.runtimeFailure("Llama CPU exact head: ANE RMSNorm read failed: \(error)")
+                normalized = xCur.withUnsafeBufferPointer {
+                    Self.rmsNorm(Array($0), weight: llamaAssets.finalNormGamma, eps: Float(config.normEps))
                 }
                 nextToken = TokenID(exactClassifierArgmax(normalized))
             } else {
@@ -5107,7 +5088,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                     ),
                     qkvOverride: cpuExactQKV,
                     postQKVHook: metalRoPEConfig != nil ? nil : ropeHook,
-                    readFinalOutputIntoXCur: !useANEGreedyHead && !useCPUExactGreedyHead,
+                    readFinalOutputIntoXCur: !useANEGreedyHead,
                     cachedBindings: cachedBindings,
                     metalRoPEConfig: metalRoPEConfig,
                     timings: &timings

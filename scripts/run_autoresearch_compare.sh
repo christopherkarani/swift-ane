@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./autoresearch_results_schema.sh
+source "$SCRIPT_DIR/autoresearch_results_schema.sh"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -203,7 +207,7 @@ if command -v jq >/dev/null 2>&1; then
 
   if [[ -n "$RESULTS_TSV" ]]; then
     if [[ ! -f "$RESULTS_TSV" ]]; then
-      printf 'timestamp\tcommit\tstatus\tprimary_metric\tespresso_tokens_per_second\tcoreml_tokens_per_second\tspeedup_vs_coreml\ttoken_match\ttext_match\tespresso_first_token_ms\tcoreml_first_token_ms\tespresso_median_token_ms\tcoreml_median_token_ms\tespresso_p95_token_ms\tcoreml_p95_token_ms\tespresso_compile_ms\tcoreml_compile_ms\tespresso_compile_retry_count\tespresso_compile_failure_count\tespresso_exact_head_backend\tespresso_cached_bindings_enabled\toutput_dir\tprompt_id\tchange_summary\n' >"$RESULTS_TSV"
+      write_autoresearch_results_header >"$RESULTS_TSV"
     fi
     jq -r --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           --arg commit "$(git rev-parse --short HEAD)" \
