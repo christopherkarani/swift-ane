@@ -19,6 +19,18 @@ public enum ESPProfile: String, Sendable, Codable, CaseIterable {
     case decode2 = "decode_2"
 }
 
+public enum ESPModelTier: String, Sendable, Codable, CaseIterable {
+    case compat
+    case optimized
+    case nativeFast = "native_fast"
+}
+
+public enum ESPBehaviorClass: String, Sendable, Codable, CaseIterable {
+    case exact
+    case nearExact = "near_exact"
+    case approximate
+}
+
 public struct ESPCompressionPolicy: Sendable, Codable, Equatable {
     public let name: String
     public let weightBits: Int
@@ -31,9 +43,37 @@ public struct ESPCompressionPolicy: Sendable, Codable, Equatable {
     }
 }
 
+public struct ESPOptimizationMetadata: Sendable, Codable, Equatable {
+    public let recipe: String
+    public let qualityGate: String
+    public let teacherModel: String?
+    public let draftModel: String?
+    public let performanceTarget: String?
+
+    public init(
+        recipe: String,
+        qualityGate: String,
+        teacherModel: String? = nil,
+        draftModel: String? = nil,
+        performanceTarget: String? = nil
+    ) {
+        self.recipe = recipe
+        self.qualityGate = qualityGate
+        self.teacherModel = teacherModel
+        self.draftModel = draftModel
+        self.performanceTarget = performanceTarget
+    }
+
+    public static let legacyDefaults = ESPOptimizationMetadata(
+        recipe: "legacy",
+        qualityGate: "legacy-compatible"
+    )
+}
+
 public enum ESPBundleValidationError: Error, Equatable {
     case emptyField(String)
     case invalidMaxContext(Int)
+    case invalidContextTarget(Int)
     case invalidAdapterSlots(Int)
     case missingBackends
     case missingProfiles
@@ -56,8 +96,12 @@ public struct ESPManifest: Sendable, Codable, Equatable {
     public let supportedBackends: [ESPBackendKind]
     public let supportedProfiles: [ESPProfile]
     public let maxContext: Int
+    public let contextTargetTokens: Int
     public let compressionPolicy: ESPCompressionPolicy
+    public let modelTier: ESPModelTier
+    public let behaviorClass: ESPBehaviorClass
     public let adapterSlots: Int
+    public let optimization: ESPOptimizationMetadata
     public let accuracyBaselineRef: String
     public let performanceBaselineRef: String
     public let signatureRef: String
@@ -71,8 +115,12 @@ public struct ESPManifest: Sendable, Codable, Equatable {
         supportedBackends: [ESPBackendKind],
         supportedProfiles: [ESPProfile],
         maxContext: Int,
+        contextTargetTokens: Int? = nil,
         compressionPolicy: ESPCompressionPolicy,
+        modelTier: ESPModelTier = .compat,
+        behaviorClass: ESPBehaviorClass = .exact,
         adapterSlots: Int,
+        optimization: ESPOptimizationMetadata = .legacyDefaults,
         accuracyBaselineRef: String,
         performanceBaselineRef: String,
         signatureRef: String
@@ -85,8 +133,12 @@ public struct ESPManifest: Sendable, Codable, Equatable {
         self.supportedBackends = supportedBackends
         self.supportedProfiles = supportedProfiles
         self.maxContext = maxContext
+        self.contextTargetTokens = contextTargetTokens ?? maxContext
         self.compressionPolicy = compressionPolicy
+        self.modelTier = modelTier
+        self.behaviorClass = behaviorClass
         self.adapterSlots = adapterSlots
+        self.optimization = optimization
         self.accuracyBaselineRef = accuracyBaselineRef
         self.performanceBaselineRef = performanceBaselineRef
         self.signatureRef = signatureRef
@@ -113,6 +165,10 @@ public struct ESPManifest: Sendable, Codable, Equatable {
             throw ESPBundleValidationError.invalidMaxContext(maxContext)
         }
 
+        guard contextTargetTokens > 0, contextTargetTokens <= maxContext else {
+            throw ESPBundleValidationError.invalidContextTarget(contextTargetTokens)
+        }
+
         guard adapterSlots >= 0 else {
             throw ESPBundleValidationError.invalidAdapterSlots(adapterSlots)
         }
@@ -124,6 +180,9 @@ public struct ESPManifest: Sendable, Codable, Equatable {
         if let activationBits = compressionPolicy.activationBits, activationBits <= 0 {
             throw ESPBundleValidationError.invalidActivationBits(activationBits)
         }
+
+        try validateNonEmpty(optimization.recipe, field: "optimization.recipe")
+        try validateNonEmpty(optimization.qualityGate, field: "optimization.quality_gate")
     }
 
     public func renderTOML() -> String {
@@ -138,6 +197,9 @@ public struct ESPManifest: Sendable, Codable, Equatable {
             "supported_backends = \(quotedArray(backendValues))",
             "supported_profiles = \(quotedArray(profileValues))",
             "max_context = \(maxContext)",
+            "context_target_tokens = \(contextTargetTokens)",
+            "model_tier = \(quoted(modelTier.rawValue))",
+            "behavior_class = \(quoted(behaviorClass.rawValue))",
             "adapter_slots = \(adapterSlots)",
             "accuracy_baseline_ref = \(quoted(accuracyBaselineRef))",
             "performance_baseline_ref = \(quoted(performanceBaselineRef))",
@@ -146,6 +208,12 @@ public struct ESPManifest: Sendable, Codable, Equatable {
             "name = \(quoted(compressionPolicy.name))",
             "weight_bits = \(compressionPolicy.weightBits)",
             compressionPolicy.activationBits.map { "activation_bits = \($0)" },
+            "[optimization]",
+            "recipe = \(quoted(optimization.recipe))",
+            "quality_gate = \(quoted(optimization.qualityGate))",
+            optimization.teacherModel.map { "teacher_model = \(quoted($0))" },
+            optimization.draftModel.map { "draft_model = \(quoted($0))" },
+            optimization.performanceTarget.map { "performance_target = \(quoted($0))" },
         ]
         let lines = rawLines.compactMap { $0 }
 
@@ -155,6 +223,7 @@ public struct ESPManifest: Sendable, Codable, Equatable {
     public static func parseTOML(_ text: String) throws -> ESPManifest {
         var topLevel: [String: String] = [:]
         var compressionSection: [String: String] = [:]
+        var optimizationSection: [String: String] = [:]
         var currentSection: String?
 
         for rawLine in text.split(whereSeparator: \.isNewline) {
@@ -163,10 +232,14 @@ public struct ESPManifest: Sendable, Codable, Equatable {
                 continue
             }
             if line.hasPrefix("[") {
-                guard line == "[compression_policy]" else {
+                switch line {
+                case "[compression_policy]":
+                    currentSection = "compression_policy"
+                case "[optimization]":
+                    currentSection = "optimization"
+                default:
                     throw ESPBundleValidationError.malformedSection(line)
                 }
-                currentSection = "compression_policy"
                 continue
             }
 
@@ -178,6 +251,8 @@ public struct ESPManifest: Sendable, Codable, Equatable {
             let value = String(line[line.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)
             if currentSection == "compression_policy" {
                 compressionSection[key] = value
+            } else if currentSection == "optimization" {
+                optimizationSection[key] = value
             } else {
                 topLevel[key] = value
             }
@@ -192,12 +267,22 @@ public struct ESPManifest: Sendable, Codable, Equatable {
             supportedBackends: try parseArray(topLevel, key: "supported_backends", as: ESPBackendKind.self),
             supportedProfiles: try parseArray(topLevel, key: "supported_profiles", as: ESPProfile.self),
             maxContext: try parseInt(topLevel, key: "max_context"),
+            contextTargetTokens: topLevel["context_target_tokens"].flatMap(Int.init),
             compressionPolicy: ESPCompressionPolicy(
                 name: try parseString(compressionSection, key: "name"),
                 weightBits: try parseInt(compressionSection, key: "weight_bits"),
                 activationBits: compressionSection["activation_bits"].flatMap(Int.init)
             ),
+            modelTier: try parseEnum(topLevel, key: "model_tier", as: ESPModelTier.self, defaultValue: .compat),
+            behaviorClass: try parseEnum(topLevel, key: "behavior_class", as: ESPBehaviorClass.self, defaultValue: .exact),
             adapterSlots: try parseInt(topLevel, key: "adapter_slots"),
+            optimization: ESPOptimizationMetadata(
+                recipe: try parseString(optimizationSection, key: "recipe", defaultValue: ESPOptimizationMetadata.legacyDefaults.recipe),
+                qualityGate: try parseString(optimizationSection, key: "quality_gate", defaultValue: ESPOptimizationMetadata.legacyDefaults.qualityGate),
+                teacherModel: optimizationSection["teacher_model"].flatMap { try? unquote($0) },
+                draftModel: optimizationSection["draft_model"].flatMap { try? unquote($0) },
+                performanceTarget: optimizationSection["performance_target"].flatMap { try? unquote($0) }
+            ),
             accuracyBaselineRef: try parseString(topLevel, key: "accuracy_baseline_ref"),
             performanceBaselineRef: try parseString(topLevel, key: "performance_baseline_ref"),
             signatureRef: try parseString(topLevel, key: "signature_ref")
@@ -402,6 +487,17 @@ private func parseString(_ dictionary: [String: String], key: String) throws -> 
     return try unquote(raw)
 }
 
+private func parseString(
+    _ dictionary: [String: String],
+    key: String,
+    defaultValue: String
+) throws -> String {
+    guard let raw = dictionary[key] else {
+        return defaultValue
+    }
+    return try unquote(raw)
+}
+
 private func parseInt(_ dictionary: [String: String], key: String) throws -> Int {
     guard let raw = dictionary[key], let value = Int(raw) else {
         throw ESPBundleValidationError.unsupportedValue(key)
@@ -419,6 +515,18 @@ private func parseEnum<T: RawRepresentable>(
         throw ESPBundleValidationError.unsupportedValue(raw)
     }
     return value
+}
+
+private func parseEnum<T: RawRepresentable>(
+    _ dictionary: [String: String],
+    key: String,
+    as type: T.Type,
+    defaultValue: T
+) throws -> T where T.RawValue == String {
+    guard dictionary[key] != nil else {
+        return defaultValue
+    }
+    return try parseEnum(dictionary, key: key, as: type)
 }
 
 private func parseArray<T: RawRepresentable>(

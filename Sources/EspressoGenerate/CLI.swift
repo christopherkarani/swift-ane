@@ -1068,10 +1068,7 @@ private func makeBundleRuntimeMetrics(bundle: ESPRuntimeBundle, invocation: Reso
     let totalTimeMs = millisecondsSince(started)
     let compileStatsAfter = ANECompileStats.snapshot()
     let compileStatsDelta = compileStatsAfter.subtracting(compileStatsBefore)
-    let tokenLatenciesMs = syntheticTokenLatencies(
-        tokensPerSecond: result.tokensPerSecond,
-        tokenCount: result.tokens.count
-    )
+    let tokenLatenciesMs = result.tokenLatenciesMs
     return BackendRunMetrics(
         backend: selection.backend.rawValue,
         text: result.text,
@@ -2106,14 +2103,6 @@ private func benchmarkFingerprintPayload(_ fingerprint: ESPBenchmarkFingerprint)
         }
     }
     return payload
-}
-
-private func syntheticTokenLatencies(tokensPerSecond: Double, tokenCount: Int) -> [Double] {
-    guard tokenCount > 0, tokensPerSecond > 0 else {
-        return []
-    }
-    let tokenLatencyMs = 1000.0 / tokensPerSecond
-    return Array(repeating: tokenLatencyMs, count: tokenCount)
 }
 
 private func runGenerate(invocation: ResolvedInvocation) throws -> BackendRunMetrics {

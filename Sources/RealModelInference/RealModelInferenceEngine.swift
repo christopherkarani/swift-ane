@@ -18,6 +18,7 @@ public struct GenerationResult: Sendable {
     public let text: String
     public let tokens: [TokenID]
     public let promptTokens: [TokenID]
+    public let tokenLatenciesMs: [Double]
     public let tokensPerSecond: Double
     public let compileTimeMs: Double
     public let firstTokenLatencyMs: Double
@@ -28,6 +29,7 @@ public struct GenerationResult: Sendable {
         text: String,
         tokens: [TokenID],
         promptTokens: [TokenID],
+        tokenLatenciesMs: [Double] = [],
         tokensPerSecond: Double,
         compileTimeMs: Double,
         firstTokenLatencyMs: Double,
@@ -37,6 +39,7 @@ public struct GenerationResult: Sendable {
         self.text = text
         self.tokens = tokens
         self.promptTokens = promptTokens
+        self.tokenLatenciesMs = tokenLatenciesMs
         self.tokensPerSecond = tokensPerSecond
         self.compileTimeMs = compileTimeMs
         self.firstTokenLatencyMs = firstTokenLatencyMs
@@ -1110,7 +1113,9 @@ public struct RealModelInferenceEngine: ~Copyable {
 
         var allTokens = promptTokens
         var generatedTokens: [TokenID] = []
+        var tokenLatenciesMs: [Double] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
+        tokenLatenciesMs.reserveCapacity(effectiveMaxTokens)
 
         let generationStart = DispatchTime.now().uptimeNanoseconds
         var firstTokenLatencyMs = 0.0
@@ -1170,6 +1175,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             allTokens.append(nextToken)
             let elapsedMs = Self.milliseconds(from: DispatchTime.now().uptimeNanoseconds - generationStart)
             let tokenLatencyMs = Self.milliseconds(from: DispatchTime.now().uptimeNanoseconds - stepStart)
+            tokenLatenciesMs.append(tokenLatencyMs)
             let tokensPerSecond = Double(generatedTokens.count) / max(elapsedMs / 1_000, 1e-9)
             onStep?(
                 GenerationStep(
@@ -1197,6 +1203,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             text: tokenizer.decode(allTokens.map(Int.init)),
             tokens: generatedTokens,
             promptTokens: promptTokens,
+            tokenLatenciesMs: tokenLatenciesMs,
             tokensPerSecond: tokensPerSecond,
             compileTimeMs: compileTimeMs,
             firstTokenLatencyMs: firstTokenLatencyMs,
@@ -4155,7 +4162,9 @@ public struct RealModelInferenceEngine: ~Copyable {
 
         var allTokens = promptTokens
         var generatedTokens: [TokenID] = []
+        var tokenLatenciesMs: [Double] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
+        tokenLatenciesMs.reserveCapacity(effectiveMaxTokens)
 
         let generationStart = DispatchTime.now().uptimeNanoseconds
         var emissionStart = generationStart
@@ -4239,6 +4248,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             allTokens.append(nextToken)
             let elapsedMs = Self.milliseconds(from: emissionNow - generationStart)
             let tokensPerSecond = Double(generatedTokens.count) / max(elapsedMs / 1_000, 1e-9)
+            tokenLatenciesMs.append(tokenLatencyMs)
             onStep?(
                 GenerationStep(
                     token: nextToken,
@@ -4290,6 +4300,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             text: tokenizer.decode(allTokens.map(Int.init)),
             tokens: generatedTokens,
             promptTokens: promptTokens,
+            tokenLatenciesMs: tokenLatenciesMs,
             tokensPerSecond: tokensPerSecond,
             compileTimeMs: compileTimeMs,
             firstTokenLatencyMs: firstTokenLatencyMs,
@@ -4331,7 +4342,9 @@ public struct RealModelInferenceEngine: ~Copyable {
 
         var allTokens = promptTokens
         var generatedTokens: [TokenID] = []
+        var tokenLatenciesMs: [Double] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
+        tokenLatenciesMs.reserveCapacity(effectiveMaxTokens)
 
         let generationStart = DispatchTime.now().uptimeNanoseconds
         var emissionStart = generationStart
@@ -4343,6 +4356,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             allTokens.append(token)
             let elapsedMs = Self.milliseconds(from: emissionNow - generationStart)
             let tokenLatencyMs = Self.milliseconds(from: emissionNow - emissionStart)
+            tokenLatenciesMs.append(tokenLatencyMs)
             if !firstTokenRecorded {
                 firstTokenLatencyMs = Self.milliseconds(from: emissionNow - generationStart)
                 firstTokenRecorded = true
@@ -4502,6 +4516,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             text: tokenizer.decode(allTokens.map(Int.init)),
             tokens: generatedTokens,
             promptTokens: promptTokens,
+            tokenLatenciesMs: tokenLatenciesMs,
             tokensPerSecond: tokensPerSecond,
             compileTimeMs: compileTimeMs,
             firstTokenLatencyMs: firstTokenLatencyMs
@@ -4972,7 +4987,9 @@ public struct RealModelInferenceEngine: ~Copyable {
 
         var allTokens = promptTokens
         var generatedTokens: [TokenID] = []
+        var tokenLatenciesMs: [Double] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
+        tokenLatenciesMs.reserveCapacity(effectiveMaxTokens)
 
         let generationStart = DispatchTime.now().uptimeNanoseconds
         var emissionStart = generationStart
@@ -5061,6 +5078,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             allTokens.append(nextToken)
             let elapsedMs = Self.milliseconds(from: emissionNow - generationStart)
             let tokensPerSecond = Double(generatedTokens.count) / max(elapsedMs / 1_000, 1e-9)
+            tokenLatenciesMs.append(tokenLatencyMs)
             onStep?(
                 GenerationStep(
                     token: nextToken,
@@ -5118,6 +5136,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             text: tokenizer.decode(allTokens.map(Int.init)),
             tokens: generatedTokens,
             promptTokens: promptTokens,
+            tokenLatenciesMs: tokenLatenciesMs,
             tokensPerSecond: tokensPerSecond,
             compileTimeMs: compileTimeMs,
             firstTokenLatencyMs: firstTokenLatencyMs,
@@ -5338,7 +5357,9 @@ public struct RealModelInferenceEngine: ~Copyable {
         var firstTokenLatencyMs = 0.0
         var firstTokenRecorded = false
         var generatedTokens: [TokenID] = []
+        var tokenLatenciesMs: [Double] = []
         generatedTokens.reserveCapacity(effectiveMaxTokens)
+        tokenLatenciesMs.reserveCapacity(effectiveMaxTokens)
         var rng = SystemRandomNumberGenerator()
 
         while generatedTokens.count < effectiveMaxTokens {
@@ -5370,6 +5391,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             allTokens.append(nextToken)
             let elapsedMs = Self.milliseconds(from: emissionNow - generationStart)
             let tokensPerSecond = Double(generatedTokens.count) / max(elapsedMs / 1_000, 1e-9)
+            tokenLatenciesMs.append(tokenLatencyMs)
             onStep?(
                 GenerationStep(
                     token: nextToken,
@@ -5400,6 +5422,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             text: tokenizer.decode(allTokens.map(Int.init)),
             tokens: generatedTokens,
             promptTokens: promptTokens,
+            tokenLatenciesMs: tokenLatenciesMs,
             tokensPerSecond: tokensPerSecond,
             compileTimeMs: compileTimeMs,
             firstTokenLatencyMs: firstTokenLatencyMs,

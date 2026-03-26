@@ -8,6 +8,25 @@ public enum ESPNativeModelBundleExportError: Error, Equatable {
     case missingTokenizerAssets
 }
 
+public struct ESPNativeModelBundleExportOptions: Sendable, Equatable {
+    public let contextTargetTokens: Int?
+    public let modelTier: ESPModelTier
+    public let behaviorClass: ESPBehaviorClass
+    public let optimization: ESPOptimizationMetadata
+
+    public init(
+        contextTargetTokens: Int? = nil,
+        modelTier: ESPModelTier = .compat,
+        behaviorClass: ESPBehaviorClass = .exact,
+        optimization: ESPOptimizationMetadata = .init(recipe: "native-baseline", qualityGate: "exact")
+    ) {
+        self.contextTargetTokens = contextTargetTokens
+        self.modelTier = modelTier
+        self.behaviorClass = behaviorClass
+        self.optimization = optimization
+    }
+}
+
 public enum ESPNativeModelBundleExporter {
     private static let recognizedTokenizerFiles: Set<String> = [
         "merges.txt",
@@ -22,6 +41,7 @@ public enum ESPNativeModelBundleExporter {
         at modelDirectory: URL,
         tokenizerDirectory: URL? = nil,
         outputBundleURL: URL,
+        options: ESPNativeModelBundleExportOptions = .init(),
         overwriteExisting: Bool = false,
         fileManager: FileManager = .default
     ) throws -> ESPBundleArchive {
@@ -38,7 +58,7 @@ public enum ESPNativeModelBundleExporter {
         }
 
         let config = try ESPModelConfigIO.load(fromMetadataFile: metadataURL)
-        let manifest = try makeManifest(from: config)
+        let manifest = try makeManifest(from: config, options: options)
         let stagingWeightsDirectory = try makeWeightsStagingDirectory(
             modelDirectory: modelDirectory,
             tokenizerDirectory: tokenizerDirectory,
@@ -56,7 +76,10 @@ public enum ESPNativeModelBundleExporter {
         )
     }
 
-    public static func makeManifest(from config: MultiModelConfig) throws -> ESPManifest {
+    public static func makeManifest(
+        from config: MultiModelConfig,
+        options: ESPNativeModelBundleExportOptions = .init()
+    ) throws -> ESPManifest {
         let family = inferFamily(from: config)
         let supportedProfiles = makeProfiles(maxContext: config.maxSeq)
         let supportedBackends: [ESPBackendKind] = switch family {
@@ -65,22 +88,32 @@ public enum ESPNativeModelBundleExporter {
         case .llama, .qwen:
             [.anePrivate, .cpuSafe]
         }
+        let contextTargetTokens = options.contextTargetTokens ?? config.maxSeq
+        let modelID = contextTargetTokens == config.maxSeq
+            ? config.name
+            : "\(config.name)-ctx\(contextTargetTokens)"
 
-        return ESPManifest(
-            formatVersion: "1.0.0",
-            modelID: config.name,
+        let manifest = ESPManifest(
+            formatVersion: "1.1.0",
+            modelID: modelID,
             modelFamily: family,
             architectureVersion: "decoder-v1",
             tokenizerContract: tokenizerContract(for: family),
             supportedBackends: supportedBackends,
             supportedProfiles: supportedProfiles,
             maxContext: config.maxSeq,
+            contextTargetTokens: contextTargetTokens,
             compressionPolicy: .init(name: "native-ane-fp16", weightBits: 16, activationBits: nil),
+            modelTier: options.modelTier,
+            behaviorClass: options.behaviorClass,
             adapterSlots: 0,
+            optimization: options.optimization,
             accuracyBaselineRef: "benchmarks/accuracy.json",
             performanceBaselineRef: "benchmarks/perf.json",
             signatureRef: "signatures/\(ESPBundleLayout.signatureCatalogFileName)"
         )
+        try manifest.validate()
+        return manifest
     }
 
     public static func inferFamily(from config: MultiModelConfig) -> ESPModelFamily {

@@ -5,16 +5,26 @@ import Foundation
 
 @Test func runtimePrefersANEWhenSupported() throws {
     let manifest = ESPManifest(
-        formatVersion: "1.0.0",
+        formatVersion: "1.1.0",
         modelID: "espresso.llama.1b",
         modelFamily: .llama,
         architectureVersion: "decoder-v1",
         tokenizerContract: "spm-v1",
         supportedBackends: [.anePrivate, .cpuSafe],
-        supportedProfiles: [.decode1],
+        supportedProfiles: [.prefill256, .prefill2048, .decode1],
         maxContext: 2048,
+        contextTargetTokens: 1024,
         compressionPolicy: .init(name: "int8", weightBits: 8, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .exact,
         adapterSlots: 2,
+        optimization: .init(
+            recipe: "stories-ctx1024",
+            qualityGate: "exact",
+            teacherModel: nil,
+            draftModel: nil,
+            performanceTarget: nil
+        ),
         accuracyBaselineRef: "benchmarks/accuracy.json",
         performanceBaselineRef: "benchmarks/perf.json",
         signatureRef: "signatures/manifest.sig"
@@ -26,20 +36,32 @@ import Foundation
     )
 
     #expect(selection.backend == .anePrivate)
+    #expect(selection.profile == .prefill2048)
+    #expect(selection.contextTargetTokens == 1024)
 }
 
 @Test func runtimeFallsBackToCPUWhenANEUnavailable() throws {
     let manifest = ESPManifest(
-        formatVersion: "1.0.0",
+        formatVersion: "1.1.0",
         modelID: "espresso.gpt2.124m",
         modelFamily: .gpt2,
         architectureVersion: "decoder-v1",
         tokenizerContract: "gpt2-bpe-v1",
         supportedBackends: [.anePrivate, .cpuSafe],
-        supportedProfiles: [.decode1],
+        supportedProfiles: [.prefill256, .decode1],
         maxContext: 1024,
+        contextTargetTokens: 256,
         compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .compat,
+        behaviorClass: .exact,
         adapterSlots: 0,
+        optimization: .init(
+            recipe: "baseline",
+            qualityGate: "exact",
+            teacherModel: nil,
+            draftModel: nil,
+            performanceTarget: nil
+        ),
         accuracyBaselineRef: "benchmarks/accuracy.json",
         performanceBaselineRef: "benchmarks/perf.json",
         signatureRef: "signatures/manifest.sig"
@@ -51,20 +73,31 @@ import Foundation
     )
 
     #expect(selection.backend == .cpuSafe)
+    #expect(selection.profile == .prefill256)
 }
 
 @Test func runtimeRejectsBundlesWithoutCompatibleBackends() {
     let manifest = ESPManifest(
-        formatVersion: "1.0.0",
+        formatVersion: "1.1.0",
         modelID: "espresso.qwen.0_6b",
         modelFamily: .qwen,
         architectureVersion: "decoder-v1",
         tokenizerContract: "qwen-bpe-v1",
         supportedBackends: [.anePrivate],
-        supportedProfiles: [.decode1],
+        supportedProfiles: [.prefill256, .decode1],
         maxContext: 2048,
+        contextTargetTokens: 512,
         compressionPolicy: .init(name: "int4", weightBits: 4, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .nearExact,
         adapterSlots: 4,
+        optimization: .init(
+            recipe: "qwen-gqa",
+            qualityGate: "short-long-prompt-parity",
+            teacherModel: nil,
+            draftModel: nil,
+            performanceTarget: nil
+        ),
         accuracyBaselineRef: "benchmarks/accuracy.json",
         performanceBaselineRef: "benchmarks/perf.json",
         signatureRef: "signatures/manifest.sig"
@@ -80,6 +113,47 @@ import Foundation
         #expect(error == .noCompatibleBackend)
     } catch {
         #expect(Bool(false), "Unexpected error: \(error)")
+    }
+}
+
+@Test func runtimeRejectsRequestedContextBeyondTarget() {
+    let manifest = ESPManifest(
+        formatVersion: "1.1.0",
+        modelID: "espresso.stories.ctx256",
+        modelFamily: .llama,
+        architectureVersion: "decoder-v1",
+        tokenizerContract: "sentencepiece-v1",
+        supportedBackends: [.anePrivate, .cpuSafe],
+        supportedProfiles: [.prefill256, .decode1],
+        maxContext: 256,
+        contextTargetTokens: 256,
+        compressionPolicy: .init(name: "native-ane-fp16", weightBits: 16, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .exact,
+        adapterSlots: 0,
+        optimization: .init(
+            recipe: "stories-ctx256",
+            qualityGate: "exact",
+            teacherModel: nil,
+            draftModel: nil,
+            performanceTarget: nil
+        ),
+        accuracyBaselineRef: "benchmarks/accuracy.json",
+        performanceBaselineRef: "benchmarks/perf.json",
+        signatureRef: "signatures/content-hashes.json"
+    )
+
+    do {
+        _ = try ESPRuntimeResolver.selectBackend(
+            capabilities: .init(supportsANEPrivate: true),
+            manifest: manifest,
+            requestedContextTokens: 300
+        )
+        Issue.record("Expected context target rejection")
+    } catch let error as ESPRuntimeSelectionError {
+        #expect(error == .requestedContextExceedsTarget(requested: 300, supported: 256))
+    } catch {
+        Issue.record("Unexpected error: \(error)")
     }
 }
 
@@ -111,16 +185,26 @@ import Foundation
     try Data("tokenizer".utf8).write(to: tokenizer.appendingPathComponent("tokenizer.model"))
 
     let manifest = ESPManifest(
-        formatVersion: "1.0.0",
+        formatVersion: "1.1.0",
         modelID: "espresso.qwen.test",
         modelFamily: .qwen,
         architectureVersion: "decoder-v1",
         tokenizerContract: "qwen-bpe-v1",
         supportedBackends: [.anePrivate, .cpuSafe],
-        supportedProfiles: [.decode1],
+        supportedProfiles: [.prefill256, .prefill2048, .decode1],
         maxContext: 4096,
+        contextTargetTokens: 1024,
         compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .exact,
         adapterSlots: 0,
+        optimization: .init(
+            recipe: "qwen-ctx1024",
+            qualityGate: "exact",
+            teacherModel: nil,
+            draftModel: nil,
+            performanceTarget: nil
+        ),
         accuracyBaselineRef: "benchmarks/accuracy.json",
         performanceBaselineRef: "benchmarks/perf.json",
         signatureRef: "signatures/content-hashes.json"
@@ -136,4 +220,5 @@ import Foundation
     let selection = try ESPRuntimeRunner.resolve(bundle: bundle)
     #expect(bundle.config.name == "qwen3")
     #expect(selection.backend == .anePrivate)
+    #expect(selection.contextTargetTokens == 1024)
 }

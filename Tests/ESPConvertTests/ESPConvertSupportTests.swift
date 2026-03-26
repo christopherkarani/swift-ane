@@ -45,6 +45,88 @@ import Testing
     #expect(manifest.modelFamily == .qwen)
     #expect(manifest.supportedBackends == [.anePrivate, .cpuSafe])
     #expect(manifest.supportedProfiles.contains(.prefill2048))
+    #expect(manifest.modelTier == .compat)
+    #expect(manifest.behaviorClass == .exact)
+    #expect(manifest.contextTargetTokens == 4096)
+    #expect(manifest.optimization.recipe == "native-baseline")
+}
+
+@Test func nativeExporterAllowsExplicitContextTargetAndLineageOverrides() throws {
+    let metadataURL = try writeMetadata(
+        """
+        {
+          "name": "llama2.c-stories110M",
+          "nLayer": 12,
+          "nHead": 12,
+          "nKVHead": 12,
+          "dModel": 768,
+          "headDim": 64,
+          "hiddenDim": 2048,
+          "vocab": 32000,
+          "maxSeq": 1024,
+          "normEps": 0.00001,
+          "architecture": "llama"
+        }
+        """
+    )
+
+    let config = try ESPModelConfigIO.load(fromMetadataFile: metadataURL)
+    let manifest = try ESPNativeModelBundleExporter.makeManifest(
+        from: config,
+        options: .init(
+            contextTargetTokens: 256,
+            modelTier: .optimized,
+            behaviorClass: .exact,
+            optimization: .init(
+                recipe: "stories-ctx256",
+                qualityGate: "short-long-prompt-parity",
+                teacherModel: nil,
+                draftModel: nil,
+                performanceTarget: "105 tok/s"
+            )
+        )
+    )
+
+    #expect(manifest.modelID == "llama2.c-stories110M-ctx256")
+    #expect(manifest.maxContext == 1024)
+    #expect(manifest.contextTargetTokens == 256)
+    #expect(manifest.modelTier == .optimized)
+    #expect(manifest.optimization.recipe == "stories-ctx256")
+    #expect(manifest.optimization.performanceTarget == "105 tok/s")
+}
+
+@Test func nativeExporterRejectsContextTargetAboveModelContext() throws {
+    let metadataURL = try writeMetadata(
+        """
+        {
+          "name": "llama2.c-stories110M",
+          "nLayer": 12,
+          "nHead": 12,
+          "nKVHead": 12,
+          "dModel": 768,
+          "headDim": 64,
+          "hiddenDim": 2048,
+          "vocab": 32000,
+          "maxSeq": 256,
+          "normEps": 0.00001,
+          "architecture": "llama"
+        }
+        """
+    )
+
+    let config = try ESPModelConfigIO.load(fromMetadataFile: metadataURL)
+
+    do {
+        _ = try ESPNativeModelBundleExporter.makeManifest(
+            from: config,
+            options: .init(contextTargetTokens: 512)
+        )
+        Issue.record("Expected invalid context target rejection")
+    } catch let error as ESPBundleValidationError {
+        #expect(error == .invalidContextTarget(512))
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
 }
 
 @Test func nativeExporterBuildsBundleFromCoLocatedTokenizerAssets() throws {

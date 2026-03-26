@@ -1,0 +1,42 @@
+{
+  "teacher": {
+    "source": "espresso",
+    "weights_dir": "/tmp/stories110m.esp/weights",
+    "tokenizer_dir": "/tmp/stories110m.esp/tokenizer"
+  },
+  "student": {
+    "name": "stories110m-gqa4-proof",
+    "n_layer": 12,
+    "n_head": 12,
+    "n_kv_head": 4,
+    "d_model": 768,
+    "head_dim": 64,
+    "hidden_dim": 2048,
+    "vocab": 32000,
+    "max_seq": 256,
+    "norm_eps": 1e-5,
+    "rope_theta": 10000.0
+  },
+  "train": {
+    "texts_file": "scripts/stories_prompt_suite.txt",
+    "sequence_length": 128,
+    "max_samples": 4,
+    "batch_size": 1,
+    "steps": 1,
+    "learning_rate": 1e-5,
+    "kl_weight": 1.0,
+    "ce_weight": 0.1,
+    "temperature": 1.0,
+    "device": "auto"
+  },
+  "export": {
+    "output_dir": "/tmp/stories110m-gqa4-proof-native",
+    "context_target_tokens": 256,
+    "model_tier": "optimized",
+    "behavior_class": "approximate",
+    "optimization_recipe": "stories-gqa4-proof",
+    "quality_gate": "proof-only",
+    "teacher_model": "espresso://stories110m",
+    "performance_target": "not-retained-proof"
+  }
+}

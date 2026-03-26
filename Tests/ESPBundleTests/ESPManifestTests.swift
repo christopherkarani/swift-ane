@@ -4,7 +4,7 @@ import Foundation
 
 @Test func manifestRenderingIsDeterministic() throws {
     let manifest = ESPManifest(
-        formatVersion: "1.0.0",
+        formatVersion: "1.1.0",
         modelID: "espresso.qwen.0_6b",
         modelFamily: .qwen,
         architectureVersion: "decoder-v1",
@@ -12,8 +12,18 @@ import Foundation
         supportedBackends: [.anePrivate, .cpuSafe],
         supportedProfiles: [.prefill256, .prefill2048, .decode1],
         maxContext: 2048,
+        contextTargetTokens: 1024,
         compressionPolicy: .init(name: "int4-palettized", weightBits: 4, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .nearExact,
         adapterSlots: 4,
+        optimization: .init(
+            recipe: "stories-gqa4-distilled",
+            qualityGate: "short-long-prompt-parity",
+            teacherModel: "teacher://qwen3-0.6b",
+            draftModel: nil,
+            performanceTarget: "110 tok/s"
+        ),
         accuracyBaselineRef: "benchmarks/qwen-0.6b/accuracy.json",
         performanceBaselineRef: "benchmarks/qwen-0.6b/perf.json",
         signatureRef: "signatures/manifest.sig"
@@ -23,6 +33,9 @@ import Foundation
     let renderedB = manifest.renderTOML()
     #expect(renderedA == renderedB)
     #expect(renderedA.contains("model_family = \"qwen\""))
+    #expect(renderedA.contains("model_tier = \"optimized\""))
+    #expect(renderedA.contains("behavior_class = \"near_exact\""))
+    #expect(renderedA.contains("context_target_tokens = 1024"))
     #expect(renderedA.contains("supported_backends = [\"ane-private\", \"cpu-safe\"]"))
 }
 
@@ -71,7 +84,7 @@ import Foundation
 
 @Test func manifestRoundTripsThroughTOMLParser() throws {
     let manifest = ESPManifest(
-        formatVersion: "1.0.0",
+        formatVersion: "1.1.0",
         modelID: "espresso.gpt2.124m",
         modelFamily: .gpt2,
         architectureVersion: "decoder-v1",
@@ -79,8 +92,18 @@ import Foundation
         supportedBackends: [.anePrivate],
         supportedProfiles: [.prefill256, .decode1],
         maxContext: 1024,
+        contextTargetTokens: 512,
         compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .compat,
+        behaviorClass: .exact,
         adapterSlots: 0,
+        optimization: .init(
+            recipe: "native-baseline",
+            qualityGate: "exact",
+            teacherModel: nil,
+            draftModel: nil,
+            performanceTarget: nil
+        ),
         accuracyBaselineRef: "benchmarks/accuracy.json",
         performanceBaselineRef: "benchmarks/perf.json",
         signatureRef: "signatures/content-hashes.json"
@@ -88,6 +111,34 @@ import Foundation
 
     let parsed = try ESPManifest.parseTOML(manifest.renderTOML())
     #expect(parsed == manifest)
+}
+
+@Test func manifestParserBackfillsDefaultsForLegacyV1Bundles() throws {
+    let text = """
+    format_version = "1.0.0"
+    model_id = "legacy.stories"
+    model_family = "llama"
+    architecture_version = "decoder-v1"
+    tokenizer_contract = "sentencepiece-v1"
+    supported_backends = ["ane-private", "cpu-safe"]
+    supported_profiles = ["prefill_256", "decode_1"]
+    max_context = 256
+    adapter_slots = 0
+    accuracy_baseline_ref = "benchmarks/accuracy.json"
+    performance_baseline_ref = "benchmarks/perf.json"
+    signature_ref = "signatures/content-hashes.json"
+    [compression_policy]
+    name = "native-ane-fp16"
+    weight_bits = 16
+    """
+
+    let manifest = try ESPManifest.parseTOML(text)
+
+    #expect(manifest.modelTier == .compat)
+    #expect(manifest.behaviorClass == .exact)
+    #expect(manifest.contextTargetTokens == 256)
+    #expect(manifest.optimization.recipe == "legacy")
+    #expect(manifest.optimization.qualityGate == "legacy-compatible")
 }
 
 @Test func bundleCreateAndOpenRoundTrip() throws {
@@ -103,7 +154,7 @@ import Foundation
     try Data("tokenizer".utf8).write(to: tokenizer.appendingPathComponent("tokenizer.json"))
 
     let manifest = ESPManifest(
-        formatVersion: "1.0.0",
+        formatVersion: "1.1.0",
         modelID: "espresso.llama.test",
         modelFamily: .llama,
         architectureVersion: "decoder-v1",
@@ -111,8 +162,18 @@ import Foundation
         supportedBackends: [.anePrivate, .cpuSafe],
         supportedProfiles: [.prefill256, .decode1],
         maxContext: 2048,
+        contextTargetTokens: 1024,
         compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .exact,
         adapterSlots: 0,
+        optimization: .init(
+            recipe: "stories-ctx1024",
+            qualityGate: "short-long-prompt-parity",
+            teacherModel: nil,
+            draftModel: nil,
+            performanceTarget: "105 tok/s"
+        ),
         accuracyBaselineRef: "benchmarks/accuracy.json",
         performanceBaselineRef: "benchmarks/perf.json",
         signatureRef: "signatures/content-hashes.json"
@@ -143,7 +204,7 @@ import Foundation
     try Data("tokenizer".utf8).write(to: tokenizer.appendingPathComponent("tokenizer.json"))
 
     let manifest = ESPManifest(
-        formatVersion: "1.0.0",
+        formatVersion: "1.1.0",
         modelID: "espresso.llama.test",
         modelFamily: .llama,
         architectureVersion: "decoder-v1",
@@ -151,8 +212,18 @@ import Foundation
         supportedBackends: [.anePrivate, .cpuSafe],
         supportedProfiles: [.prefill256, .decode1],
         maxContext: 2048,
+        contextTargetTokens: 1024,
         compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .exact,
         adapterSlots: 0,
+        optimization: .init(
+            recipe: "stories-ctx1024",
+            qualityGate: "short-long-prompt-parity",
+            teacherModel: nil,
+            draftModel: nil,
+            performanceTarget: "105 tok/s"
+        ),
         accuracyBaselineRef: "benchmarks/accuracy.json",
         performanceBaselineRef: "benchmarks/perf.json",
         signatureRef: "signatures/content-hashes.json"
