@@ -118,6 +118,7 @@ class InitializationSpec:
 class TrainSpec:
     texts: list[str]
     sequence_length: int
+    window_stride: int
     max_samples: int
     batch_size: int
     steps: int
@@ -136,6 +137,7 @@ class TrainSpec:
         return TrainSpec(
             texts=texts,
             sequence_length=int(payload["sequence_length"]),
+            window_stride=int(payload.get("window_stride", max(1, int(payload["sequence_length"]) // 2))),
             max_samples=int(payload.get("max_samples", len(texts))),
             batch_size=int(payload.get("batch_size", 1)),
             steps=int(payload["steps"]),
@@ -238,21 +240,108 @@ def load_teacher(teacher: TeacherSpec):
     raise ValueError(f"Unsupported teacher source: {teacher.source}")
 
 
-def build_training_examples(texts: list[str], tokenizer, sequence_length: int, max_samples: int) -> list[torch.Tensor]:
+def build_training_examples(
+    texts: list[str],
+    tokenizer,
+    sequence_length: int,
+    max_samples: int,
+    window_stride: int,
+) -> list[torch.Tensor]:
     examples: list[torch.Tensor] = []
     for text in texts:
         token_ids = tokenizer.encode(text)
         if len(token_ids) < 2:
             continue
-        token_ids = token_ids[: sequence_length + 1]
-        if len(token_ids) < 2:
+        if len(token_ids) <= sequence_length + 1:
+            examples.append(torch.tensor(token_ids, dtype=torch.long))
+            if len(examples) >= max_samples:
+                break
             continue
-        examples.append(torch.tensor(token_ids, dtype=torch.long))
+
+        max_start = len(token_ids) - (sequence_length + 1)
+        for start in range(0, max_start + 1, max(1, window_stride)):
+            window = token_ids[start : start + sequence_length + 1]
+            if len(window) < 2:
+                continue
+            examples.append(torch.tensor(window, dtype=torch.long))
+            if len(examples) >= max_samples:
+                break
         if len(examples) >= max_samples:
             break
     if not examples:
         raise ValueError("No usable training examples were produced from the configured texts")
     return examples
+
+
+def evaluate_student_against_teacher(
+    teacher_model,
+    student_model: LlamaForCausalLM,
+    examples: list[torch.Tensor],
+    device: str,
+) -> dict[str, float]:
+    teacher_model.eval()
+    student_model.eval()
+
+    total_tokens = 0
+    matching_tokens = 0
+    total_label_tokens = 0
+    matching_labels = 0
+    total_kl = 0.0
+    exact_two_token_passes = 0
+    exact_two_token_token0_matches = 0
+    exact_two_token_future_accepts = 0
+
+    with torch.no_grad():
+        for example in examples:
+            sample = example.to(device)
+            input_ids = sample[:-1].unsqueeze(0)
+            labels = sample[1:].unsqueeze(0)
+
+            teacher_logits = teacher_model(input_ids=input_ids).logits
+            student_logits = student_model(input_ids=input_ids).logits
+
+            teacher_argmax = teacher_logits.argmax(dim=-1)
+            student_argmax = student_logits.argmax(dim=-1)
+
+            total_tokens += int(teacher_argmax.numel())
+            matching_tokens += int((teacher_argmax == student_argmax).sum().item())
+            total_label_tokens += int(labels.numel())
+            matching_labels += int((student_argmax == labels).sum().item())
+
+            total_kl += float(
+                F.kl_div(
+                    F.log_softmax(student_logits, dim=-1),
+                    F.softmax(teacher_logits, dim=-1),
+                    reduction="batchmean",
+                ).cpu().item()
+            )
+
+            teacher_token0 = int(teacher_argmax[0, -1].item())
+            student_token0 = int(student_argmax[0, -1].item())
+            exact_two_token_passes += 1
+            if teacher_token0 != student_token0:
+                continue
+
+            exact_two_token_token0_matches += 1
+            extended_input_ids = torch.cat(
+                [input_ids, torch.tensor([[teacher_token0]], dtype=torch.long, device=device)],
+                dim=1,
+            )
+            teacher_next_logits = teacher_model(input_ids=extended_input_ids).logits
+            student_next_logits = student_model(input_ids=extended_input_ids).logits
+            teacher_token1 = int(teacher_next_logits.argmax(dim=-1)[0, -1].item())
+            student_token1 = int(student_next_logits.argmax(dim=-1)[0, -1].item())
+            if teacher_token1 == student_token1:
+                exact_two_token_future_accepts += 1
+
+    mean_kl = total_kl / max(len(examples), 1)
+    return {
+        "teacher_token_agreement": matching_tokens / max(total_tokens, 1),
+        "label_token_accuracy": matching_labels / max(total_label_tokens, 1),
+        "mean_teacher_student_kl": mean_kl,
+        "exact_two_token_token0_match_rate": exact_two_token_token0_matches / max(exact_two_token_passes, 1),
+        "exact_two_token_future_accept_rate": exact_two_token_future_accepts / max(exact_two_token_passes, 1),
+    }
 
 
 def initialize_student_from_teacher(
@@ -262,24 +351,48 @@ def initialize_student_from_teacher(
 ) -> str:
     if initialization.mode == "random":
         return "random"
-    if initialization.mode != "teacher_copy":
-        raise ValueError(f"Unsupported initialization mode: {initialization.mode}")
-
     teacher_state = teacher_model.state_dict()
     student_state = student_model.state_dict()
     copied = 0
-    for name, tensor in student_state.items():
-        teacher_tensor = teacher_state.get(name)
-        if teacher_tensor is None or teacher_tensor.shape != tensor.shape:
+
+    if initialization.mode == "teacher_copy":
+        for name, tensor in student_state.items():
+            teacher_tensor = teacher_state.get(name)
+            if teacher_tensor is None or teacher_tensor.shape != tensor.shape:
+                raise ValueError(
+                    f"teacher_copy requires matching tensor for {name}; "
+                    f"student shape={tuple(tensor.shape)} teacher shape={None if teacher_tensor is None else tuple(teacher_tensor.shape)}"
+                )
+            tensor.copy_(teacher_tensor.to(device=tensor.device, dtype=tensor.dtype))
+            copied += 1
+        if copied != len(student_state):
+            raise ValueError(f"teacher_copy copied {copied} tensors but student has {len(student_state)} tensors")
+        return "teacher_copy"
+
+    if initialization.mode == "teacher_truncate_prefix":
+        for name, tensor in student_state.items():
+            teacher_name = name
+            if name.startswith("model.layers."):
+                parts = name.split(".")
+                layer_index = int(parts[2])
+                teacher_name = ".".join(["model", "layers", str(layer_index)] + parts[3:])
+            teacher_tensor = teacher_state.get(teacher_name)
+            if teacher_tensor is None:
+                raise ValueError(f"teacher_truncate_prefix requires tensor {teacher_name} for {name}")
+            if teacher_tensor.shape != tensor.shape:
+                raise ValueError(
+                    f"teacher_truncate_prefix requires matching tensor shape for {name}; "
+                    f"student shape={tuple(tensor.shape)} teacher shape={tuple(teacher_tensor.shape)}"
+                )
+            tensor.copy_(teacher_tensor.to(device=tensor.device, dtype=tensor.dtype))
+            copied += 1
+        if copied != len(student_state):
             raise ValueError(
-                f"teacher_copy requires matching tensor for {name}; "
-                f"student shape={tuple(tensor.shape)} teacher shape={None if teacher_tensor is None else tuple(teacher_tensor.shape)}"
+                f"teacher_truncate_prefix copied {copied} tensors but student has {len(student_state)} tensors"
             )
-        tensor.copy_(teacher_tensor.to(device=tensor.device, dtype=tensor.dtype))
-        copied += 1
-    if copied != len(student_state):
-        raise ValueError(f"teacher_copy copied {copied} tensors but student has {len(student_state)} tensors")
-    return "teacher_copy"
+        return "teacher_truncate_prefix"
+
+    raise ValueError(f"Unsupported initialization mode: {initialization.mode}")
 
 
 def export_student_to_espresso(model: LlamaForCausalLM, student: StudentSpec, output_dir: Path) -> Path:
@@ -377,11 +490,19 @@ def run_distillation(config: DistillationConfig, dry_run: bool = False) -> dict[
         tokenizer,
         sequence_length=config.train.sequence_length,
         max_samples=config.train.max_samples,
+        window_stride=config.train.window_stride,
     )
 
     optimizer = torch.optim.AdamW(student_model.parameters(), lr=config.train.learning_rate)
     step_metrics: list[dict[str, float]] = []
     total_steps = 0
+    initial_evaluation = evaluate_student_against_teacher(
+        teacher_model=teacher_model,
+        student_model=student_model,
+        examples=examples,
+        device=device,
+    )
+    student_model.train()
 
     if not dry_run:
         for step_index in range(config.train.steps):
@@ -416,6 +537,13 @@ def run_distillation(config: DistillationConfig, dry_run: bool = False) -> dict[
                 }
             )
 
+    final_evaluation = evaluate_student_against_teacher(
+        teacher_model=teacher_model,
+        student_model=student_model,
+        examples=examples,
+        device=device,
+    )
+
     export_root = Path(config.export.output_dir).expanduser().resolve()
     export_student_to_espresso(student_model.cpu(), config.student, export_root)
     maybe_pack_bundle(export_root, config, config.teacher.tokenizer_dir)
@@ -432,6 +560,8 @@ def run_distillation(config: DistillationConfig, dry_run: bool = False) -> dict[
         "behavior_class": config.export.behavior_class,
         "optimization_recipe": config.export.optimization_recipe,
         "bundle_path": config.export.bundle_path,
+        "initial_evaluation": initial_evaluation,
+        "final_evaluation": final_evaluation,
         "metrics": step_metrics,
     }
     (export_root / "distill-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
