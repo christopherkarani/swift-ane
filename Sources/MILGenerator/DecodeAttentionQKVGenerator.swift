@@ -50,7 +50,7 @@ public struct DecodeAttentionQKVGenerator: MILProgramGenerator {
 
         var b = MILBuilder(reserveCapacity: 16_384)
         b.append(MILText.header)
-        b.appendLine("    func main<ios18>(tensor<fp16, [1, \(dim), 1, \(lane)]> x, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> kCache, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> vCache, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> maskCache) {")
+        b.appendLine(MILText.functionLine(deploymentTarget: MILText.currentDeploymentTarget(), parameters: "tensor<fp16, [1, \(dim), 1, \(lane)]> x, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> kCache, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> vCache, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> maskCache"))
 
         if probeMode == "passthrough" {
             b.appendLine("        tensor<fp16, [1,\(dim),1,\(lane)]> outX = add(x=x,y=x)[name=string(\"out_x\")];")

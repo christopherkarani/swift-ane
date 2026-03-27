@@ -27,6 +27,7 @@ struct MILBuilder {
 }
 
 enum MILText {
+    static let defaultDeploymentTarget = "ios18"
     static let header =
         """
         program(1.3)
@@ -34,6 +35,22 @@ enum MILText {
         {
         """
         + "\n"
+
+    static func functionLine(
+        name: String = "main",
+        deploymentTarget: String = defaultDeploymentTarget,
+        parameters: String
+    ) -> String {
+        "    func \(name)<\(deploymentTarget)>(\(parameters)) {"
+    }
+
+    static func currentDeploymentTarget(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        let rawValue = environment["ESPRESSO_MIL_DEPLOYMENT_TARGET"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return rawValue?.isEmpty == false ? rawValue! : defaultDeploymentTarget
+    }
 
     static let convConst =
         """

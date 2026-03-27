@@ -10,7 +10,7 @@ public struct FFNBackwardGenerator: MILProgramGenerator {
     public var milText: String {
         var b = MILBuilder(reserveCapacity: 12_288)
         b.append(MILText.header)
-        b.appendLine("    func main<ios18>(tensor<fp16, [1, \(ModelConfig.dim + 2 * ModelConfig.hidden), 1, \(ModelConfig.seqLen)]> x) {")
+        b.appendLine(MILText.functionLine(deploymentTarget: MILText.currentDeploymentTarget(), parameters: "tensor<fp16, [1, \(ModelConfig.dim + 2 * ModelConfig.hidden), 1, \(ModelConfig.seqLen)]> x"))
         b.append(MILText.convConst)
         b.appendLine("        tensor<int32, [4]> bd = const()[name=string(\"bd\"), val=tensor<int32, [4]>([0,0,0,0])];")
         b.appendLine("        tensor<int32, [4]> sd = const()[name=string(\"sd\"), val=tensor<int32, [4]>([1,\(ModelConfig.dim),1,\(ModelConfig.seqLen)])];")

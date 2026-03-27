@@ -315,6 +315,12 @@ let package = Package(
             path: "Tests/ESPRuntimeTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .testTarget(
+            name: "ESPCompilerCLITests",
+            dependencies: ["ESPCompilerCLI"],
+            path: "Tests/ESPCompilerCLITests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .target(
             name: "ESPConvert",
             dependencies: ["ESPBundle", "ESPCompiler", "ModelSupport"],

@@ -109,6 +109,21 @@ import ModelSupport
     #expect(options.positionalPrompt == ["Hello"])
 }
 
+@Test func test_optionsParseAttentionCompileProbeFlags() throws {
+    let options = try Options.parse([
+        "espresso-generate",
+        "doctor",
+        "--probe-gpt2-attention-compile",
+        "--mil-deployment-target", "macos26",
+        "--gpt2-norm", "rmsnorm",
+    ])
+
+    #expect(options.command == .doctor)
+    #expect(options.probeGPT2AttentionCompile)
+    #expect(options.milDeploymentTarget == "macos26")
+    #expect(options.gpt2NormMode == "rmsnorm")
+}
+
 @Test func test_optionsParseBundleFlag() throws {
     let options = try Options.parse([
         "espresso-generate",

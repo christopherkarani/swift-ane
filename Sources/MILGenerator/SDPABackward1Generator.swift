@@ -12,7 +12,7 @@ public struct SDPABackward1Generator: MILProgramGenerator {
 
         var b = MILBuilder(reserveCapacity: 14_336)
         b.append(MILText.header)
-        b.appendLine("    func main<ios18>(tensor<fp16, [1, \(4 * ModelConfig.dim), 1, \(ModelConfig.seqLen)]> x) {")
+        b.appendLine(MILText.functionLine(deploymentTarget: MILText.currentDeploymentTarget(), parameters: "tensor<fp16, [1, \(4 * ModelConfig.dim), 1, \(ModelConfig.seqLen)]> x"))
         b.append(MILText.convConst)
         b.appendLine("        tensor<int32, [4]> sz = const()[name=string(\"sz\"), val=tensor<int32, [4]>([1,\(ModelConfig.dim),1,\(ModelConfig.seqLen)])];")
         b.appendLine("        tensor<int32, [4]> b0 = const()[name=string(\"b0\"), val=tensor<int32, [4]>([0,0,0,0])];")

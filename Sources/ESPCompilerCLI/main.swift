@@ -44,7 +44,7 @@ struct ESPCompilerCLI {
         }
     }
 
-    private struct PackNativeRequest {
+    struct PackNativeRequest {
         let modelDirectory: String
         let tokenizerDirectory: String?
         let bundlePath: String
@@ -52,7 +52,7 @@ struct ESPCompilerCLI {
         let overwriteExisting: Bool
     }
 
-    private static func parsePackNativeRequest(arguments: [String]) throws -> PackNativeRequest {
+    static func parsePackNativeRequest(arguments: [String]) throws -> PackNativeRequest {
         guard arguments.count >= 3 else {
             throw usageError(
                 "Usage: espc pack-native <model-dir> <bundle-path> [--tokenizer-dir DIR] [--overwrite]"
@@ -188,7 +188,10 @@ struct ESPCompilerCLI {
                 index += 1
                 guard index < arguments.count,
                       let value = ESPDraftKind(rawValue: arguments[index]) else {
-                    throw usageError("Expected --draft-kind exact_two_token|multi_token")
+                    throw usageError("Expected --draft-kind exact_two_token")
+                }
+                guard value == .exactTwoToken else {
+                    throw usageError("Expected --draft-kind exact_two_token")
                 }
                 draftKind = value
             case "--draft-behavior-class":
@@ -287,7 +290,7 @@ struct ESPCompilerCLI {
         fputs(
             """
             Usage:
-              espc pack-native <model-dir> <bundle-path> [--tokenizer-dir DIR] [--context-target TOKENS] [--model-tier compat|optimized|native_fast] [--behavior-class exact|near_exact|approximate] [--optimization-recipe NAME] [--quality-gate NAME] [--teacher-model MODEL] [--draft-model MODEL] [--performance-target VALUE] [--output-head-kind dense|factored] [--output-head-behavior-class exact|near_exact|approximate] [--output-head-bottleneck TOKENS] [--output-head-groups COUNT] [--output-head-projection PATH] [--output-head-expansion PATH] [--draft-kind exact_two_token|multi_token] [--draft-behavior-class exact|near_exact|approximate] [--draft-horizon TOKENS] [--draft-verifier MODE] [--draft-rollback MODE] [--draft-artifact PATH] [--draft-acceptance-metric NAME] [--overwrite]
+              espc pack-native <model-dir> <bundle-path> [--tokenizer-dir DIR] [--context-target TOKENS] [--model-tier compat|optimized|native_fast] [--behavior-class exact|near_exact|approximate] [--optimization-recipe NAME] [--quality-gate NAME] [--teacher-model MODEL] [--draft-model MODEL] [--performance-target VALUE] [--output-head-kind dense|factored] [--output-head-behavior-class exact|near_exact|approximate] [--output-head-bottleneck TOKENS] [--output-head-groups COUNT] [--output-head-projection PATH] [--output-head-expansion PATH] [--draft-kind exact_two_token] [--draft-behavior-class exact|near_exact|approximate] [--draft-horizon TOKENS] [--draft-verifier MODE] [--draft-rollback MODE] [--draft-artifact PATH] [--draft-acceptance-metric NAME] [--overwrite]
               espc inspect <bundle-path>
 
             """,

@@ -34,10 +34,14 @@ public struct ESPRuntimeHost {
 }
 
 public enum ESPRuntimeRunner {
-    public static func resolve(bundle: ESPRuntimeBundle) throws -> ESPRuntimeSelection {
+    public static func resolve(
+        bundle: ESPRuntimeBundle,
+        requestedContextTokens: Int? = nil
+    ) throws -> ESPRuntimeSelection {
         try ESPRuntimeResolver.selectBackend(
             capabilities: ESPRuntimeHost.currentCapabilities(),
-            manifest: bundle.archive.manifest
+            manifest: bundle.archive.manifest,
+            requestedContextTokens: requestedContextTokens
         )
     }
 
@@ -47,7 +51,12 @@ public enum ESPRuntimeRunner {
         maxTokens: Int,
         temperature: Float = 0
     ) throws -> GenerationResult {
-        let selection = try resolve(bundle: bundle)
+        let promptTokenCount = try countPromptTokens(bundle: bundle, prompt: prompt)
+        let requestedContextTokens = totalRequestedContextTokens(
+            promptTokenCount: promptTokenCount,
+            maxTokens: maxTokens
+        )
+        let selection = try resolve(bundle: bundle, requestedContextTokens: requestedContextTokens)
         return try withTemporaryEnvironment(environmentOverrides(for: selection)) {
             switch selection.backend {
             case .anePrivate:
@@ -67,6 +76,74 @@ public enum ESPRuntimeRunner {
                     return try engine.generate(prompt: prompt, maxTokens: maxTokens, temperature: temperature)
                 }
             }
+        }
+    }
+
+    private enum LoadedTokenizer {
+        case gpt2(GPT2BPETokenizer)
+        case sentencePiece(SentencePieceTokenizer)
+
+        func encode(_ text: String) -> [Int] {
+            switch self {
+            case let .gpt2(tokenizer):
+                return tokenizer.encode(text)
+            case let .sentencePiece(tokenizer):
+                return tokenizer.encode(text)
+            }
+        }
+    }
+
+    private static func countPromptTokens(bundle: ESPRuntimeBundle, prompt: String) throws -> Int {
+        let tokenizer = try loadTokenizer(config: bundle.config, tokenizerDirURL: bundle.archive.tokenizerURL)
+        return tokenizer.encode(prompt).count
+    }
+
+    private static func totalRequestedContextTokens(promptTokenCount: Int, maxTokens: Int) -> Int {
+        let clampedMaxTokens = max(maxTokens, 0)
+        let (sum, overflowed) = promptTokenCount.addingReportingOverflow(clampedMaxTokens)
+        return overflowed ? Int.max : sum
+    }
+
+    private static func loadTokenizer(
+        config: MultiModelConfig,
+        tokenizerDirURL: URL
+    ) throws -> LoadedTokenizer {
+        let fileManager = FileManager.default
+
+        switch config.architecture {
+        case .gpt2:
+            let vocabURL = tokenizerDirURL.appendingPathComponent("vocab.json")
+            let mergesURL = tokenizerDirURL.appendingPathComponent("merges.txt")
+            guard fileManager.fileExists(atPath: vocabURL.path),
+                  fileManager.fileExists(atPath: mergesURL.path) else {
+                throw RealModelInferenceError.runtimeFailure(
+                    "Missing GPT-2 tokenizer assets in bundle tokenizer directory"
+                )
+            }
+            return .gpt2(try GPT2BPETokenizer(vocabURL: vocabURL, mergesURL: mergesURL))
+        case .llama:
+            for candidate in ["tokenizer.model", "tokenizer.bin"] {
+                let url = tokenizerDirURL.appendingPathComponent(candidate)
+                if fileManager.fileExists(atPath: url.path) {
+                    return .sentencePiece(try SentencePieceTokenizer(modelURL: url))
+                }
+            }
+
+            let tokenizerJSONURL = tokenizerDirURL.appendingPathComponent("tokenizer.json")
+            if fileManager.fileExists(atPath: tokenizerJSONURL.path) {
+                return .gpt2(try GPT2BPETokenizer(tokenizerJSONURL: tokenizerJSONURL))
+            }
+
+            let vocabURL = tokenizerDirURL.appendingPathComponent("vocab.json")
+            let mergesURL = tokenizerDirURL.appendingPathComponent("merges.txt")
+            if fileManager.fileExists(atPath: vocabURL.path),
+               fileManager.fileExists(atPath: mergesURL.path) {
+                return .gpt2(try GPT2BPETokenizer(vocabURL: vocabURL, mergesURL: mergesURL))
+            }
+
+            throw RealModelInferenceError.runtimeFailure(
+                "No tokenizer found in bundle tokenizer directory"
+            )
         }
     }
 

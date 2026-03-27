@@ -208,10 +208,10 @@ import Foundation
 
     let manifest = ESPManifest(
         formatVersion: "1.1.0",
-        modelID: "espresso.qwen.test",
-        modelFamily: .qwen,
+        modelID: "espresso.llama.test",
+        modelFamily: .llama,
         architectureVersion: "decoder-v1",
-        tokenizerContract: "qwen-bpe-v1",
+        tokenizerContract: "sentencepiece-v1",
         supportedBackends: [.anePrivate, .cpuSafe],
         supportedProfiles: [.prefill256, .prefill2048, .decode1],
         maxContext: 4096,
@@ -262,4 +262,112 @@ import Foundation
     #expect(selection.contextTargetTokens == 1024)
     #expect(selection.outputHead?.projectionRef == "weights/cls_proj.bin")
     #expect(selection.draft?.artifactRef == "weights/future-sidecar.bin")
+}
+
+@Test func runtimeGenerateRejectsRequestedContextBeyondBundleTargetBeforeModelBuild() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let weights = root.appendingPathComponent("weights-src", isDirectory: true)
+    let tokenizer = root.appendingPathComponent("tokenizer-src", isDirectory: true)
+    let bundleURL = root.appendingPathComponent("model.esp", isDirectory: true)
+    try FileManager.default.createDirectory(at: weights, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: tokenizer, withIntermediateDirectories: true)
+    try """
+    {
+      "name": "tiny-gpt2",
+      "nLayer": 1,
+      "nHead": 1,
+      "nKVHead": 1,
+      "dModel": 8,
+      "headDim": 8,
+      "hiddenDim": 32,
+      "vocab": 5,
+      "maxSeq": 64,
+      "normEps": 0.00001,
+      "architecture": "gpt2"
+    }
+    """.write(to: weights.appendingPathComponent("metadata.json"), atomically: true, encoding: .utf8)
+    try Data("weights".utf8).write(to: weights.appendingPathComponent("lm_head.bin"))
+    try makeRuntimeGPT2TokenizerAssets(at: tokenizer)
+
+    let manifest = ESPManifest(
+        formatVersion: "1.1.0",
+        modelID: "espresso.gpt2.ctx4",
+        modelFamily: .gpt2,
+        architectureVersion: "decoder-v1",
+        tokenizerContract: "gpt2-bpe-v1",
+        supportedBackends: [.anePrivate, .cpuSafe],
+        supportedProfiles: [.prefill256, .decode1],
+        maxContext: 64,
+        contextTargetTokens: 4,
+        compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .compat,
+        behaviorClass: .exact,
+        adapterSlots: 0,
+        optimization: .init(recipe: "baseline", qualityGate: "exact"),
+        accuracyBaselineRef: "benchmarks/accuracy.json",
+        performanceBaselineRef: "benchmarks/perf.json",
+        signatureRef: "signatures/content-hashes.json"
+    )
+    _ = try ESPBundleArchive.create(
+        at: bundleURL,
+        manifest: manifest,
+        weightsDirectory: weights,
+        tokenizerDirectory: tokenizer
+    )
+
+    let bundle = try ESPRuntimeBundle.open(at: bundleURL)
+
+    do {
+        _ = try ESPRuntimeRunner.generate(bundle: bundle, prompt: "Hello world", maxTokens: 3)
+        Issue.record("Expected bundle context-target rejection")
+    } catch let error as ESPRuntimeSelectionError {
+        #expect(error == .requestedContextExceedsTarget(requested: 5, supported: 4))
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+private func makeRuntimeGPT2TokenizerAssets(at directory: URL) throws {
+    let newlinePiece = String(runtimeGPT2ByteUnicodeMap()[10]!)
+    let spacePiece = String(runtimeGPT2ByteUnicodeMap()[32]!)
+    let vocab: [String: Int] = [
+        "Hello": 0,
+        ",": 1,
+        "\(spacePiece)world": 2,
+        "!": 3,
+        newlinePiece: 4,
+    ]
+    let vocabData = try JSONSerialization.data(withJSONObject: vocab, options: [.sortedKeys])
+    try vocabData.write(to: directory.appendingPathComponent("vocab.json"))
+
+    let merges = [
+        "#version: 0.2",
+        "H e",
+        "He l",
+        "Hel l",
+        "Hell o",
+        "\(spacePiece) w",
+        "\(spacePiece)w o",
+        "\(spacePiece)wo r",
+        "\(spacePiece)wor l",
+        "\(spacePiece)worl d",
+    ].joined(separator: "\n")
+    try merges.write(to: directory.appendingPathComponent("merges.txt"), atomically: true, encoding: .utf8)
+}
+
+private func runtimeGPT2ByteUnicodeMap() -> [UInt8: UnicodeScalar] {
+    var printable = Array(33...126) + Array(161...172) + Array(174...255)
+    var mapped = printable
+    let printableSet = Set(printable)
+    var extra = 0
+    for value in 0..<256 where !printableSet.contains(value) {
+        printable.append(value)
+        mapped.append(256 + extra)
+        extra += 1
+    }
+    var result: [UInt8: UnicodeScalar] = [:]
+    for (index, byte) in printable.enumerated() {
+        result[UInt8(byte)] = UnicodeScalar(mapped[index])!
+    }
+    return result
 }

@@ -5,7 +5,15 @@ public struct ANECodegen: Sendable {
     public init() {}
 
     public static func emit(_ graph: ANEGraph, functionName: String = "main") -> String {
-        Emitter(graph: graph, functionName: functionName).emit()
+        emit(graph, functionName: functionName, deploymentTarget: "ios18")
+    }
+
+    public static func emit(
+        _ graph: ANEGraph,
+        functionName: String = "main",
+        deploymentTarget: String = "ios18"
+    ) -> String {
+        Emitter(graph: graph, functionName: functionName, deploymentTarget: deploymentTarget).emit()
     }
 }
 
@@ -18,11 +26,13 @@ private struct Emitter: Sendable {
 
     private let graph: ANEGraph
     private let functionName: String
+    private let deploymentTarget: String
     private let locale = Locale(identifier: "en_US_POSIX")
 
-    init(graph: ANEGraph, functionName: String) {
+    init(graph: ANEGraph, functionName: String, deploymentTarget: String) {
         self.graph = graph
         self.functionName = functionName
+        self.deploymentTarget = deploymentTarget
     }
 
     private var outputPorts: [GraphPort] {
@@ -64,7 +74,7 @@ private struct Emitter: Sendable {
             precondition(node.op == .input, "Graph input \(port.name) must reference an input node")
             return "\(tensorType(dtype: node.dtype, shape: node.shape)) \(port.name)"
         }.joined(separator: ", ")
-        lines.append("    func \(functionName)<ios18>(\(parameterList)) {")
+        lines.append("    func \(functionName)<\(deploymentTarget)>(\(parameterList)) {")
 
         var valueNames = [Int: String]()
         for port in inputPorts {

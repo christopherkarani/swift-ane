@@ -403,6 +403,11 @@ public struct ESPManifest: Sendable, Codable, Equatable {
         guard let outputHead else {
             return
         }
+        guard modelFamily == .llama else {
+            throw ESPBundleValidationError.invalidOutputHead(
+                "output-head metadata is supported for llama bundles only"
+            )
+        }
 
         switch outputHead.kind {
         case .dense:
@@ -431,6 +436,16 @@ public struct ESPManifest: Sendable, Codable, Equatable {
     private func validate(draft: ESPDraftMetadata?) throws {
         guard let draft else {
             return
+        }
+        guard modelFamily == .llama else {
+            throw ESPBundleValidationError.invalidDraft(
+                "draft metadata is supported for llama bundles only"
+            )
+        }
+        guard draft.kind == .exactTwoToken else {
+            throw ESPBundleValidationError.invalidDraft(
+                "only exact_two_token drafts are currently supported"
+            )
         }
 
         guard draft.horizon > 1 else {

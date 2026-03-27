@@ -12,6 +12,13 @@ import ANEGraphIR
     #expect(mil.contains("} -> (output);"))
 }
 
+@Test func programStructureSupportsCustomDeploymentTarget() throws {
+    let graph = try makeAddGraph()
+    let mil = ANECodegen.emit(graph, deploymentTarget: "ios19")
+
+    #expect(mil.contains("func main<ios19>("))
+}
+
 @Test func convEmissionIncludesBlobfileAndInlineParams() throws {
     var graph = ANEGraph()
     let x = try graph.addNode(inputNode(name: "x"))

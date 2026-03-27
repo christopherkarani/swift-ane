@@ -60,7 +60,7 @@ public struct FusedTwoLayerDecodeGenerator: MILProgramGenerator {
 
         var b = MILBuilder(reserveCapacity: 49_152)
         b.append(MILText.header)
-        b.appendLine("    func main<ios18>(tensor<fp16, [1, \(dim), 1, \(lane)]> x, tensor<fp16, [1, \(packedKVChannels), 1, \(maxSeq)]> packedKVCache, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> maskCache0, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> maskCache1) {")
+        b.appendLine(MILText.functionLine(deploymentTarget: MILText.currentDeploymentTarget(), parameters: "tensor<fp16, [1, \(dim), 1, \(lane)]> x, tensor<fp16, [1, \(packedKVChannels), 1, \(maxSeq)]> packedKVCache, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> maskCache0, tensor<fp16, [1, \(dim), 1, \(maxSeq)]> maskCache1"))
 
         b.appendLine("        tensor<int32, [1]> raxCh = const()[name=string(\"rax_ch\"), val=tensor<int32, [1]>([1])];")
         b.appendLine("        tensor<int32, [1]> raxSp = const()[name=string(\"rax_sp\"), val=tensor<int32, [1]>([3])];")

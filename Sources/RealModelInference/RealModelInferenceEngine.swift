@@ -118,6 +118,42 @@ public struct RealModelInferenceEngine: ~Copyable {
     private static let minimumANEIOSurfaceBytes = 49_152
     private static let classifierArgmaxBlockSize = 4_000
 
+    public struct GPT2AttentionCompileProbeResult: Sendable, Equatable {
+        public let spatial: Int
+        public let deploymentTarget: String
+        public let normKind: String
+        public let diagnostics: [String]
+        public let compileSucceeded: Bool
+        public let error: String?
+
+        public init(
+            spatial: Int,
+            deploymentTarget: String,
+            normKind: String,
+            diagnostics: [String],
+            compileSucceeded: Bool,
+            error: String?
+        ) {
+            self.spatial = spatial
+            self.deploymentTarget = deploymentTarget
+            self.normKind = normKind
+            self.diagnostics = diagnostics
+            self.compileSucceeded = compileSucceeded
+            self.error = error
+        }
+    }
+
+    enum GPT2NormKind: String, Sendable {
+        case layerNorm = "layernorm"
+        case rmsNorm = "rmsnorm"
+    }
+
+    enum HybridGreedyHeadMode: Sendable, Equatable {
+        case normThenClassifier
+        case classifierOnlyFactored
+        case classifierOnlyFused
+    }
+
     static func supportsLlamaMetalRoPEFastPath(
         cachedBindingsAvailable: Bool,
         kBindingContainsKVCache: Bool
@@ -278,6 +314,48 @@ public struct RealModelInferenceEngine: ~Copyable {
             return false
         }
         return config.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().contains("qwen")
+    }
+
+    static func milDeploymentTarget(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        let rawValue = environment["ESPRESSO_MIL_DEPLOYMENT_TARGET"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return rawValue?.isEmpty == false ? rawValue! : "ios18"
+    }
+
+    static func gpt2NormKind(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> GPT2NormKind {
+        if environment["ESPRESSO_GPT2_USE_RMS_NORM"] == "1" {
+            return .rmsNorm
+        }
+        let rawValue = environment["ESPRESSO_GPT2_NORM"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch rawValue {
+        case "rms", "rmsnorm":
+            return .rmsNorm
+        default:
+            return .layerNorm
+        }
+    }
+
+    static func hybridGreedyHeadMode(
+        config: MultiModelConfig,
+        hasFactoredOutputHead: Bool,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> HybridGreedyHeadMode {
+        guard config.architecture == .llama else {
+            return .normThenClassifier
+        }
+        if hasFactoredOutputHead {
+            return .classifierOnlyFactored
+        }
+        if usesLlamaHybridFusedExactHead(config: config, environment: environment) {
+            return .classifierOnlyFused
+        }
+        return .normThenClassifier
     }
 
     enum LlamaGenerationPath: Sendable, Equatable {
@@ -1192,6 +1270,22 @@ public struct RealModelInferenceEngine: ~Copyable {
         return a
     }
 
+    private func hybridGreedyHeadMode(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> HybridGreedyHeadMode {
+        let hasFactoredOutputHead: Bool
+        if config.architecture == .llama {
+            hasFactoredOutputHead = llamaAssets.factoredOutputHead != nil
+        } else {
+            hasFactoredOutputHead = false
+        }
+        return Self.hybridGreedyHeadMode(
+            config: config,
+            hasFactoredOutputHead: hasFactoredOutputHead,
+            environment: environment
+        )
+    }
+
     private var lmHeadWeights: [Float] {
         switch assets {
         case let .gpt2(a):
@@ -2064,7 +2158,8 @@ public struct RealModelInferenceEngine: ~Copyable {
         weightDir: String,
         layer: Int,
         spatial: Int,
-        input: [Float]
+        input: [Float],
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> [Float] {
         let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
         try validateDirectory(weightDirURL)
@@ -2072,7 +2167,8 @@ public struct RealModelInferenceEngine: ~Copyable {
             layerIndex: layer,
             config: config,
             weightDirURL: weightDirURL,
-            spatial: spatial
+            spatial: spatial,
+            environment: environment
         )
         let inputSurface: IOSurfaceRef
         do {
@@ -2110,14 +2206,16 @@ public struct RealModelInferenceEngine: ~Copyable {
         weightDir: String,
         layer: Int,
         spatial: Int,
-        input: [Float]
+        input: [Float],
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> [Float] {
         try compileAndEvalSingleLayerAttentionOutputsForTesting(
             config: config,
             weightDir: weightDir,
             layer: layer,
             spatial: spatial,
-            input: input
+            input: input,
+            environment: environment
         ).hidden
     }
 
@@ -2126,7 +2224,8 @@ public struct RealModelInferenceEngine: ~Copyable {
         weightDir: String,
         layer: Int,
         spatial: Int,
-        input: [Float]
+        input: [Float],
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> AttentionTestingOutputs {
         let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
         try validateDirectory(weightDirURL)
@@ -2134,7 +2233,8 @@ public struct RealModelInferenceEngine: ~Copyable {
             layerIndex: layer,
             config: config,
             weightDirURL: weightDirURL,
-            spatial: spatial
+            spatial: spatial,
+            environment: environment
         )
         let inputSurface: IOSurfaceRef
         do {
@@ -2174,6 +2274,99 @@ public struct RealModelInferenceEngine: ~Copyable {
             try Self.readFP32(from: vSurface, into: buffer)
         }
         return AttentionTestingOutputs(hidden: hidden, kCache: kCache, vCache: vCache)
+    }
+
+    public static func probeGPT2AttentionCompilation(
+        config: MultiModelConfig,
+        weightDir: String,
+        layer: Int = 0,
+        spatials: [Int] = [64, 128, 256],
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> [GPT2AttentionCompileProbeResult] {
+        guard config.architecture == .gpt2 else {
+            throw RealModelInferenceError.unsupportedArchitecture(
+                "GPT-2 attention compile probe supports GPT-2 architectures only."
+            )
+        }
+
+        let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
+        try validateDirectory(weightDirURL)
+        let paths = LayerWeightPaths.forLayer(layer, config: config, blobDir: weightDirURL.path)
+        let deploymentTarget = milDeploymentTarget(environment: environment)
+        let normKind = gpt2NormKind(environment: environment)
+
+        return spatials.map { spatial in
+            let graph = buildGPT2AttentionBlockGraph(
+                layerIndex: layer,
+                config: config,
+                paths: paths,
+                spatial: spatial,
+                environment: environment
+            )
+            var optimized = graph
+            ANEOptimizationPipeline.optimize(&optimized)
+            let diagnostics = ANEValidationPass().run(on: optimized).map(\.message)
+            do {
+                let ioBytes = try ANEShape(channels: config.dModel, spatial: spatial).byteSize(for: .fp32)
+                _ = try compileLayerBlock(
+                    layerIndex: layer,
+                    kind: .attention,
+                    graph: graph,
+                    weights: try attentionWeights(
+                        config: config,
+                        diskPaths: paths,
+                        weightDirURL: weightDirURL,
+                        spatial: spatial
+                    ),
+                    inputBytes: ioBytes,
+                    outputBytes: [ioBytes, ioBytes, ioBytes],
+                    weightDirURL: weightDirURL,
+                    spatial: spatial,
+                    environment: environment
+                )
+                return GPT2AttentionCompileProbeResult(
+                    spatial: spatial,
+                    deploymentTarget: deploymentTarget,
+                    normKind: normKind.rawValue,
+                    diagnostics: diagnostics,
+                    compileSucceeded: true,
+                    error: nil
+                )
+            } catch {
+                return GPT2AttentionCompileProbeResult(
+                    spatial: spatial,
+                    deploymentTarget: deploymentTarget,
+                    normKind: normKind.rawValue,
+                    diagnostics: diagnostics,
+                    compileSucceeded: false,
+                    error: (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                )
+            }
+        }
+    }
+
+    static func emitGPT2AttentionMILForTesting(
+        config: MultiModelConfig,
+        weightDir: String,
+        layer: Int = 0,
+        spatial: Int,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> String {
+        let weightDirURL = URL(fileURLWithPath: weightDir, isDirectory: true)
+        try validateDirectory(weightDirURL)
+        let paths = LayerWeightPaths.forLayer(layer, config: config, blobDir: weightDirURL.path)
+        var graph = buildGPT2AttentionBlockGraph(
+            layerIndex: layer,
+            config: config,
+            paths: paths,
+            spatial: spatial,
+            environment: environment
+        )
+        ANEOptimizationPipeline.optimize(&graph)
+        return rewriteMILWeightPaths(
+            ANECodegen.emit(graph, deploymentTarget: milDeploymentTarget(environment: environment)),
+            rootDir: weightDirURL
+        )
     }
 
     static func composeEmbeddingInputForTesting(
@@ -4386,14 +4579,7 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
 
         let hybridHeadSpatial = Self.incrementalHeadSpatial(channels: config.dModel)
-        let useFactoredGreedyHead = llamaAssets.factoredOutputHead != nil
-        let useFusedExactGreedyHead =
-            classifierStrategy.usesANEClassifier &&
-            !useFactoredGreedyHead &&
-            Self.usesLlamaHybridFusedExactHead(
-                config: config,
-                environment: ProcessInfo.processInfo.environment
-            )
+        let greedyHeadMode = hybridGreedyHeadMode()
 
         // Compile RMSNorm head (no beta) for llama
         if compiledHybridHead.count != 1 || compiledHybridHeadSpatial != hybridHeadSpatial {
@@ -4411,7 +4597,8 @@ public struct RealModelInferenceEngine: ~Copyable {
         }
 
         if classifierStrategy.usesANEClassifier {
-            if useFactoredGreedyHead {
+            switch greedyHeadMode {
+            case .classifierOnlyFactored:
                 if compiledHybridGreedyNorm.count != 0 {
                     compiledHybridGreedyNorm = Self.emptyStorage(CompiledHead.self)
                     didCompile = true
@@ -4438,7 +4625,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                    let finalSurface = compiledHybridSurfaceHandles.last?.ffnOut {
                     try compiledHybridGreedyClassifier[0].kernel.rebindInput(at: 0, to: finalSurface)
                 }
-            } else if useFusedExactGreedyHead {
+            case .classifierOnlyFused:
                 if compiledHybridGreedyNorm.count != 0 {
                     compiledHybridGreedyNorm = Self.emptyStorage(CompiledHead.self)
                     didCompile = true
@@ -4457,7 +4644,7 @@ public struct RealModelInferenceEngine: ~Copyable {
                    let finalSurface = compiledHybridSurfaceHandles.last?.ffnOut {
                     try compiledHybridGreedyClassifier[0].kernel.rebindInput(at: 0, to: finalSurface)
                 }
-            } else {
+            case .normThenClassifier:
                 if compiledHybridGreedyNorm.count != 1 || compiledHybridGreedySpatial != hybridHeadSpatial {
                     compiledHybridGreedyNorm = try LayerStorage<CompiledHead>(count: 1, throwingInitializer: { _ in
                         try Self.compileLlamaHead(
@@ -4582,22 +4769,14 @@ public struct RealModelInferenceEngine: ~Copyable {
             throw RealModelInferenceError.runtimeFailure("Hybrid decode state initialization failed: \(error)")
         }
         var timings = HybridDecodeTimingBreakdown()
-        let usingFactoredGreedyHead = llamaAssets.factoredOutputHead != nil
-        let usingFusedExactGreedyHead =
-            !usingFactoredGreedyHead &&
-            Self.usesLlamaHybridFusedExactHead(
-                config: config,
-                environment: ProcessInfo.processInfo.environment
-            )
+        let greedyHeadMode = hybridGreedyHeadMode()
         let useANEGreedyHead =
             temperature == 0 &&
             classifierStrategy.usesANEClassifier &&
             compiledHybridGreedyClassifier.count == 1 &&
-            (
-                (usingFactoredGreedyHead && compiledHybridGreedyNorm.count == 0) ||
-                (usingFusedExactGreedyHead && compiledHybridGreedyNorm.count == 0) ||
-                (!usingFactoredGreedyHead && !usingFusedExactGreedyHead && compiledHybridGreedyNorm.count == 1)
-            )
+            (greedyHeadMode == .normThenClassifier
+                ? compiledHybridGreedyNorm.count == 1
+                : compiledHybridGreedyNorm.count == 0)
 
         for (position, token) in promptTokens.enumerated() {
             try writeIncrementalEmbedding(token: token, position: position, into: xCur)
@@ -4679,7 +4858,9 @@ public struct RealModelInferenceEngine: ~Copyable {
             let nextToken: TokenID
             if useANEGreedyHead {
                 do {
-                    try compiledHybridGreedyNorm[0].kernel.eval()
+                    if greedyHeadMode == .normThenClassifier {
+                        try compiledHybridGreedyNorm[0].kernel.eval()
+                    }
                     try compiledHybridGreedyClassifier[0].kernel.eval()
                     let argmax = try Self.greedyArgmax(
                         classifier: compiledHybridGreedyClassifier[0],
@@ -5363,22 +5544,14 @@ public struct RealModelInferenceEngine: ~Copyable {
             throw RealModelInferenceError.runtimeFailure("Llama hybrid decode state initialization failed: \(error)")
         }
         var timings = HybridDecodeTimingBreakdown()
-        let usingFactoredGreedyHead = llamaAssets.factoredOutputHead != nil
-        let usingFusedExactGreedyHead =
-            !usingFactoredGreedyHead &&
-            Self.usesLlamaHybridFusedExactHead(
-                config: config,
-                environment: ProcessInfo.processInfo.environment
-            )
+        let greedyHeadMode = hybridGreedyHeadMode()
         let useANEGreedyHead =
             temperature == 0 &&
             classifierStrategy.usesANEClassifier &&
             compiledHybridGreedyClassifier.count == 1 &&
-            (
-                (usingFactoredGreedyHead && compiledHybridGreedyNorm.count == 0) ||
-                (usingFusedExactGreedyHead && compiledHybridGreedyNorm.count == 0) ||
-                (!usingFactoredGreedyHead && !usingFusedExactGreedyHead && compiledHybridGreedyNorm.count == 1)
-            )
+            (greedyHeadMode == .normThenClassifier
+                ? compiledHybridGreedyNorm.count == 1
+                : compiledHybridGreedyNorm.count == 0)
 
         let useCPUExactGreedyHead =
             temperature == 0 &&
@@ -5653,7 +5826,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             let nextToken: TokenID
             if useANEGreedyHead {
                 do {
-                    if usingFactoredGreedyHead || usingFusedExactGreedyHead {
+                    if greedyHeadMode != .normThenClassifier {
                         try compiledHybridGreedyClassifier[0].kernel.eval()
                     } else {
                         try compiledHybridGreedyNorm[0].kernel.eval()
@@ -5787,7 +5960,7 @@ public struct RealModelInferenceEngine: ~Copyable {
             tokensPerSecond: tokensPerSecond,
             compileTimeMs: compileTimeMs,
             firstTokenLatencyMs: firstTokenLatencyMs,
-            exactHeadBackend: usingFactoredGreedyHead && useANEGreedyHead
+            exactHeadBackend: greedyHeadMode == .classifierOnlyFactored && useANEGreedyHead
                 ? "ane_factored_classifier"
                 : classifierStrategy.exactHeadBackendLabel,
             cachedBindingsEnabled: cachedBindings != nil
@@ -6297,14 +6470,16 @@ public struct RealModelInferenceEngine: ~Copyable {
     private static func compileLayers(
         config: MultiModelConfig,
         weightDirURL: URL,
-        bucket: Int
+        bucket: Int,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> LayerStorage<CompiledLayer> {
         try LayerStorage<CompiledLayer>(count: config.nLayer, throwingInitializer: { layerIndex in
             try compileLayer(
                 layerIndex: layerIndex,
                 config: config,
                 weightDirURL: weightDirURL,
-                spatial: bucket
+                spatial: bucket,
+                environment: environment
             )
         })
     }
@@ -6660,7 +6835,8 @@ public struct RealModelInferenceEngine: ~Copyable {
         layerIndex: Int,
         config: MultiModelConfig,
         weightDirURL: URL,
-        spatial: Int
+        spatial: Int,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> CompiledLayer {
         let paths = LayerWeightPaths.forLayer(layerIndex, config: config, blobDir: weightDirURL.path)
         let ioBytes = try ANEShape(channels: config.dModel, spatial: spatial).byteSize(for: .fp32)
@@ -6669,7 +6845,8 @@ public struct RealModelInferenceEngine: ~Copyable {
             layerIndex: layerIndex,
             config: config,
             paths: paths,
-            spatial: spatial
+            spatial: spatial,
+            environment: environment
         )
         let attentionKernel = try compileLayerBlock(
             layerIndex: layerIndex,
@@ -6684,7 +6861,8 @@ public struct RealModelInferenceEngine: ~Copyable {
             inputBytes: ioBytes,
             outputBytes: [ioBytes, ioBytes, ioBytes],
             weightDirURL: weightDirURL,
-            spatial: spatial
+            spatial: spatial,
+            environment: environment
         )
 
         let attentionOutputSurface: IOSurfaceRef
@@ -6698,7 +6876,8 @@ public struct RealModelInferenceEngine: ~Copyable {
             layerIndex: layerIndex,
             config: config,
             paths: paths,
-            spatial: spatial
+            spatial: spatial,
+            environment: environment
         )
         let ffnKernel = try compileLayerBlock(
             layerIndex: layerIndex,
@@ -6712,7 +6891,8 @@ public struct RealModelInferenceEngine: ~Copyable {
             inputBytes: ioBytes,
             outputBytes: [ioBytes],
             weightDirURL: weightDirURL,
-            spatial: spatial
+            spatial: spatial,
+            environment: environment
         )
 
         let outputSurface: IOSurfaceRef
@@ -6742,11 +6922,15 @@ public struct RealModelInferenceEngine: ~Copyable {
         inputBytes: Int,
         outputBytes: [Int],
         weightDirURL: URL,
-        spatial: Int
+        spatial: Int,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> ANEKernel {
         var optimized = graph
         ANEOptimizationPipeline.optimize(&optimized)
-        let mil = rewriteMILWeightPaths(ANECodegen.emit(optimized), rootDir: weightDirURL)
+        let mil = rewriteMILWeightPaths(
+            ANECodegen.emit(optimized, deploymentTarget: milDeploymentTarget(environment: environment)),
+            rootDir: weightDirURL
+        )
         let diagnostics = ANEValidationPass().run(on: optimized)
         do {
             return try ANEKernel(
@@ -6847,17 +7031,22 @@ public struct RealModelInferenceEngine: ~Copyable {
         assets: GPT2TopLevelAssets,
         spatial: Int,
         inputDType: ANEDType = .fp32,
-        outputDType: ANEDType = .fp32
+        outputDType: ANEDType = .fp32,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> CompiledHead {
         var graph = buildGPT2HeadGraph(
             config: config,
             assets: assets,
             spatial: spatial,
             inputDType: inputDType,
-            outputDType: outputDType
+            outputDType: outputDType,
+            environment: environment
         )
         ANEOptimizationPipeline.optimize(&graph)
-        let mil = rewriteMILWeightPaths(ANECodegen.emit(graph), rootDir: weightDirURL)
+        let mil = rewriteMILWeightPaths(
+            ANECodegen.emit(graph, deploymentTarget: milDeploymentTarget(environment: environment)),
+            rootDir: weightDirURL
+        )
         let inputBytes = try ANEShape(channels: config.dModel, spatial: spatial).byteSize(for: inputDType)
         let outputBytes = try ANEShape(channels: config.dModel, spatial: spatial).byteSize(for: outputDType)
         let kernel: ANEKernel
@@ -7165,7 +7354,8 @@ public struct RealModelInferenceEngine: ~Copyable {
         layerIndex: Int,
         config: MultiModelConfig,
         paths: LayerWeightPaths,
-        spatial: Int
+        spatial: Int,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> ANEGraph {
         var graph = ANEGraph()
         let prefix = "layer\(layerIndex)"
@@ -7175,15 +7365,28 @@ public struct RealModelInferenceEngine: ~Copyable {
             shape: try! ANEShape(channels: config.dModel, spatial: spatial)
         )
         let x16 = try! graph.cast("\(prefix)_x16", input: input, to: .fp16)
-        let ln1 = try! graph.layerNorm128(
-            "\(prefix)_ln1",
-            input: x16,
-            dim: config.dModel,
-            spatial: spatial,
-            eps: config.normEps,
-            gammaPath: paths.rmsAtt,
-            betaPath: replacingGammaSuffix(in: paths.rmsAtt)
-        )
+        let ln1: Int
+        switch gpt2NormKind(environment: environment) {
+        case .layerNorm:
+            ln1 = try! graph.layerNorm128(
+                "\(prefix)_ln1",
+                input: x16,
+                dim: config.dModel,
+                spatial: spatial,
+                eps: config.normEps,
+                gammaPath: paths.rmsAtt,
+                betaPath: replacingGammaSuffix(in: paths.rmsAtt)
+            )
+        case .rmsNorm:
+            ln1 = try! graph.rmsNorm128(
+                "\(prefix)_ln1",
+                input: x16,
+                dim: config.dModel,
+                spatial: spatial,
+                eps: config.normEps,
+                weightPath: paths.rmsAtt
+            )
+        }
         let q = try! graph.linear128(
             "\(prefix)_q",
             input: ln1,
@@ -7244,7 +7447,8 @@ public struct RealModelInferenceEngine: ~Copyable {
         layerIndex: Int,
         config: MultiModelConfig,
         paths: LayerWeightPaths,
-        spatial: Int
+        spatial: Int,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> ANEGraph {
         var graph = ANEGraph()
         let prefix = "layer\(layerIndex)"
@@ -7254,15 +7458,28 @@ public struct RealModelInferenceEngine: ~Copyable {
             shape: try! ANEShape(channels: config.dModel, spatial: spatial)
         )
         let x16 = try! graph.cast("\(prefix)_x16", input: input, to: .fp16)
-        let ln2 = try! graph.layerNorm128(
-            "\(prefix)_ln2",
-            input: x16,
-            dim: config.dModel,
-            spatial: spatial,
-            eps: config.normEps,
-            gammaPath: paths.rmsFfn,
-            betaPath: replacingGammaSuffix(in: paths.rmsFfn)
-        )
+        let ln2: Int
+        switch gpt2NormKind(environment: environment) {
+        case .layerNorm:
+            ln2 = try! graph.layerNorm128(
+                "\(prefix)_ln2",
+                input: x16,
+                dim: config.dModel,
+                spatial: spatial,
+                eps: config.normEps,
+                gammaPath: paths.rmsFfn,
+                betaPath: replacingGammaSuffix(in: paths.rmsFfn)
+            )
+        case .rmsNorm:
+            ln2 = try! graph.rmsNorm128(
+                "\(prefix)_ln2",
+                input: x16,
+                dim: config.dModel,
+                spatial: spatial,
+                eps: config.normEps,
+                weightPath: paths.rmsFfn
+            )
+        }
         let ffn = try! graph.ffn128(
             "\(prefix)_ffn",
             input: ln2,
@@ -7286,7 +7503,8 @@ public struct RealModelInferenceEngine: ~Copyable {
         assets: GPT2TopLevelAssets,
         spatial: Int,
         inputDType: ANEDType = .fp32,
-        outputDType: ANEDType = .fp32
+        outputDType: ANEDType = .fp32,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> ANEGraph {
         var graph = ANEGraph()
         let input = try! graph.input(
@@ -7295,15 +7513,28 @@ public struct RealModelInferenceEngine: ~Copyable {
             shape: try! ANEShape(channels: config.dModel, spatial: spatial)
         )
         let x16 = inputDType == .fp16 ? input : try! graph.cast("final_ln_x16", input: input, to: .fp16)
-        let norm = try! graph.layerNorm128(
-            "final_ln",
-            input: x16,
-            dim: config.dModel,
-            spatial: spatial,
-            eps: config.normEps,
-            gammaPath: assets.finalNormGammaPath,
-            betaPath: assets.finalNormBetaPath
-        )
+        let norm: Int
+        switch gpt2NormKind(environment: environment) {
+        case .layerNorm:
+            norm = try! graph.layerNorm128(
+                "final_ln",
+                input: x16,
+                dim: config.dModel,
+                spatial: spatial,
+                eps: config.normEps,
+                gammaPath: assets.finalNormGammaPath,
+                betaPath: assets.finalNormBetaPath
+            )
+        case .rmsNorm:
+            norm = try! graph.rmsNorm128(
+                "final_ln",
+                input: x16,
+                dim: config.dModel,
+                spatial: spatial,
+                eps: config.normEps,
+                weightPath: assets.finalNormGammaPath
+            )
+        }
         let output = outputDType == .fp16 ? norm : try! graph.cast("hidden", input: norm, to: .fp32)
         _ = try! graph.output(output, name: "hidden")
         return graph

@@ -5,10 +5,10 @@ import Foundation
 @Test func manifestRenderingIsDeterministic() throws {
     let manifest = ESPManifest(
         formatVersion: "1.1.0",
-        modelID: "espresso.qwen.0_6b",
-        modelFamily: .qwen,
+        modelID: "espresso.llama.1b",
+        modelFamily: .llama,
         architectureVersion: "decoder-v1",
-        tokenizerContract: "qwen-bpe-v1",
+        tokenizerContract: "sentencepiece-v1",
         supportedBackends: [.anePrivate, .cpuSafe],
         supportedProfiles: [.prefill256, .prefill2048, .decode1],
         maxContext: 2048,
@@ -49,7 +49,7 @@ import Foundation
     let renderedA = manifest.renderTOML()
     let renderedB = manifest.renderTOML()
     #expect(renderedA == renderedB)
-    #expect(renderedA.contains("model_family = \"qwen\""))
+    #expect(renderedA.contains("model_family = \"llama\""))
     #expect(renderedA.contains("model_tier = \"optimized\""))
     #expect(renderedA.contains("behavior_class = \"near_exact\""))
     #expect(renderedA.contains("context_target_tokens = 1024"))
@@ -106,10 +106,10 @@ import Foundation
 @Test func manifestRoundTripsThroughTOMLParser() throws {
     let manifest = ESPManifest(
         formatVersion: "1.1.0",
-        modelID: "espresso.gpt2.124m",
-        modelFamily: .gpt2,
+        modelID: "espresso.llama.1b",
+        modelFamily: .llama,
         architectureVersion: "decoder-v1",
-        tokenizerContract: "gpt2-bpe-v1",
+        tokenizerContract: "sentencepiece-v1",
         supportedBackends: [.anePrivate],
         supportedProfiles: [.prefill256, .decode1],
         maxContext: 1024,
@@ -149,6 +149,123 @@ import Foundation
 
     let parsed = try ESPManifest.parseTOML(manifest.renderTOML())
     #expect(parsed == manifest)
+}
+
+@Test func manifestValidationRejectsOutputHeadForNonLlamaBundles() {
+    let manifest = ESPManifest(
+        formatVersion: "1.1.0",
+        modelID: "espresso.gpt2.factored",
+        modelFamily: .gpt2,
+        architectureVersion: "decoder-v1",
+        tokenizerContract: "gpt2-bpe-v1",
+        supportedBackends: [.anePrivate],
+        supportedProfiles: [.prefill256, .decode1],
+        maxContext: 256,
+        contextTargetTokens: 256,
+        compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .nearExact,
+        adapterSlots: 0,
+        optimization: .init(recipe: "factored", qualityGate: "gated"),
+        outputHead: .init(
+            kind: .factored,
+            behaviorClass: .nearExact,
+            bottleneck: 64,
+            groups: 1,
+            projectionRef: "weights/cls_proj.bin",
+            expansionRef: "weights/cls_expand.bin"
+        ),
+        accuracyBaselineRef: "benchmarks/accuracy.json",
+        performanceBaselineRef: "benchmarks/perf.json",
+        signatureRef: "signatures/content-hashes.json"
+    )
+
+    do {
+        try manifest.validate()
+        #expect(Bool(false), "Expected non-llama output-head rejection")
+    } catch let error as ESPBundleValidationError {
+        #expect(error == .invalidOutputHead("output-head metadata is supported for llama bundles only"))
+    } catch {
+        #expect(Bool(false), "Unexpected error: \(error)")
+    }
+}
+
+@Test func manifestValidationRejectsUnsupportedDraftKindsAndFamilies() {
+    let qwenManifest = ESPManifest(
+        formatVersion: "1.1.0",
+        modelID: "espresso.qwen.draft",
+        modelFamily: .qwen,
+        architectureVersion: "decoder-v1",
+        tokenizerContract: "qwen-bpe-v1",
+        supportedBackends: [.anePrivate],
+        supportedProfiles: [.prefill256, .decode1],
+        maxContext: 256,
+        contextTargetTokens: 256,
+        compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .exact,
+        adapterSlots: 0,
+        optimization: .init(recipe: "draft", qualityGate: "gated"),
+        draft: .init(
+            kind: .exactTwoToken,
+            behaviorClass: .exact,
+            horizon: 2,
+            verifier: "exact",
+            rollback: "exact_replay",
+            artifactRef: "weights/future-sidecar.bin",
+            acceptanceMetric: "accepted_future_tokens"
+        ),
+        accuracyBaselineRef: "benchmarks/accuracy.json",
+        performanceBaselineRef: "benchmarks/perf.json",
+        signatureRef: "signatures/content-hashes.json"
+    )
+
+    do {
+        try qwenManifest.validate()
+        #expect(Bool(false), "Expected non-llama draft rejection")
+    } catch let error as ESPBundleValidationError {
+        #expect(error == .invalidDraft("draft metadata is supported for llama bundles only"))
+    } catch {
+        #expect(Bool(false), "Unexpected error: \(error)")
+    }
+
+    let llamaManifest = ESPManifest(
+        formatVersion: "1.1.0",
+        modelID: "espresso.llama.multi-token",
+        modelFamily: .llama,
+        architectureVersion: "decoder-v1",
+        tokenizerContract: "sentencepiece-v1",
+        supportedBackends: [.anePrivate],
+        supportedProfiles: [.prefill256, .decode1],
+        maxContext: 256,
+        contextTargetTokens: 256,
+        compressionPolicy: .init(name: "fp16", weightBits: 16, activationBits: nil),
+        modelTier: .optimized,
+        behaviorClass: .exact,
+        adapterSlots: 0,
+        optimization: .init(recipe: "draft", qualityGate: "gated"),
+        draft: .init(
+            kind: .multiToken,
+            behaviorClass: .nearExact,
+            horizon: 4,
+            verifier: "exact",
+            rollback: "exact_replay",
+            artifactRef: "weights/future-sidecar.bin",
+            acceptanceMetric: "accepted_future_tokens"
+        ),
+        accuracyBaselineRef: "benchmarks/accuracy.json",
+        performanceBaselineRef: "benchmarks/perf.json",
+        signatureRef: "signatures/content-hashes.json"
+    )
+
+    do {
+        try llamaManifest.validate()
+        #expect(Bool(false), "Expected unsupported multi-token draft rejection")
+    } catch let error as ESPBundleValidationError {
+        #expect(error == .invalidDraft("only exact_two_token drafts are currently supported"))
+    } catch {
+        #expect(Bool(false), "Unexpected error: \(error)")
+    }
 }
 
 @Test func manifestParserBackfillsDefaultsForLegacyV1Bundles() throws {

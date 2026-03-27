@@ -55,6 +55,9 @@ struct Options {
     var powerMode: PowerMode = .auto
     var outputDir: String?
     var jsonOutput = false
+    var probeGPT2AttentionCompile = false
+    var milDeploymentTarget: String?
+    var gpt2NormMode: String?
 
     static func parse(_ argv: [String]) throws -> Options {
         var options = Options()
@@ -161,6 +164,14 @@ struct Options {
                 options.powerMode = .off
             case "--json":
                 options.jsonOutput = true
+            case "--probe-gpt2-attention-compile":
+                options.probeGPT2AttentionCompile = true
+            case "--mil-deployment-target":
+                options.milDeploymentTarget = try value(for: flag, inlineValue: inlineValue, argv: argv, index: &index)
+            case "--gpt2-norm":
+                options.gpt2NormMode = try parseGPT2NormMode(
+                    try value(for: flag, inlineValue: inlineValue, argv: argv, index: &index)
+                )
             case "-h", "--help":
                 options.showHelp = true
             default:
@@ -263,6 +274,15 @@ struct Options {
             return raw
         default:
             throw CLIError.usage("Expected --coreml-compute-units all|cpu_and_neural_engine|cpu_and_gpu|cpu_only")
+        }
+    }
+
+    private static func parseGPT2NormMode(_ raw: String) throws -> String {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "layernorm", "rmsnorm":
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        default:
+            throw CLIError.usage("Expected --gpt2-norm layernorm|rmsnorm")
         }
     }
 }
@@ -511,6 +531,12 @@ private struct DoctorCheck: Sendable {
     let detail: String
 }
 
+private struct GPT2AttentionCompileProbePayload: Sendable {
+    let deploymentTarget: String
+    let normKind: String
+    let results: [RealModelInferenceEngine.GPT2AttentionCompileProbeResult]
+}
+
 private final class LockedValueBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: Value?
@@ -526,6 +552,24 @@ private final class LockedValueBox<Value>: @unchecked Sendable {
         let value = storage
         lock.unlock()
         return value
+    }
+}
+
+private func applyCLIExperimentEnvironment(_ options: Options) {
+    if let deploymentTarget = options.milDeploymentTarget?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !deploymentTarget.isEmpty {
+        setenv("ESPRESSO_MIL_DEPLOYMENT_TARGET", deploymentTarget, 1)
+    }
+
+    guard let gpt2NormMode = options.gpt2NormMode else {
+        return
+    }
+    setenv("ESPRESSO_GPT2_NORM", gpt2NormMode, 1)
+    switch gpt2NormMode {
+    case "rmsnorm":
+        setenv("ESPRESSO_GPT2_USE_RMS_NORM", "1", 1)
+    default:
+        setenv("ESPRESSO_GPT2_USE_RMS_NORM", "0", 1)
     }
 }
 
@@ -631,6 +675,12 @@ private func printUsage() {
           --power              Require power telemetry; exits if unavailable
           --no-power           Disable power telemetry
           --json               Emit JSON doctor/compare output to stdout
+          --probe-gpt2-attention-compile
+                               Doctor-only compile probe for GPT-2 attention MIL at spatial sizes 64, 128, and 256
+          --mil-deployment-target TARGET
+                               Override the emitted MIL deployment target (for example: ios18, ios19, macos26)
+          --gpt2-norm layernorm|rmsnorm
+                               Override GPT-2 normalization used by the real-model ANE path
           --list-models        Print available models and exit
           --no-bootstrap       Do not auto-install/download demo dependencies or assets
           --no-stats           Suppress timing stats on stderr
@@ -655,6 +705,9 @@ private func printUsage() {
       ESPRESSO_COMPARE_SEED
       ESPRESSO_MAX_TOKENS
       ESPRESSO_TEMPERATURE
+      ESPRESSO_MIL_DEPLOYMENT_TARGET
+      ESPRESSO_GPT2_NORM
+      ESPRESSO_GPT2_USE_RMS_NORM
 
     Examples:
       ./espresso
@@ -1692,6 +1745,48 @@ private func writeLatencyCSV(latencies: [Double], to url: URL) throws {
 }
 
 private func runDoctor(defaults: DemoDefaults, options: Options) throws -> Int32 {
+    if options.probeGPT2AttentionCompile {
+        let invocation = try resolveInvocation(from: options, demoDefaults: defaults, command: .doctor)
+        guard invocation.config.architecture == .gpt2 else {
+            throw CLIError.usage("GPT-2 attention compile probe requires a GPT-2 model/config.")
+        }
+        let payload = try runGPT2AttentionCompileProbe(invocation: invocation)
+        if options.jsonOutput {
+            let resultPayload = payload.results.map { result in
+                [
+                    "spatial": result.spatial,
+                    "compile_succeeded": result.compileSucceeded,
+                    "deployment_target": result.deploymentTarget,
+                    "norm_kind": result.normKind,
+                    "diagnostics": result.diagnostics,
+                    "error": result.error as Any,
+                ] as [String: Any]
+            }
+            let data = try JSONSerialization.data(withJSONObject: [
+                "deployment_target": payload.deploymentTarget,
+                "norm_kind": payload.normKind,
+                "results": resultPayload,
+            ], options: [.prettyPrinted, .sortedKeys])
+            print(String(decoding: data, as: UTF8.self))
+        } else {
+            print("GPT-2 Attention Compile Probe")
+            print("============================")
+            print("deployment_target: \(payload.deploymentTarget)")
+            print("norm_kind: \(payload.normKind)")
+            for result in payload.results {
+                let status = result.compileSucceeded ? "OK" : "FAIL"
+                print("\(status.padding(toLength: 5, withPad: " ", startingAt: 0)) spatial=\(result.spatial)")
+                if !result.diagnostics.isEmpty {
+                    print("      diagnostics: \(result.diagnostics.joined(separator: " | "))")
+                }
+                if let error = result.error {
+                    print("      error: \(error)")
+                }
+            }
+        }
+        return payload.results.allSatisfy(\.compileSucceeded) ? 0 : 1
+    }
+
     let capability = PowerTelemetryCollector.capability()
     let checks: [DoctorCheck] = [
         DoctorCheck(
@@ -1750,6 +1845,20 @@ private func runDoctor(defaults: DemoDefaults, options: Options) throws -> Int32
     }
 
     return checks.contains(where: { $0.severity == .error }) ? 1 : 0
+}
+
+private func runGPT2AttentionCompileProbe(invocation: ResolvedInvocation) throws -> GPT2AttentionCompileProbePayload {
+    let results = try RealModelInferenceEngine.probeGPT2AttentionCompilation(
+        config: invocation.config,
+        weightDir: invocation.weightsDir,
+        spatials: [64, 128, 256]
+    )
+    let first = results.first
+    return GPT2AttentionCompileProbePayload(
+        deploymentTarget: first?.deploymentTarget ?? "ios18",
+        normKind: first?.normKind ?? "layernorm",
+        results: results
+    )
 }
 
 private func aneFrameworkAvailable() -> Bool {
@@ -2523,6 +2632,8 @@ enum EspressoGenerateCLI {
                 printAvailableModels()
                 return 0
             }
+
+            applyCLIExperimentEnvironment(options)
 
             let command = options.command ?? defaultCommand(for: options)
             let powerEnabled = try resolvePowerEnabled(command: command, powerMode: options.powerMode)

@@ -112,6 +112,114 @@ import Testing
     #expect(RealModelInferenceEngine.incrementalHeadSpatial(channels: 768) == 32)
 }
 
+@Test func test_milDeploymentTargetDefaultsToIOS18() {
+    #expect(RealModelInferenceEngine.milDeploymentTarget(environment: [:]) == "ios18")
+}
+
+@Test func test_milDeploymentTargetReadsEnvironmentOverride() {
+    #expect(
+        RealModelInferenceEngine.milDeploymentTarget(
+            environment: ["ESPRESSO_MIL_DEPLOYMENT_TARGET": "macos26"]
+        ) == "macos26"
+    )
+}
+
+@Test func test_gpt2NormKindDefaultsToLayerNorm() {
+    #expect(RealModelInferenceEngine.gpt2NormKind(environment: [:]) == .layerNorm)
+}
+
+@Test func test_gpt2NormKindSupportsRMSNormOverrides() {
+    #expect(
+        RealModelInferenceEngine.gpt2NormKind(
+            environment: ["ESPRESSO_GPT2_NORM": "rmsnorm"]
+        ) == .rmsNorm
+    )
+    #expect(
+        RealModelInferenceEngine.gpt2NormKind(
+            environment: ["ESPRESSO_GPT2_USE_RMS_NORM": "1"]
+        ) == .rmsNorm
+    )
+}
+
+@Test func test_hybridGreedyHeadModeKeepsGPT2OnNormThenClassifier() {
+    #expect(
+        RealModelInferenceEngine.hybridGreedyHeadMode(
+            config: makeTinyGPT2Config(),
+            hasFactoredOutputHead: true,
+            environment: ["ESPRESSO_ENABLE_LLAMA_HYBRID_FUSED_EXACT_HEAD": "1"]
+        ) == .normThenClassifier
+    )
+}
+
+@Test func test_hybridGreedyHeadModeSelectsLlamaFactoredAndFusedModes() {
+    let llamaConfig = MultiModelConfig(
+        name: "tiny-llama",
+        nLayer: 2,
+        nHead: 2,
+        nKVHead: 2,
+        dModel: 8,
+        headDim: 4,
+        hiddenDim: 16,
+        vocab: 64,
+        maxSeq: 8,
+        normEps: 1e-5,
+        architecture: .llama
+    )
+
+    #expect(
+        RealModelInferenceEngine.hybridGreedyHeadMode(
+            config: llamaConfig,
+            hasFactoredOutputHead: true,
+            environment: [:]
+        ) == .classifierOnlyFactored
+    )
+    #expect(
+        RealModelInferenceEngine.hybridGreedyHeadMode(
+            config: llamaConfig,
+            hasFactoredOutputHead: false,
+            environment: ["ESPRESSO_ENABLE_LLAMA_HYBRID_FUSED_EXACT_HEAD": "1"]
+        ) == .classifierOnlyFused
+    )
+    #expect(
+        RealModelInferenceEngine.hybridGreedyHeadMode(
+            config: llamaConfig,
+            hasFactoredOutputHead: false,
+            environment: [:]
+        ) == .normThenClassifier
+    )
+}
+
+@Test func test_emitGPT2AttentionMILForTestingSupportsDeploymentTargetOverride() throws {
+    let config = makeTinyGPT2Config()
+    let weightDir = try makeMinimalGPT2WeightDirectory(config: config)
+    defer { try? FileManager.default.removeItem(at: weightDir) }
+
+    let mil = try RealModelInferenceEngine.emitGPT2AttentionMILForTesting(
+        config: config,
+        weightDir: weightDir.path,
+        spatial: 8,
+        environment: ["ESPRESSO_MIL_DEPLOYMENT_TARGET": "ios19"]
+    )
+
+    #expect(mil.contains("func main<ios19>("))
+}
+
+@Test func test_emitGPT2AttentionMILForTestingSupportsRMSNormExperiment() throws {
+    let config = makeTinyGPT2Config()
+    let weightDir = try makeMinimalGPT2WeightDirectory(config: config)
+    defer { try? FileManager.default.removeItem(at: weightDir) }
+
+    let mil = try RealModelInferenceEngine.emitGPT2AttentionMILForTesting(
+        config: config,
+        weightDir: weightDir.path,
+        spatial: 8,
+        environment: ["ESPRESSO_GPT2_NORM": "rmsnorm"]
+    )
+
+    #expect(mil.contains("_ln1_ss = reduce_sum("))
+    #expect(!mil.contains("_ln1_mean = reduce_mean("))
+}
+
 @Test func test_debugReferenceSiluMatchesExactTanhForm() {
     let samples: [Float] = [-8, -1.25, 0, 0.75, 6]
     for sample in samples {
@@ -1077,6 +1185,28 @@ private func shouldRunLegacyQwenExperimentTests(
     #expect(!result.text.isEmpty)
     #expect(!result.promptTokens.isEmpty)
     #expect(!result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+}
+
+@Test func test_gpt2HybridGenerationWithMinimalWeights() throws {
+    guard shouldRunANEHardwareTests() else { return }
+
+    let config = makeHardwareGPT2Config()
+    let weightDir = try makeMinimalGPT2WeightDirectory(config: config)
+    let tokenizerDir = try makeGPT2TokenizerDirectory()
+    defer {
+        try? FileManager.default.removeItem(at: weightDir)
+        try? FileManager.default.removeItem(at: tokenizerDir)
+    }
+
+    var engine = try RealModelInferenceEngine.build(
+        config: config,
+        weightDir: weightDir.path,
+        tokenizerDir: tokenizerDir.path
+    )
+    let result = try engine.generate(prompt: "Hello", maxTokens: 1, temperature: 0.0)
+
+    #expect(!result.promptTokens.isEmpty)
+    #expect(result.text.hasPrefix("Hello"))
 }
 
 @Test func test_llama32GreedyNextTokenPrefixesMatchHFReference() throws {
