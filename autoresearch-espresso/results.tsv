@@ -1,5 +1,7 @@
 commit	tok_s	ms_per_tok	compile_ms	quality	status	description
-574b239	68.0	15.1	841	1.00	keep	REAL baseline: .esp bundle generate (hybrid decode + Metal attention)
-574b239	163.2	6.1	1708	1.00	ref	probe benchmark: non-fused decode (no real attention, cache-touch only)
-3b419bf	249.8	4.0	1450	1.00	ref	probe benchmark: fused decode kernels (no real attention)
+574b239	68.0	15.1	841	1.00	keep	REAL baseline: .esp bundle generate (hybrid decode + Metal attention, 12 layers)
+574b239	163.2	6.1	1708	1.00	ref	PROBE benchmark: non-fused decode (cache-touch, no real attention)
+3b419bf	249.8	4.0	1450	1.00	keep	PROBE benchmark: fused decode kernels (attn+FFN per layer, no real attention) — 1.53x probe
 740a007	0.0	0.0	0	0.00	crash	two-layer fused decode (ANE compilation fails: InvalidMILProgram)
+eada8c8	250.6	4.0	1530	1.00	discard	MIL header version bump (3510→3520): no measurable improvement
+df73add	68.0	15.1	841	1.00	ref	REAL baseline confirmed: 10 iterations, 68 tok/s stable

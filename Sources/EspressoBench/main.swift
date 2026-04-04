@@ -703,10 +703,7 @@ if opts.decode {
                 profileKernels: opts.profileKernels
             )
         } else if opts.fusedRealAttention {
-            // TODO: Wire up real attention fused decode benchmark
-            // For now, fall back to regular fused decode
-            printStderr("WARNING: --fused-real-attention not yet wired up, using regular fused decode")
-            decodeResult = try ANEDirectBench.runFusedDecode(
+            decodeResult = try ANEDirectBench.runFusedRealAttentionDecode(
                 warmup: opts.warmup,
                 iterations: opts.iterations,
                 decodeSteps: opts.decodeSteps,
