@@ -11,6 +11,7 @@ struct BenchmarkOptions {
     var aneOnly: Bool = false
     var inference: Bool = false
     var decode: Bool = false
+    var fused: Bool = false
     var inferenceFP16Handoff: Bool = false
     var inferenceOnly: Bool = false
     var profileKernels: Bool = false
@@ -58,6 +59,8 @@ struct BenchmarkOptions {
                 opts.inference = true
             case "--decode":
                 opts.decode = true
+            case "--fused":
+                opts.fused = true
             case "--inference-fp16-handoff":
                 opts.inferenceFP16Handoff = true
             case "--inference-only":
@@ -684,14 +687,25 @@ func decodeProfileAverages(_ profile: DecodeKernelProfile) -> [[String: Any]] {
 if opts.decode {
     let decodeResult: ANEDirectBench.Result
     do {
-        decodeResult = try ANEDirectBench.runDecode(
-            warmup: opts.warmup,
-            iterations: opts.iterations,
-            decodeSteps: opts.decodeSteps,
-            decodeMaxSeq: opts.decodeMaxSeq,
-            nLayers: opts.nLayers,
-            profileKernels: opts.profileKernels
-        )
+        if opts.fused {
+            decodeResult = try ANEDirectBench.runFusedDecode(
+                warmup: opts.warmup,
+                iterations: opts.iterations,
+                decodeSteps: opts.decodeSteps,
+                decodeMaxSeq: opts.decodeMaxSeq,
+                nLayers: opts.nLayers,
+                profileKernels: opts.profileKernels
+            )
+        } else {
+            decodeResult = try ANEDirectBench.runDecode(
+                warmup: opts.warmup,
+                iterations: opts.iterations,
+                decodeSteps: opts.decodeSteps,
+                decodeMaxSeq: opts.decodeMaxSeq,
+                nLayers: opts.nLayers,
+                profileKernels: opts.profileKernels
+            )
+        }
     } catch {
         printStderr("ANE decode benchmark failed: \(error)")
         exit(1)
