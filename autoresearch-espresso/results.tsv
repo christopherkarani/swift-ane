@@ -5,3 +5,4 @@ commit	tok_s	ms_per_tok	compile_ms	quality	status	description
 740a007	0.0	0.0	0	0.00	crash	two-layer fused decode (ANE compilation fails: InvalidMILProgram)
 eada8c8	250.6	4.0	1530	1.00	discard	MIL header version bump (3510→3520): no measurable improvement
 df73add	68.0	15.1	841	1.00	ref	REAL baseline confirmed: 10 iterations, 68 tok/s stable
+580aeb2	0.0	0.0	0	0.00	crash	fused real-attention decode (ANECCompile fails: full attn matmul+softmax exceeds ANE single-program capacity). Hybrid Metal+ANE remains the viable path.
