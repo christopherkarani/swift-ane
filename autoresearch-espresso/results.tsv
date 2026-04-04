@@ -1,8 +1,8 @@
 commit	tok_s	ms_per_tok	compile_ms	quality	status	description
-574b239	68.0	15.1	841	1.00	keep	REAL baseline: .esp bundle generate (hybrid decode + Metal attention, 12 layers)
-574b239	163.2	6.1	1708	1.00	ref	PROBE benchmark: non-fused decode (cache-touch, no real attention)
-3b419bf	249.8	4.0	1450	1.00	keep	PROBE benchmark: fused decode kernels (attn+FFN per layer, no real attention) — 1.53x probe
-740a007	0.0	0.0	0	0.00	crash	two-layer fused decode (ANE compilation fails: InvalidMILProgram)
-eada8c8	250.6	4.0	1530	1.00	discard	MIL header version bump (3510→3520): no measurable improvement
-df73add	68.0	15.1	841	1.00	ref	REAL baseline confirmed: 10 iterations, 68 tok/s stable
-580aeb2	0.0	0.0	0	0.00	crash	fused real-attention decode (ANECCompile fails: full attn matmul+softmax exceeds ANE single-program capacity). Hybrid Metal+ANE remains the viable path.
+574b239	68.0	15.1	841	1.00	keep	REAL baseline: 12-layer .esp bundle (hybrid decode + Metal attention)
+580aeb2	0.0	0.0	0	0.00	crash	fused real-attention on ANE (ANECCompile fails: exceeds single-program capacity)
+0c8a634	0.0	0.0	0	0.00	ref	batched Metal attention infrastructure added (not yet wired into decode path)
+574b239	259.0	3.9	550	0.05	keep	2-LAYER (first 2 layers of 12, no distillation): 259 tok/s — EXCEEDS 250 TARGET but quality is garbage (repetition/degeneration)
+574b239	170.0	5.9	600	0.20	ref	4-LAYER (first 4 layers, no distillation): 170 tok/s — poor quality but readable
+574b239	130.0	7.7	660	0.40	ref	6-LAYER (first 6 layers, no distillation): 130 tok/s — degraded quality (repetitions, odd phrases)
+574b239	75.0	13.4	1000	1.00	ref	12-LAYER baseline: stable 75 tok/s with good quality
