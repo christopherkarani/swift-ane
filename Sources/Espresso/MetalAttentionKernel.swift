@@ -1402,9 +1402,9 @@ public final class MetalAttentionKernel {
     /// Batched decode attention: encodes ALL layers' attention into ONE command buffer.
     /// Eliminates per-layer command buffer creation/commit/sync overhead.
     struct LayerAttentionBindings {
-        let qBinding: SurfaceBinding
-        let kBinding: SurfaceBinding
-        let vBinding: SurfaceBinding
+        fileprivate let qBinding: SurfaceBinding
+        fileprivate let kBinding: SurfaceBinding
+        fileprivate let vBinding: SurfaceBinding
         let contextBuffer: MTLBuffer
     }
 
