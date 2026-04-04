@@ -16,7 +16,12 @@ public enum ModelConfig {
     }
 
     public static let accumSteps = 10
-    public static let maxCompiles = 100
+    public static var maxCompiles: Int {
+        if let env = ProcessInfo.processInfo.environment["ESPRESSO_MAX_COMPILES"], let n = Int(env) {
+            return n
+        }
+        return 100
+    }
 
     public static let kernelsPerLayer = 5
     public static var totalWeightKernels: Int { kernelsPerLayer * nLayers }
