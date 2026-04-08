@@ -1,64 +1,167 @@
 """
-Experiment runner for Espresso autoresearch — ANE kernel tok/s optimization.
+Inference-first experiment runner for Espresso autoresearch.
 
-Usage:
-    python experiment_runner.py benchmark           # Run baseline benchmark
-    python experiment_runner.py bench-decode         # Run pure ANE decode benchmark
-    python experiment_runner.py generate            # Run .esp bundle generate benchmark
-    python experiment_runner.py quality [prompt]    # Check generation quality
-    python experiment_runner.py full                # Build + benchmark + quality
+This harness treats the hardened release-serving suite as the source-of-truth
+benchmark contract for tok/s optimization. Experiments are judged on:
+  - fixed-suite throughput and latency metrics
+  - exact token/text parity across the suite
+  - baseline regression gates from the retained shipping lane
 """
 
-import os
-import sys
-import re
-import json
-import time
-import subprocess
-from dataclasses import dataclass
-from pathlib import Path
+from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+import argparse
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-ESP_BUNDLE = "/tmp/stories110m.esp"
+AUTORESEARCH_DIR = PROJECT_ROOT / "autoresearch-espresso"
+RESULTS_TSV = AUTORESEARCH_DIR / "suite-results.tsv"
+RESULTS_HEADER = (
+    "timestamp\tcommit\tstatus\tespresso_tokens_per_second\tespresso_ttft_ms\t"
+    "espresso_median_token_ms\tespresso_p95_token_ms\tall_token_match\tall_text_match\t"
+    "correctness_gates_pass\tperformance_gates_pass\tmerge_recommended\t"
+    "output_dir\tbaseline_summary\tchange_summary\n"
+)
+DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results" / "autoresearch"
+DEFAULT_BUNDLE = PROJECT_ROOT / ".build" / "release-bundles" / "stories110m-smoke.esp"
+DEFAULT_PROMPTS_FILE = PROJECT_ROOT / "scripts" / "stories_release_benchmark_prompts.txt"
+DEFAULT_COREML_MODEL = Path.home() / "Library" / "Application Support" / "Espresso" / "demo" / "stories110m_coreml" / "stories110m_stateful_seq128.mlpackage"
+DEFAULT_COREML_SEQ_LEN = 128
+DEFAULT_COMPUTE_UNITS = "cpu_only"
+DEFAULT_MAX_TOKENS = 8
+DEFAULT_RUNS = 1
+DEFAULT_WARMUP = 1
+DEFAULT_ITERATIONS = 3
+DEFAULT_TIMEOUT_SECONDS = 15 * 60
+DEFAULT_MIN_TOK_S_RATIO = 0.97
+DEFAULT_MAX_TTFT_RATIO = 1.08
+DEFAULT_MAX_MEDIAN_RATIO = 1.05
+DEFAULT_MAX_P95_RATIO = 1.10
+CLANG_MODULE_CACHE = PROJECT_ROOT / ".build" / "clang-module-cache"
 
-# 4 fixed prompts for quality checking
-BENCHMARK_PROMPTS = [
-    "Once upon a time, there was a little girl named Lily. She had a red",
-    "The sun was shining brightly on a beautiful day. Birds were singing in",
-    "Deep in the forest, there lived a wise old owl. Every night, the",
-    "Tom was a brave astronaut. He flew his spaceship to the moon and",
-]
 
-QUALITY_MAX_TOKENS = 64
-BENCH_DECODE_STEPS = 32
-BENCH_DECODE_WARMUP = 2
-BENCH_DECODE_ITERATIONS = 50
-BENCH_DECODE_LAYERS = 12
+@dataclass(frozen=True)
+class HarnessConfig:
+    bundle: Path
+    prompts_file: Path
+    coreml_model: Path
+    baseline_summary: Path | None
+    max_tokens: int
+    runs: int
+    warmup: int
+    iterations: int
+    coreml_seq_len: int
+    compute_units: str
+    min_tok_s_ratio: float
+    max_ttft_ratio: float
+    max_median_ratio: float
+    max_p95_ratio: float
+
 
 @dataclass
-class BenchmarkResult:
+class SuiteBenchmarkResult:
     tokens_per_second: float
-    ms_per_token: float
-    compile_time_ms: float
-    status: str  # "ok", "build_failed", "bench_failed", "timeout", "crash"
+    ttft_ms: float
+    median_token_ms: float
+    p95_token_ms: float
+    all_token_match: bool
+    all_text_match: bool
+    correctness_gates_pass: bool
+    performance_gates_pass: bool
+    merge_recommended: bool | None
+    status: str
+    output_dir: Path | None = None
+    summary_path: Path | None = None
+    baseline_comparison_path: Path | None = None
     raw_output: str = ""
 
-@dataclass
-class QualityResult:
-    passed: bool
-    generated_text: str = ""
-    error: str = ""
 
-# ---------------------------------------------------------------------------
-# Build
-# ---------------------------------------------------------------------------
+def env_with_local_clang_cache() -> dict[str, str]:
+    env = os.environ.copy()
+    CLANG_MODULE_CACHE.mkdir(parents=True, exist_ok=True)
+    env["CLANG_MODULE_CACHE_PATH"] = str(CLANG_MODULE_CACHE)
+    return env
 
-def swift_build(product="espresso-bench", timeout=300):
-    """Run swift build and return (success, output)."""
+
+def current_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def git_current_commit() -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "--short=7", "HEAD"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() or "unknown"
+
+
+def resolve_default_baseline_summary(repo_root: Path = PROJECT_ROOT) -> Path | None:
+    latest_claim = repo_root / "artifacts" / "benchmarks" / "release-serving-stories" / "latest.json"
+    if latest_claim.exists():
+        try:
+            payload = json.loads(latest_claim.read_text())
+            artifact_directory = payload.get("artifact_directory")
+            if artifact_directory:
+                candidate = (repo_root / artifact_directory / "suite-summary.json").resolve()
+                if candidate.exists():
+                    return candidate
+        except json.JSONDecodeError:
+            pass
+
+    candidates = sorted(repo_root.glob("results/release-suite-stories-*/suite-summary.json"))
+    if candidates:
+        return candidates[-1].resolve()
+    return None
+
+
+def make_default_config() -> HarnessConfig:
+    return HarnessConfig(
+        bundle=Path(os.environ.get("ESPRESSO_AUTORESEARCH_BUNDLE", DEFAULT_BUNDLE)).expanduser().resolve(),
+        prompts_file=Path(os.environ.get("ESPRESSO_AUTORESEARCH_PROMPTS_FILE", DEFAULT_PROMPTS_FILE)).expanduser().resolve(),
+        coreml_model=Path(os.environ.get("ESPRESSO_AUTORESEARCH_COREML_MODEL", DEFAULT_COREML_MODEL)).expanduser().resolve(),
+        baseline_summary=(
+            Path(os.environ["ESPRESSO_AUTORESEARCH_BASELINE_SUMMARY"]).expanduser().resolve()
+            if os.environ.get("ESPRESSO_AUTORESEARCH_BASELINE_SUMMARY")
+            else resolve_default_baseline_summary()
+        ),
+        max_tokens=int(os.environ.get("ESPRESSO_AUTORESEARCH_MAX_TOKENS", DEFAULT_MAX_TOKENS)),
+        runs=int(os.environ.get("ESPRESSO_AUTORESEARCH_RUNS", DEFAULT_RUNS)),
+        warmup=int(os.environ.get("ESPRESSO_AUTORESEARCH_WARMUP", DEFAULT_WARMUP)),
+        iterations=int(os.environ.get("ESPRESSO_AUTORESEARCH_ITERATIONS", DEFAULT_ITERATIONS)),
+        coreml_seq_len=int(os.environ.get("ESPRESSO_AUTORESEARCH_COREML_SEQ_LEN", DEFAULT_COREML_SEQ_LEN)),
+        compute_units=os.environ.get("ESPRESSO_AUTORESEARCH_COREML_COMPUTE_UNITS", DEFAULT_COMPUTE_UNITS),
+        min_tok_s_ratio=float(os.environ.get("ESPRESSO_AUTORESEARCH_MIN_TOK_S_RATIO", DEFAULT_MIN_TOK_S_RATIO)),
+        max_ttft_ratio=float(os.environ.get("ESPRESSO_AUTORESEARCH_MAX_TTFT_RATIO", DEFAULT_MAX_TTFT_RATIO)),
+        max_median_ratio=float(os.environ.get("ESPRESSO_AUTORESEARCH_MAX_MEDIAN_RATIO", DEFAULT_MAX_MEDIAN_RATIO)),
+        max_p95_ratio=float(os.environ.get("ESPRESSO_AUTORESEARCH_MAX_P95_RATIO", DEFAULT_MAX_P95_RATIO)),
+    )
+
+
+def ensure_paths_exist(config: HarnessConfig) -> None:
+    required_paths = [
+        ("bundle", config.bundle),
+        ("prompts_file", config.prompts_file),
+        ("coreml_model", config.coreml_model),
+    ]
+    for label, path in required_paths:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing {label}: {path}")
+    if config.baseline_summary and not config.baseline_summary.exists():
+        raise FileNotFoundError(f"Missing baseline_summary: {config.baseline_summary}")
+
+
+def swift_build(product: str = "espresso-generate", timeout: int = 600) -> tuple[bool, str]:
     cmd = ["swift", "build", "--product", product, "-c", "release"]
     print(f"[build] {' '.join(cmd)}")
     try:
@@ -67,443 +170,435 @@ def swift_build(product="espresso-bench", timeout=300):
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
+            env=env_with_local_clang_cache(),
+            check=False,
         )
-        success = result.returncode == 0
-        output = result.stdout + result.stderr
-        if success:
-            print(f"[build] succeeded")
-        else:
-            print(f"[build] FAILED (exit code {result.returncode})")
-            lines = output.strip().split('\n')
-            print("\n".join(lines[-50:]))
-        return success, output
     except subprocess.TimeoutExpired:
-        print(f"[build] TIMED OUT after {timeout}s")
         return False, "BUILD_TIMEOUT"
 
-# ---------------------------------------------------------------------------
-# Benchmarks
-# ---------------------------------------------------------------------------
-
-def run_bench_decode(timeout=180):
-    """Run espresso-generate benchmark (.esp bundle) for REAL tok/s with actual attention."""
-    gen_path = PROJECT_ROOT / ".build" / "release" / "espresso-generate"
-    if not gen_path.exists():
-        success, _ = swift_build("espresso-generate")
-        if not success:
-            return BenchmarkResult(0, 0, 0, "build_failed")
-
-    cmd = [
-        str(gen_path), "bench",
-        "--bundle", ESP_BUNDLE,
-        "--max-tokens", str(32),
-        "--no-power", "--no-stats",
-        "--compare-warmup", "1",
-        "--compare-iterations", "10",
-        BENCHMARK_PROMPTS[0],
-    ]
-
-    print(f"[bench-generate] {' '.join(cmd)}")
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-        output = result.stdout + result.stderr
-        return parse_generate_benchmark(output)
-    except subprocess.TimeoutExpired:
-        print(f"[bench-generate] TIMED OUT after {timeout}s")
-        return BenchmarkResult(0, 0, 0, "timeout")
-
-def run_bench_generate(timeout=180):
-    """Run espresso-generate bench (real .esp bundle path)."""
-    gen_path = PROJECT_ROOT / ".build" / "release" / "espresso-generate"
-    if not gen_path.exists():
-        success, _ = swift_build("espresso-generate")
-        if not success:
-            return BenchmarkResult(0, 0, 0, "build_failed")
-
-    cmd = [
-        str(gen_path), "bench",
-        "--bundle", ESP_BUNDLE,
-        "--max-tokens", str(32),
-        "--no-power", "--no-stats",
-        "--compare-warmup", "1",
-        "--compare-iterations", "5",
-        BENCHMARK_PROMPTS[0],
-    ]
-
-    print(f"[bench-generate] {' '.join(cmd)}")
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-        output = result.stdout + result.stderr
-        return parse_generate_benchmark(output)
-    except subprocess.TimeoutExpired:
-        print(f"[bench-generate] TIMED OUT after {timeout}s")
-        return BenchmarkResult(0, 0, 0, "timeout")
-
-def parse_decode_benchmark(output):
-    """Parse espresso-bench --decode output.
-    
-    Example: "Throughput: 161.2 tok/s" and "Mean: 6.203 ms/token"
-    """
-    result = BenchmarkResult(0, 0, 0, "bench_failed", raw_output=output[-3000:])
-    
-    # Throughput
-    match = re.search(r'Throughput:\s*([\d.]+)\s*tok/s', output)
-    if match:
-        result.tokens_per_second = float(match.group(1))
-    
-    # ANE tokens/sec
-    match = re.search(r'ANE tokens/sec:\s*([\d.]+)', output)
-    if match:
-        result.tokens_per_second = float(match.group(1))
-    
-    # Mean ms/token
-    match = re.search(r'Mean:\s*([\d.]+)\s*ms/token', output)
-    if match:
-        result.ms_per_token = float(match.group(1))
-    
-    # Compile time
-    match = re.search(r'Decode compile time:\s*([\d.]+)\s*ms', output)
-    if match:
-        result.compile_time_ms = float(match.group(1))
-    
-    # Status
-    if result.tokens_per_second > 0:
-        result.status = "ok"
-    
-    return result
-
-def parse_generate_benchmark(output):
-    """Parse espresso-generate bench output.
-    
-    Example: "tok_per_s=75.25 median_token_ms=13.64"
-    """
-    result = BenchmarkResult(0, 0, 0, "bench_failed", raw_output=output[-3000:])
-    
-    # tok_per_s
-    match = re.search(r'tok_per_s=([\d.]+)', output)
-    if match:
-        result.tokens_per_second = float(match.group(1))
-    
-    # median_token_ms
-    match = re.search(r'median_token_ms=([\d.]+)', output)
-    if match:
-        result.ms_per_token = float(match.group(1))
-    
-    # compile_ms
-    match = re.search(r'compile_ms=([\d.]+)', output)
-    if match:
-        result.compile_time_ms = float(match.group(1))
-    
-    # Status
-    if result.tokens_per_second > 0:
-        result.status = "ok"
-    
-    return result
-
-# ---------------------------------------------------------------------------
-# Quality check
-# ---------------------------------------------------------------------------
-
-def run_quality_check(prompt=None, timeout=120):
-    """Run generation on a prompt and check that output is coherent."""
-    gen_path = PROJECT_ROOT / ".build" / "release" / "espresso-generate"
-    if not gen_path.exists():
-        success, _ = swift_build("espresso-generate")
-        if not success:
-            return QualityResult(passed=False, error="build_failed")
-
-    test_prompt = prompt or BENCHMARK_PROMPTS[0]
-    cmd = [
-        str(gen_path), "generate",
-        "--bundle", ESP_BUNDLE,
-        "--max-tokens", str(QUALITY_MAX_TOKENS),
-        "--no-power", "--no-stats",
-        test_prompt,
-    ]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=timeout
-        )
-        output = result.stdout.strip()
-        
-        # Check for coherence: output should be non-empty and not contain error markers
-        if not output:
-            return QualityResult(passed=False, error="empty_output")
-        
-        # Check for common error patterns
-        error_patterns = ["error:", "Error:", "failed:", "panic", "trap", "fatal"]
-        for pattern in error_patterns:
-            if pattern in output.lower():
-                return QualityResult(passed=False, error=f"error_pattern: {pattern}")
-        
-        # Check for repetition / degeneration
-        words = output.split()
-        if len(words) < 10:
-            return QualityResult(passed=False, error=f"too_short: {len(words)} words")
-        
-        # Check for extreme repetition (simple check)
-        if len(words) > 20:
-            bigrams = [(words[i], words[i+1]) for i in range(len(words)-1)]
-            from collections import Counter
-            bigram_counts = Counter(bigrams)
-            most_common_count = bigram_counts.most_common(1)[0][1] if bigram_counts else 0
-            if most_common_count > len(bigrams) * 0.5:
-                return QualityResult(passed=False, error="repetition_degeneration")
-        
-        return QualityResult(passed=True, generated_text=output)
-        
-    except subprocess.TimeoutExpired:
-        return QualityResult(passed=False, error="timeout")
-    except Exception as e:
-        return QualityResult(passed=False, error=str(e))
-
-# ---------------------------------------------------------------------------
-# Swift source modification helpers
-# ---------------------------------------------------------------------------
-
-def read_swift(relative_path):
-    full_path = PROJECT_ROOT / relative_path
-    if not full_path.exists():
-        raise FileNotFoundError(f"Swift file not found: {full_path}")
-    return full_path.read_text()
-
-def write_swift(relative_path, content):
-    full_path = PROJECT_ROOT / relative_path
-    full_path.write_text(content)
-
-def patch_file(relative_path, old_text, new_text):
-    """Simple text replacement in a Swift file. Returns True if patch applied."""
-    content = read_swift(relative_path)
-    if old_text not in content:
-        print(f"[patch] Pattern not found in {relative_path}")
-        return False
-    new_content = content.replace(old_text, new_text, 1)
-    write_swift(relative_path, new_content)
-    print(f"[patch] Applied to {relative_path}")
-    return True
-
-def patch_file_all(relative_path, old_text, new_text):
-    """Replace ALL occurrences of old_text in a Swift file."""
-    content = read_swift(relative_path)
-    if old_text not in content:
-        print(f"[patch] Pattern not found in {relative_path}")
-        return False
-    new_content = content.replace(old_text, new_text)
-    write_swift(relative_path, new_content)
-    count = content.count(old_text)
-    print(f"[patch] Applied {count} replacements in {relative_path}")
-    return True
-
-# ---------------------------------------------------------------------------
-# Git helpers
-# ---------------------------------------------------------------------------
-
-def git_commit(message):
-    subprocess.run(["git", "add", "-A"], cwd=PROJECT_ROOT, check=True,
-                  capture_output=True)
-    result = subprocess.run(
-        ["git", "commit", "-m", message],
-        cwd=PROJECT_ROOT,
-        capture_output=True, text=True
-    )
+    output = result.stdout + result.stderr
     if result.returncode == 0:
-        h = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"],
-                          cwd=PROJECT_ROOT, capture_output=True, text=True)
-        commit = h.stdout.strip()
-        print(f"[git] Committed: {commit} — {message}")
-        return commit
-    else:
-        print(f"[git] Commit failed: {result.stderr}")
-        return None
+        print("[build] succeeded")
+        return True, output
 
-def git_reset_to(commit_hash):
-    result = subprocess.run(
-        ["git", "reset", "--hard", commit_hash],
-        cwd=PROJECT_ROOT, capture_output=True, text=True
+    print(f"[build] FAILED (exit code {result.returncode})")
+    lines = output.strip().splitlines()
+    if lines:
+        print("\n".join(lines[-50:]))
+    return False, output
+
+
+def release_binary(product: str) -> Path:
+    return PROJECT_ROOT / ".build" / "release" / product
+
+
+def ensure_release_binary(product: str, rebuild: bool) -> Path:
+    binary = release_binary(product)
+    if rebuild or not binary.exists():
+        success, _ = swift_build(product=product)
+        if not success:
+            raise RuntimeError(f"Failed to build release product: {product}")
+    if not binary.exists():
+        raise FileNotFoundError(f"Missing release binary after build: {binary}")
+    return binary
+
+
+def default_output_dir(root: Path = DEFAULT_RESULTS_ROOT) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return root / f"suite-{timestamp}"
+
+
+def parse_suite_result(
+    output_dir: Path,
+    raw_output: str = "",
+    status: str | None = None,
+) -> SuiteBenchmarkResult:
+    summary_path = output_dir / "suite-summary.json"
+    if not summary_path.exists():
+        return SuiteBenchmarkResult(
+            tokens_per_second=0.0,
+            ttft_ms=0.0,
+            median_token_ms=0.0,
+            p95_token_ms=0.0,
+            all_token_match=False,
+            all_text_match=False,
+            correctness_gates_pass=False,
+            performance_gates_pass=False,
+            merge_recommended=None,
+            status=status or "bench_failed",
+            output_dir=output_dir,
+            raw_output=raw_output[-4000:],
+        )
+
+    summary = json.loads(summary_path.read_text())
+    aggregate = summary["aggregate"]
+    verdict = summary["verdict"]
+
+    baseline_comparison_path = output_dir / "baseline-comparison.json"
+    merge_recommended: bool | None = None
+    if baseline_comparison_path.exists():
+        baseline_payload = json.loads(baseline_comparison_path.read_text())
+        merge_recommended = baseline_payload.get("merge_recommended", baseline_payload.get("all_pass"))
+
+    return SuiteBenchmarkResult(
+        tokens_per_second=float(aggregate["espresso_tok_s_median"]),
+        ttft_ms=float(aggregate["espresso_ttft_ms_median"]),
+        median_token_ms=float(aggregate["espresso_median_token_ms_median"]),
+        p95_token_ms=float(aggregate["espresso_p95_token_ms_median"]),
+        all_token_match=bool(aggregate["all_token_match"]),
+        all_text_match=bool(aggregate["all_text_match"]),
+        correctness_gates_pass=bool(verdict["all_correctness_gates_pass"]),
+        performance_gates_pass=bool(verdict.get("all_performance_gates_pass", True)),
+        merge_recommended=merge_recommended,
+        status=status or ("ok" if bool(verdict.get("all_correctness_gates_pass", False)) and bool(verdict.get("all_performance_gates_pass", True)) else "gates_failed"),
+        output_dir=output_dir,
+        summary_path=summary_path,
+        baseline_comparison_path=baseline_comparison_path if baseline_comparison_path.exists() else None,
+        raw_output=raw_output[-4000:],
     )
-    if result.returncode == 0:
-        print(f"[git] Reset to {commit_hash}")
-        return True
-    print(f"[git] Reset failed: {result.stderr}")
-    return False
 
-def git_current_commit():
-    r = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"],
-                      cwd=PROJECT_ROOT, capture_output=True, text=True)
-    return r.stdout.strip()
 
-def git_current_branch():
-    r = subprocess.run(["git", "branch", "--show-current"],
-                      cwd=PROJECT_ROOT, capture_output=True, text=True)
-    return r.stdout.strip()
+def run_suite_benchmark(
+    config: HarnessConfig,
+    *,
+    rebuild: bool,
+    output_dir: Path | None,
+    timeout: int,
+) -> SuiteBenchmarkResult:
+    ensure_paths_exist(config)
+    binary = ensure_release_binary("espresso-generate", rebuild=rebuild)
+    run_output_dir = (output_dir or default_output_dir()).resolve()
+    run_output_dir.parent.mkdir(parents=True, exist_ok=True)
 
-# ---------------------------------------------------------------------------
-# Results logging
-# ---------------------------------------------------------------------------
+    cmd = [
+        str(binary),
+        "suite",
+        "--bundle", str(config.bundle),
+        "--prompts", str(config.prompts_file),
+        "--max-tokens", str(config.max_tokens),
+        "--runs", str(config.runs),
+        "--compare-warmup", str(config.warmup),
+        "--compare-iterations", str(config.iterations),
+        "--coreml-model", str(config.coreml_model),
+        "--coreml-seq-len", str(config.coreml_seq_len),
+        "--coreml-compute-units", config.compute_units,
+        "--output-dir", str(run_output_dir),
+    ]
 
-RESULTS_DIR = PROJECT_ROOT / "autoresearch-espresso"
-RESULTS_TSV = RESULTS_DIR / "results.tsv"
-RESULTS_HEADER = "commit\ttok_s\tms_per_tok\tcompile_ms\tquality\tstatus\tdescription\n"
+    if config.baseline_summary:
+        cmd.extend([
+            "--baseline-summary", str(config.baseline_summary),
+            "--min-espresso-tok-s-ratio", str(config.min_tok_s_ratio),
+            "--max-espresso-ttft-ratio", str(config.max_ttft_ratio),
+            "--max-espresso-median-token-ratio", str(config.max_median_ratio),
+            "--max-espresso-p95-token-ratio", str(config.max_p95_ratio),
+        ])
 
-def init_results():
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"[suite] {' '.join(cmd)}")
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env_with_local_clang_cache(),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return SuiteBenchmarkResult(
+            tokens_per_second=0.0,
+            ttft_ms=0.0,
+            median_token_ms=0.0,
+            p95_token_ms=0.0,
+            all_token_match=False,
+            all_text_match=False,
+            correctness_gates_pass=False,
+            performance_gates_pass=False,
+            merge_recommended=None,
+            status="timeout",
+            output_dir=run_output_dir,
+        )
+
+    output = completed.stdout + completed.stderr
+    if completed.returncode == 0:
+        return parse_suite_result(run_output_dir, raw_output=output, status="ok")
+
+    if (run_output_dir / "suite-summary.json").exists():
+        return parse_suite_result(run_output_dir, raw_output=output, status="gates_failed")
+
+    return SuiteBenchmarkResult(
+        tokens_per_second=0.0,
+        ttft_ms=0.0,
+        median_token_ms=0.0,
+        p95_token_ms=0.0,
+        all_token_match=False,
+        all_text_match=False,
+        correctness_gates_pass=False,
+        performance_gates_pass=False,
+        merge_recommended=None,
+        status="bench_failed",
+        output_dir=run_output_dir,
+        raw_output=output[-4000:],
+    )
+
+
+def init_results() -> None:
+    AUTORESEARCH_DIR.mkdir(parents=True, exist_ok=True)
     if not RESULTS_TSV.exists():
         RESULTS_TSV.write_text(RESULTS_HEADER)
-        print(f"[results] Created {RESULTS_TSV}")
 
-def log_result(commit, bench, quality, description):
+
+def best_kept_tok_s(results_path: Path = RESULTS_TSV) -> float | None:
+    if not results_path.exists():
+        return None
+    lines = results_path.read_text().splitlines()
+    if not lines:
+        return None
+    header = lines[0].split("\t")
+    try:
+        status_idx = header.index("status")
+        tok_idx = header.index("espresso_tokens_per_second")
+    except ValueError:
+        return None
+
+    best: float | None = None
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) <= max(status_idx, tok_idx):
+            continue
+        if fields[status_idx] != "keep":
+            continue
+        try:
+            value = float(fields[tok_idx])
+        except ValueError:
+            continue
+        best = value if best is None else max(best, value)
+    return best
+
+
+def suggest_status(result: SuiteBenchmarkResult, previous_best_tok_s: float | None) -> str:
+    if result.status in {"build_failed", "bench_failed", "timeout", "crash"}:
+        return "crash"
+    if not result.correctness_gates_pass or not result.performance_gates_pass:
+        return "discard"
+    if previous_best_tok_s is None:
+        return "keep"
+    return "keep" if result.tokens_per_second > previous_best_tok_s else "discard"
+
+
+def append_result(
+    commit: str,
+    result: SuiteBenchmarkResult,
+    status: str,
+    baseline_summary: Path | None,
+    description: str,
+) -> None:
     init_results()
-    status = "keep" if bench.tokens_per_second > 0 and quality.passed else "discard"
-    if bench.status in ("build_failed", "bench_failed", "timeout", "crash"):
-        status = "crash"
-    
-    row = f"{commit}\t{bench.tokens_per_second:.1f}\t{bench.ms_per_token:.1f}\t{bench.compile_time_ms:.0f}\t{1.0 if quality.passed else 0.0:.2f}\t{status}\t{description}\n"
-    with open(RESULTS_TSV, "a") as f:
-        f.write(row)
-    print(f"[results] {commit} | {bench.tokens_per_second:.1f} tok/s | quality={'PASS' if quality.passed else 'FAIL'} | {status} | {description}")
+    row = [
+        current_timestamp(),
+        commit,
+        status,
+        f"{result.tokens_per_second:.6f}",
+        f"{result.ttft_ms:.6f}",
+        f"{result.median_token_ms:.6f}",
+        f"{result.p95_token_ms:.6f}",
+        "true" if result.all_token_match else "false",
+        "true" if result.all_text_match else "false",
+        "true" if result.correctness_gates_pass else "false",
+        "true" if result.performance_gates_pass else "false",
+        "" if result.merge_recommended is None else ("true" if result.merge_recommended else "false"),
+        str(result.output_dir) if result.output_dir else "",
+        str(baseline_summary) if baseline_summary else "",
+        description,
+    ]
+    with RESULTS_TSV.open("a") as handle:
+        handle.write("\t".join(row) + "\n")
 
-# ---------------------------------------------------------------------------
-# Reference generations
-# ---------------------------------------------------------------------------
 
-REF_GEN_PATH = RESULTS_DIR / "reference_generations.json"
+def print_suite_result(result: SuiteBenchmarkResult) -> None:
+    print(
+        "[suite] tok/s={:.2f} ttft_ms={:.2f} median_token_ms={:.2f} p95_token_ms={:.2f}".format(
+            result.tokens_per_second,
+            result.ttft_ms,
+            result.median_token_ms,
+            result.p95_token_ms,
+        )
+    )
+    print(
+        "[quality] token_match={} text_match={} correctness_gates={} performance_gates={}".format(
+            "PASS" if result.all_token_match else "FAIL",
+            "PASS" if result.all_text_match else "FAIL",
+            "PASS" if result.correctness_gates_pass else "FAIL",
+            "PASS" if result.performance_gates_pass else "FAIL",
+        )
+    )
+    if result.merge_recommended is not None:
+        print(f"[baseline] merge_recommended={'YES' if result.merge_recommended else 'NO'}")
+    if result.output_dir:
+        print(f"[artifacts] suite_dir={result.output_dir}")
 
-def save_reference_generations():
-    """Generate reference text for all prompts."""
-    gens = {}
-    for prompt in BENCHMARK_PROMPTS:
-        qr = run_quality_check(prompt)
-        if qr.passed:
-            gens[prompt] = qr.generated_text
-            print(f"[ref] Saved reference for prompt: {prompt[:50]}...")
-        else:
-            print(f"[ref] FAILED to generate reference: {qr.error}")
-    REF_GEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REF_GEN_PATH.write_text(json.dumps(gens, indent=2))
-    print(f"[ref] Saved {len(gens)} references to {REF_GEN_PATH}")
-    return gens
 
-def load_reference_generations():
-    if REF_GEN_PATH.exists():
-        return json.loads(REF_GEN_PATH.read_text())
-    return {}
+def print_json_result(result: SuiteBenchmarkResult) -> None:
+    payload = {
+        "tokens_per_second": result.tokens_per_second,
+        "ttft_ms": result.ttft_ms,
+        "median_token_ms": result.median_token_ms,
+        "p95_token_ms": result.p95_token_ms,
+        "all_token_match": result.all_token_match,
+        "all_text_match": result.all_text_match,
+        "correctness_gates_pass": result.correctness_gates_pass,
+        "performance_gates_pass": result.performance_gates_pass,
+        "merge_recommended": result.merge_recommended,
+        "status": result.status,
+        "output_dir": str(result.output_dir) if result.output_dir else None,
+        "summary_path": str(result.summary_path) if result.summary_path else None,
+        "baseline_comparison_path": str(result.baseline_comparison_path) if result.baseline_comparison_path else None,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
-def check_quality_against_reference(prompt=None):
-    """Check that generation matches reference exactly."""
-    ref = load_reference_generations()
-    if not ref:
-        # No reference, use simple coherence check
-        return run_quality_check(prompt)
-    
-    test_prompt = prompt or BENCHMARK_PROMPTS[0]
-    if test_prompt not in ref:
-        return run_quality_check(prompt)
-    
-    qr = run_quality_check(prompt)
-    if qr.passed:
-        # Check exact match
-        if qr.generated_text.strip() == ref[test_prompt].strip():
-            return qr
-        else:
-            return QualityResult(passed=False, error="output_differs_from_reference")
-    
-    return qr
 
-# ---------------------------------------------------------------------------
-# Main commands
-# ---------------------------------------------------------------------------
+def add_common_options(parser: argparse.ArgumentParser) -> None:
+    defaults = make_default_config()
+    parser.add_argument("--bundle", type=Path, default=defaults.bundle)
+    parser.add_argument("--prompts-file", type=Path, default=defaults.prompts_file)
+    parser.add_argument("--coreml-model", type=Path, default=defaults.coreml_model)
+    parser.add_argument("--baseline-summary", type=Path, default=defaults.baseline_summary)
+    parser.add_argument("--max-tokens", type=int, default=defaults.max_tokens)
+    parser.add_argument("--runs", type=int, default=defaults.runs)
+    parser.add_argument("--warmup", type=int, default=defaults.warmup)
+    parser.add_argument("--iterations", type=int, default=defaults.iterations)
+    parser.add_argument("--coreml-seq-len", type=int, default=defaults.coreml_seq_len)
+    parser.add_argument("--compute-units", default=defaults.compute_units)
+    parser.add_argument("--min-tok-s-ratio", type=float, default=defaults.min_tok_s_ratio)
+    parser.add_argument("--max-ttft-ratio", type=float, default=defaults.max_ttft_ratio)
+    parser.add_argument("--max-median-ratio", type=float, default=defaults.max_median_ratio)
+    parser.add_argument("--max-p95-ratio", type=float, default=defaults.max_p95_ratio)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--json", action="store_true")
 
-def cmd_benchmark():
-    print("=" * 60)
-    print("BENCHMARK: Pure ANE decode (espresso-bench --decode)")
-    print("=" * 60)
-    r = run_bench_decode()
-    print(f"\n[RESULT] tok/s={r.tokens_per_second:.1f} ms/tok={r.ms_per_token:.1f} compile={r.compile_time_ms:.0f}ms status={r.status}")
-    return r
 
-def cmd_generate_bench():
-    print("=" * 60)
-    print("BENCHMARK: .esp bundle generate (espresso-generate bench)")
-    print("=" * 60)
-    r = run_bench_generate()
-    print(f"\n[RESULT] tok/s={r.tokens_per_second:.1f} ms/tok={r.ms_per_token:.1f} compile={r.compile_time_ms:.0f}ms status={r.status}")
-    return r
+def config_from_args(args: argparse.Namespace) -> HarnessConfig:
+    return HarnessConfig(
+        bundle=args.bundle.expanduser().resolve(),
+        prompts_file=args.prompts_file.expanduser().resolve(),
+        coreml_model=args.coreml_model.expanduser().resolve(),
+        baseline_summary=args.baseline_summary.expanduser().resolve() if args.baseline_summary else None,
+        max_tokens=args.max_tokens,
+        runs=args.runs,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        coreml_seq_len=args.coreml_seq_len,
+        compute_units=args.compute_units,
+        min_tok_s_ratio=args.min_tok_s_ratio,
+        max_ttft_ratio=args.max_ttft_ratio,
+        max_median_ratio=args.max_median_ratio,
+        max_p95_ratio=args.max_p95_ratio,
+    )
 
-def cmd_quality():
-    print("=" * 60)
-    print("QUALITY CHECK")
-    print("=" * 60)
-    r = run_quality_check()
-    text_preview = r.generated_text[:200] if r.generated_text else ""
-    print(f"\n[RESULT] quality={'PASS' if r.passed else 'FAIL'} error={r.error}")
-    if text_preview:
-        print(f"[TEXT] {text_preview}...")
-    return r
 
-def cmd_save_references():
-    print("=" * 60)
-    print("SAVE REFERENCE GENERATIONS")
-    print("=" * 60)
-    save_reference_generations()
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    config = config_from_args(args)
+    result = run_suite_benchmark(
+        config,
+        rebuild=args.rebuild,
+        output_dir=args.output_dir,
+        timeout=args.timeout,
+    )
+    if args.json:
+        print_json_result(result)
+    else:
+        print_suite_result(result)
+    return 0 if result.status == "ok" else 1
 
-def cmd_full():
-    print("=" * 60)
-    print("FULL: Build → Bench-decode → Bench-generate → Quality")
-    print("=" * 60)
-    
-    # Bench decode
-    print("\n--- BENCH DECODE (pure ANE) ---")
-    decode_r = run_bench_decode()
-    print(f"  tok/s={decode_r.tokens_per_second:.1f}")
-    
-    # Bench generate
-    print("\n--- BENCH GENERATE (.esp bundle) ---")
-    gen_r = run_bench_generate()
-    print(f"  tok/s={gen_r.tokens_per_second:.1f}")
-    
-    # Quality
-    print("\n--- QUALITY ---")
-    qr = run_quality_check()
-    print(f"  {'PASS' if qr.passed else 'FAIL'}: {qr.error}")
-    
-    return decode_r, gen_r, qr
+
+def cmd_quality(args: argparse.Namespace) -> int:
+    return cmd_benchmark(args)
+
+
+def cmd_full(args: argparse.Namespace) -> int:
+    config = config_from_args(args)
+    result = run_suite_benchmark(
+        config,
+        rebuild=True,
+        output_dir=args.output_dir,
+        timeout=args.timeout,
+    )
+    previous_best = best_kept_tok_s()
+    commit = git_current_commit()
+    status = suggest_status(result, previous_best)
+    append_result(
+        commit=commit,
+        result=result,
+        status=status,
+        baseline_summary=config.baseline_summary,
+        description=args.description,
+    )
+    if args.json:
+        payload = {
+            "commit": commit,
+            "previous_best_tok_s": previous_best,
+            "suggested_status": status,
+        }
+        payload.update(json.loads(json.dumps({
+            "tokens_per_second": result.tokens_per_second,
+            "ttft_ms": result.ttft_ms,
+            "median_token_ms": result.median_token_ms,
+            "p95_token_ms": result.p95_token_ms,
+            "all_token_match": result.all_token_match,
+            "all_text_match": result.all_text_match,
+            "correctness_gates_pass": result.correctness_gates_pass,
+            "performance_gates_pass": result.performance_gates_pass,
+            "merge_recommended": result.merge_recommended,
+            "status": result.status,
+            "output_dir": str(result.output_dir) if result.output_dir else None,
+        })))
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print_suite_result(result)
+        print(f"[results] commit={commit} previous_best_tok_s={previous_best} suggested_status={status}")
+        print(f"[results] tsv={RESULTS_TSV}")
+    return 0 if status == "keep" else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Inference-first autoresearch harness for Espresso.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    benchmark = subparsers.add_parser("benchmark", help="Run the hardened suite benchmark.")
+    add_common_options(benchmark)
+    benchmark.add_argument("--rebuild", action="store_true", help="Rebuild the release binary before benchmarking.")
+    benchmark.set_defaults(func=cmd_benchmark)
+
+    quality = subparsers.add_parser("quality-check", help="Run the suite and report quality/parity gates.")
+    add_common_options(quality)
+    quality.add_argument("--rebuild", action="store_true", help="Rebuild the release binary before benchmarking.")
+    quality.set_defaults(func=cmd_quality)
+
+    full = subparsers.add_parser("full", help="Build, benchmark, score against the retained baseline, and log results.")
+    add_common_options(full)
+    full.add_argument("--description", default="manual run", help="Short experiment description for TSV logging.")
+    full.set_defaults(func=cmd_full)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except FileNotFoundError as error:
+        print(f"[error] {error}", file=sys.stderr)
+        return 1
+    except RuntimeError as error:
+        print(f"[error] {error}", file=sys.stderr)
+        return 1
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(f"Usage: python {sys.argv[0]} [bench-decode|bench-generate|quality|full|references]")
-        sys.exit(1)
-    
-    cmd = sys.argv[1]
-    cmds = {
-        "benchmark": cmd_benchmark,
-        "bench-decode": cmd_benchmark,
-        "bench-generate": cmd_generate_bench,
-        "quality": cmd_quality,
-        "full": cmd_full,
-        "references": cmd_save_references,
-    }
-    
-    if cmd not in cmds:
-        print(f"Unknown command: {cmd}")
-        print(f"Available: {', '.join(cmds.keys())}")
-        sys.exit(1)
-    
-    cmds[cmd]()
+    sys.exit(main())

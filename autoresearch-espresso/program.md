@@ -1,189 +1,148 @@
 # autoresearch-espresso
 
-Autonomous experimentation on ANE kernel optimizations for **stories110m** decode throughput (tok/s) with quality.
+Autonomous experimentation on ANE serving optimizations for the retained **stories110m** release lane.
+
+The harness is inference-first. It optimizes the hardened suite median `tok/s` while enforcing the retained bundle, prompt suite, and baseline quality/performance gates.
 
 ## Setup
 
 To set up a new experiment, work with the user to:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `apr4`). The branch `autoresearch-espresso/<tag>` must not already exist — this is a fresh run.
+1. **Agree on a run tag**: propose a tag based on today's date (for example `apr8`). The branch `autoresearch-espresso/<tag>` must not already exist.
 2. **Create the branch**: `git checkout -b autoresearch-espresso/<tag>` from current main.
-3. **Read the in-scope files**: The Espresso repo is large. Focus on these:
-   - `Sources/ANEBuilder/` — kernel graph builders (attention, FFN, composites, primitives)
-   - `Sources/ANEPasses/` — optimization passes (identity elimination, cast elimination, dead code)
-   - `Sources/ANERuntime/` — ANE compilation, kernel sets, decode paths
-   - `Sources/Espresso/DecodeForwardPass.swift` — THE decode loop, env var knobs
-   - `Sources/MILGenerator/` — MIL text generators for ANE kernels
-   - `Sources/EspressoBench/` — benchmark CLI
-   - `experiment_runner.py` — the experiment runner (build, benchmark, quality check)
-4. **Verify build works**: `swift build --product espresso-bench` should succeed.
-5. **Establish baseline**: Run `python experiment_runner.py benchmark` to get the current tok/s baseline.
-6. **Save reference generations**: Run `python experiment_runner.py quality-check` and save the output to `autoresearch-espresso/reference_generations.json`.
-7. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-8. **Confirm and go**: Confirm setup looks good.
-
-Once you get confirmation, kick off the experimentation.
+3. **Read the in-scope files**: focus on these areas:
+   - `Sources/ANEBuilder/` — kernel graph builders
+   - `Sources/ANEPasses/` — optimization passes
+   - `Sources/ANERuntime/` — compilation, eval, decode kernels
+   - `Sources/Espresso/DecodeForwardPass.swift` — decode path policy and hot loop behavior
+   - `Sources/MILGenerator/` — MIL emission patterns
+   - `Sources/EspressoGenerate/` — hardened suite benchmark CLI
+   - `scripts/run_autoresearch_suite.sh` — suite wrapper
+   - `autoresearch-espresso/experiment_runner.py` — fixed evaluation harness
+4. **Verify the release build**: `swift build --product espresso-generate -c release`
+5. **Verify the retained benchmark inputs exist**:
+   - `.build/release-bundles/stories110m-smoke.esp`
+   - `scripts/stories_release_benchmark_prompts.txt`
+   - the retained baseline `suite-summary.json`
+   - the local Core ML package for the qualified compare lane
+6. **Establish baseline**: run `python autoresearch-espresso/experiment_runner.py benchmark`
+7. **Confirm and go**: once the harness works, start the loop.
 
 ## Experimentation
 
-Each experiment modifies Swift source files, rebuilds, and benchmarks. The training script runs for a **fixed benchmark configuration** — same prompts, same decode steps, same iterations. You launch it via `python experiment_runner.py full`.
+Each experiment modifies Swift source, rebuilds the release binary, and runs the hardened suite contract. Launch it with:
+
+```bash
+python autoresearch-espresso/experiment_runner.py full --description "<change>"
+```
+
+The harness uses:
+- the retained Stories `.esp` bundle
+- the retained Stories prompt suite
+- fixed `max_tokens`, `runs`, `warmup`, and `iterations`
+- baseline regression thresholds for `tok/s`, TTFT, median token latency, and p95 token latency
 
 **What you CAN do:**
-- Modify any Swift source file in `Sources/ANEBuilder/`, `Sources/ANEPasses/`, `Sources/ANERuntime/`, `Sources/Espresso/`, `Sources/MILGenerator/` — anything that affects ANE kernel generation, compilation, or decode performance. Everything is fair game: kernel fusion, memory layout, optimization passes, env var defaults, compile strategies, etc.
+- Modify Swift source in `Sources/ANEBuilder/`, `Sources/ANEPasses/`, `Sources/ANERuntime/`, `Sources/Espresso/`, and `Sources/MILGenerator/`
+- Change decode strategy defaults, fusion behavior, cache layout, compilation policy, and serving-path runtime structure
 
-**What you CANNOT do:**
-- Modify `experiment_runner.py`. It is the fixed evaluation harness.
-- Modify `Package.swift` — do not add dependencies or change build structure.
-- Modify `ModelConfig.swift` — model dimensions (dim, heads, layers, vocab) are fixed.
-- Change the benchmark prompts, decode steps, or iteration counts.
-- Install new packages or add dependencies.
+**What you CANNOT do during the loop:**
+- Modify `autoresearch-espresso/experiment_runner.py`
+- Change the retained benchmark bundle, prompt suite, baseline summary, or regression thresholds
+- Modify `Package.swift` to add dependencies
+- Change model dimensions as part of the serving benchmark contract
 
-**The goal is simple: get the highest tok/s (tokens per second) while maintaining generation quality.** The time budget is implicit — each experiment should take ~5-10 minutes (build + benchmark). Everything is fair game: kernel fusion, memory optimization, pass improvements, compilation strategies. The only constraint is that the code builds without crashing, the benchmark runs, and generation quality is maintained.
+## Objective
 
-**Quality gate**: Generated text on the 4 fixed prompts must match the reference generations exactly (argmax is deterministic). If quality regresses, the experiment is a **discard**.
+The goal is:
 
-**Simplicity criterion**: All else being equal, simpler is better. A small tok/s improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win.
+1. maximize suite median `tok/s`
+2. preserve exact token/text parity across the suite
+3. stay within the retained latency regression gates
 
-## Key Experiment Knobs
+This is not a generic training-research loop. It is a serving optimization loop.
 
-These are the primary areas to experiment with:
+## Quality And Performance Gates
 
-### 1. `ESPRESSO_DECODE_LANE_SPATIAL` (HIGH IMPACT)
-- **File**: `Sources/ANERuntime/DecodeKernelSet.swift` (and all kernel sets with `resolvedLaneSpatialForCurrentProcess()`)
-- **Default**: `32`
-- **Try**: `16`, `32`, `64`, `128`
-- This directly affects tile size, IOSurface sizes, and kernel execution time. The single most impactful knob.
+An experiment is a **discard** if any of these happen:
+- token parity fails on any prompt
+- text parity fails on any prompt
+- suite correctness gates fail
+- suite performance gates fail
 
-### 2. Kernel Set Selection (HIGH IMPACT)
-- **Files**: `Sources/Espresso/DecodeForwardPass.swift`, various `*KernelSet.swift` files
-- **Options**:
-  - `DecodeKernelSet` — separate attention + FFN kernels per layer
-  - `FusedDecodeKernelSet` — single fused kernel per layer (eliminates inter-kernel round-trip)
-  - `FusedTwoLayerDecodeKernelSet` — two layers in one kernel
-  - `HybridDecodeKernelSet` — ANE QKV + Metal attention + ANE FFN
-- Try changing the default kernel set, or adding new fusion strategies.
-
-### 3. Metal Fused SDPA (HIGH IMPACT)
-- **Env var**: `ESPRESSO_DISABLE_METAL_FUSED_SDPA`
-- **File**: `Sources/Espresso/DecodeForwardPass.swift`
-- Toggle between Metal fused SDPA vs. pure ANE attention. The Metal path may be faster for some configurations.
-
-### 4. Hybrid Fused Post-Attention (MEDIUM IMPACT)
-- **Env var**: `ESPRESSO_DISABLE_HYBRID_FUSED_POST_ATTENTION`
-- **File**: `Sources/ANERuntime/HybridDecodeKernelSet.swift`
-- Toggle fused vs. split projection+FFN in the hybrid path.
-
-### 5. ANE Optimization Passes (MEDIUM IMPACT)
-- **Directory**: `Sources/ANEPasses/`
-- **Ideas**:
-  - Add new fusion passes (e.g., fuse consecutive element-wise ops)
-  - Improve CastElimination to handle more patterns
-  - Add constant folding for static graph portions
-  - Add memory reuse passes (reuse buffers across layers)
-  - Reorder pass pipeline for better fixpoint convergence
-  - Increase `ANEOptimizationPipeline.maxIterations` beyond 20
-
-### 6. MIL Generation (MEDIUM IMPACT)
-- **Directory**: `Sources/MILGenerator/`
-- **Directory**: `Sources/ANECodegen/`
-- **Ideas**:
-  - Change how constants are emitted (inline vs. const() nodes)
-  - Experiment with `deploymentTarget` (`"ios18"` → `"macos15"` etc.)
-  - Optimize MIL patterns for frequently-used ops
-  - Change MIL header constants for different compiler behavior
-
-### 7. Cache/Surface Management (MEDIUM IMPACT)
-- **File**: `Sources/Espresso/DecodeForwardPass.swift`
-- **Env vars**: `ESPRESSO_DECODE_FORCE_FULL_WINDOW_SYNC`, `ESPRESSO_REPACK_VOUT_HEAD_MAJOR`
-- **Ideas**: Reduce KV cache synchronization overhead, optimize surface layout
-
-### 8. Compile Strategies (LOWER IMPACT)
-- **Env var**: `ESPRESSO_DISABLE_HYBRID_DONOR_DELTA`
-- **File**: `Sources/ANERuntime/ANEKernel.swift`
-- **Ideas**: Delta compilation reuse, compile budget management, retry policies
-
-### 9. ANEBuilder Kernel Construction (LOWER IMPACT)
-- **Directory**: `Sources/ANEBuilder/`
-- **Ideas**:
-  - Fuse operations in graph construction
-  - Change how RMSNorm is built (FP16 vs FP32 path)
-  - Try different activation function implementations
-  - Optimize composite kernel patterns
+An experiment is a **keep** only if:
+- correctness gates pass
+- performance gates pass
+- suite median `tok/s` beats the best retained `keep` run
 
 ## Output format
 
-Once the benchmark finishes, it outputs tok/s metrics. You can extract the key metric from the experiment runner output:
+The harness prints the retained serving metrics, for example:
 
-```
-[bench] tok/s: XXX.X, ms/tok: XX.X
-[quality] X/4 matched
-```
-
-## Logging results
-
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
-
-The TSV has a header row and 7 columns:
-
-```
-commit	tok_s	ms_per_tok	compile_time_ms	quality	status	description
+```text
+[suite] tok/s=77.69 ttft_ms=1.72 median_token_ms=13.86 p95_token_ms=15.50
+[quality] token_match=PASS text_match=PASS correctness_gates=PASS performance_gates=PASS
+[baseline] merge_recommended=YES
+[artifacts] suite_dir=/abs/path/to/results/autoresearch/suite-...
+[results] commit=abc1234 previous_best_tok_s=76.10 suggested_status=keep
 ```
 
-1. git commit hash (short, 7 chars)
-2. tok/s achieved (e.g. 519.3) — use 0.0 for crashes
-3. ms per token (e.g. 1.93) — use 0.0 for crashes
-4. compile time in ms (e.g. 12000) — use 0 for crashes
-5. quality score (0.00-1.00, exact match ratio on 4 prompts)
-6. status: `keep`, `discard`, or `crash`
-7. short text description of what this experiment tried
+## Results logging
 
-Example:
+The harness automatically appends to:
 
-```
-commit	tok_s	ms_per_tok	compile_time_ms	quality	status	description
-a1b2c3d	153.0	6.54	45000	1.00	keep	baseline: direct transformer decode
-b2c3d4e	519.0	1.93	52000	1.00	keep	switch to fused decode kernel set
-c3d4e5f	480.0	2.08	50000	1.00	discard	lane spatial 64 (slower)
-d4e5f6g	0.0	0.0	0	0.0	crash	aggressive fusion (build failed)
+```text
+autoresearch-espresso/suite-results.tsv
 ```
 
-## The experiment loop
+Schema:
 
-The experiment runs on a dedicated branch (e.g. `autoresearch-espresso/apr4`).
+```text
+timestamp	commit	status	espresso_tokens_per_second	espresso_ttft_ms	espresso_median_token_ms	espresso_p95_token_ms	all_token_match	all_text_match	correctness_gates_pass	performance_gates_pass	merge_recommended	output_dir	baseline_summary	change_summary
+```
+
+This file is the source of truth for keep/discard decisions in the loop.
+
+## The loop
 
 LOOP FOREVER:
 
-1. Look at the git state: the current branch/commit we're on
-2. Tune Swift source files with an experimental idea by directly hacking the code.
+1. Check current branch and commit
+2. Make one concrete serving-path change
 3. `git commit -m "experiment: <description>"`
-4. Run the experiment: `python experiment_runner.py full > run.log 2>&1` (redirect everything)
-5. Read out the results: `grep "\[bench\] tok/s\|\[quality\]" run.log`
-6. If the grep output is empty or shows build failure, the run crashed. Run `tail -n 50 run.log` to read the error and attempt a fix.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If tok/s improved (higher) AND quality == 1.00, you "advance" the branch, keeping the git commit
-9. If tok/s is equal/worse or quality dropped, git reset back to where you started
+4. Run:
+   `python autoresearch-espresso/experiment_runner.py full --description "<description>" > run.log 2>&1`
+5. Read:
+   `grep "\[suite\]\|\[quality\]\|\[results\]" run.log`
+6. If the run crashed, inspect:
+   `tail -n 50 run.log`
+7. If the harness suggests `keep`, continue from that commit
+8. If the harness suggests `discard` or `crash`, reset back and try another idea
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
+## Timeout policy
 
-**Timeout**: Each experiment should take ~5-10 minutes total (build + benchmark). If a run exceeds 15 minutes, kill it and treat it as a failure (discard and revert).
+- A full release build plus suite run should stay within roughly 15 minutes
+- If it exceeds the harness timeout, treat it as a crash
 
-**Crashes**: If a run crashes (build failure, benchmark hang, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
+## Good experiment targets
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
+High leverage:
+- decode kernel set selection
+- lane spatial defaults
+- fused exact-head behavior
+- KV/cache layout and reuse
+- Metal vs ANE attention split
+- pass pipeline improvements that reduce emitted graph overhead
+- compile/cache reuse on the serving lane
 
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~10 minutes then you can run approx 6/hour, for a total of about 50 over the duration of the average human sleep. The user then wakes up in the morning to experimental results, all completed by you while they slept!
+Lower leverage:
+- generic refactors without a serving-path effect
+- documentation-only changes
+- training-only improvements
 
-## Experiment Idea Starter Pack
+## Principles
 
-Here are some concrete ideas to get started:
-
-1. **Lane spatial sweep**: Try `ESPRESSO_DECODE_LANE_SPATIAL` = 16, 32, 64, 128 in each kernel set
-2. **Fusion experiments**: Fuse attention + FFN into single kernel (eliminate intermediate surface round-trip)
-3. **Pass improvements**: Add a pass that fuses consecutive element-wise ops (add+mul → single op)
-4. **MIL constant inlining**: Emit small constants inline instead of as const() nodes — may speed up compilation
-5. **Cast elimination**: Expand CastEliminationPass to handle more patterns (e.g., fp32→fp16→fp32 chains)
-6. **Memory reuse**: Add a pass that reuses surface buffers across layers when shapes match
-7. **Dead code elimination**: Run DCE more aggressively — eliminate unused graph branches earlier
-8. **SRAM budget optimization**: Restructure graphs to stay under 32MB SRAM (avoid DRAM spill ~30% penalty)
-9. **Kernel set hybridization**: Mix different kernel types for different layers (e.g., fused for early layers, separate for late)
-10. **Metal vs ANE attention**: Toggle `ESPRESSO_DISABLE_METAL_FUSED_SDPA` and benchmark both paths
+- prefer changes that improve the retained shipping lane, not just a synthetic microbench
+- prefer same-binary comparisons
+- prefer smaller, attributable changes over broad rewrites
+- keep the harness contract fixed while experimenting
