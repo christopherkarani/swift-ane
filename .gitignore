@@ -91,7 +91,6 @@ scripts/internal/**
 !scripts/README.md
 tasks/
 AGENTS.md
-CLAUDE.md
 
 # Internal development directories
 archive/
