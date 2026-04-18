@@ -98,6 +98,37 @@ import Testing
     }
 }
 
+@Test func test_buildRejectsLFM2WithoutLayerMetadata() throws {
+    let tokenizerDir = try makeSentencePieceTokenizerDirectory()
+    let weightDir = try makeTempDirectory()
+    defer {
+        try? FileManager.default.removeItem(at: tokenizerDir.deletingLastPathComponent())
+        try? FileManager.default.removeItem(at: weightDir)
+    }
+
+    let config = MultiModelConfig(
+        name: "invalid-lfm2",
+        nLayer: 16,
+        nHead: 16,
+        nKVHead: 8,
+        dModel: 1024,
+        headDim: 64,
+        hiddenDim: 4608,
+        vocab: 65_536,
+        maxSeq: 4_096,
+        normEps: 1e-5,
+        architecture: .lfm2
+    )
+
+    try expectRealModelInferenceError(containing: "layerTypes") {
+        _ = try RealModelInferenceEngine.build(
+            config: config,
+            weightDir: weightDir.path,
+            tokenizerDir: tokenizerDir.deletingLastPathComponent().path
+        )
+    }
+}
+
 @Test func test_spatialBucketSelection() {
     #expect(RealModelInferenceEngine.spatialBucket(for: 1, maxSeq: 16) == 1)
     #expect(RealModelInferenceEngine.spatialBucket(for: 2, maxSeq: 16) == 2)
@@ -114,6 +145,12 @@ import Testing
 
 @Test func test_milDeploymentTargetDefaultsToIOS18() {
     #expect(RealModelInferenceEngine.milDeploymentTarget(environment: [:]) == "ios18")
+}
+
+@Test func test_requireANEHardwareTestsEnabledUsesInjectedEnvironment() throws {
+    try expectRealModelInferenceError(containing: "ANE_HARDWARE_TESTS=1") {
+        try RealModelInferenceEngine.requireANEHardwareTestsEnabled(environment: [:])
+    }
 }
 
 @Test func test_milDeploymentTargetReadsEnvironmentOverride() {
@@ -309,6 +346,82 @@ import Testing
     #expect(resolved == draftDir.path)
 }
 
+@Test func test_exactTwoTokenDraftCPUFallbackReportsPassMetrics() throws {
+    let bundleRoot = try makeTempDirectory()
+    let tokenizerModel = try makeSentencePieceTokenizerDirectory()
+    defer {
+        try? FileManager.default.removeItem(at: bundleRoot)
+        try? FileManager.default.removeItem(at: tokenizerModel.deletingLastPathComponent())
+    }
+
+    let baseConfig = makeTinyLlamaConfig()
+    let config = MultiModelConfig(
+        name: baseConfig.name,
+        nLayer: baseConfig.nLayer,
+        nHead: baseConfig.nHead,
+        nKVHead: baseConfig.nKVHead,
+        dModel: baseConfig.dModel,
+        headDim: baseConfig.headDim,
+        hiddenDim: baseConfig.hiddenDim,
+        vocab: baseConfig.vocab,
+        maxSeq: 4_096,
+        normEps: baseConfig.normEps,
+        ropeTheta: baseConfig.ropeTheta,
+        eosToken: baseConfig.eosToken,
+        architecture: baseConfig.architecture
+    )
+    let weightDir = bundleRoot.appendingPathComponent("weights", isDirectory: true)
+    let draftDir = weightDir.appendingPathComponent("draft/student", isDirectory: true)
+    try populateMinimalLlamaWeightDirectory(at: weightDir, config: config)
+    try populateMinimalLlamaWeightDirectory(at: draftDir, config: config)
+
+    let descriptor: [String: Any] = [
+        "model_dir": "draft/student",
+        "tokenizer_dir": "tokenizer",
+        "model_id": "tiny-llama-draft",
+    ]
+    let descriptorURL = bundleRoot.appendingPathComponent("weights/draft/exact-two-token.json")
+    try FileManager.default.createDirectory(
+        at: descriptorURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try JSONSerialization.data(withJSONObject: descriptor, options: [.sortedKeys]).write(to: descriptorURL)
+
+    let keys = [
+        "ESPRESSO_USE_CPU_EXACT_DECODE",
+        "ESPRESSO_FORCE_HYBRID_DECODE",
+        "ESPRESSO_BUNDLE_DRAFT_KIND",
+        "ESPRESSO_BUNDLE_DRAFT_HORIZON",
+        "ESPRESSO_BUNDLE_DRAFT_ARTIFACT_REF",
+    ]
+    let previous = Dictionary(uniqueKeysWithValues: keys.map { ($0, ProcessInfo.processInfo.environment[$0]) })
+    setenv("ESPRESSO_USE_CPU_EXACT_DECODE", "1", 1)
+    unsetenv("ESPRESSO_FORCE_HYBRID_DECODE")
+    setenv("ESPRESSO_BUNDLE_DRAFT_KIND", "exact_two_token", 1)
+    setenv("ESPRESSO_BUNDLE_DRAFT_HORIZON", "2", 1)
+    setenv("ESPRESSO_BUNDLE_DRAFT_ARTIFACT_REF", "weights/draft/exact-two-token.json", 1)
+    defer {
+        for (key, value) in previous {
+            if let value {
+                setenv(key, value, 1)
+            } else {
+                unsetenv(key)
+            }
+        }
+    }
+
+    var engine = try RealModelInferenceEngine.build(
+        config: config,
+        weightDir: weightDir.path,
+        tokenizerDir: tokenizerModel.deletingLastPathComponent().path
+    )
+    let result = try engine.generate(prompt: "Hello", maxTokens: 2, temperature: 0.0)
+
+    #expect(result.exactHeadBackend == "cpu_exact_two_token_draft")
+    #expect(result.committedExactTokensPerPass != nil)
+    #expect(result.acceptedFutureTokensPerPass != nil)
+}
+
 private func shouldRunLegacyQwenExperimentTests(
     env: [String: String] = ProcessInfo.processInfo.environment
 ) -> Bool {
@@ -386,6 +499,30 @@ private func shouldRunLegacyQwenExperimentTests(
         expectedCount: 3
     )
     #expect(raw == nil)
+}
+
+@Test func test_effectiveExactHeadBackendLabelAllowsLFM2FP16TiledHead() {
+    #expect(
+        RealModelInferenceEngine.effectiveExactHeadBackendLabelForTesting(
+            strategy: .cpuFP16Tiled,
+            architecture: .lfm2,
+            hasRawFP16Head: true
+        ) == "cpu_fp16_tiled"
+    )
+    #expect(
+        RealModelInferenceEngine.effectiveExactHeadBackendLabelForTesting(
+            strategy: .cpuFP16Tiled,
+            architecture: .lfm2,
+            hasRawFP16Head: false
+        ) == "cpu_partitioned_fp32"
+    )
+    #expect(
+        RealModelInferenceEngine.effectiveExactHeadBackendLabelForTesting(
+            strategy: .cpuFP16Tiled,
+            architecture: .gpt2,
+            hasRawFP16Head: true
+        ) == "cpu_partitioned_fp32"
+    )
 }
 
 @Test func test_evalHybridSingleLayerRawQKVOutputsForTestingRejectsUnsupportedArchitecture() throws {
@@ -707,6 +844,45 @@ private func shouldRunLegacyQwenExperimentTests(
             config: llamaConfig,
             environment: ["ESPRESSO_USE_CPU_EXACT_QKV": "1"]
         ) == true
+    )
+}
+
+@Test func test_shouldUseBatchedMetalAttentionRequiresCachedBindings() {
+    let enabledPolicy = RealModelExecutionPolicy(
+        environment: ["ESPRESSO_BATCHED_METAL_ATTENTION": "1"]
+    )
+
+    #expect(
+        RealModelInferenceEngine.shouldUseBatchedMetalAttention(
+            policy: enabledPolicy,
+            cachedBindingsAvailable: true,
+            hasMetalRoPEConfig: false,
+            hasCPUExactQKV: false
+        )
+    )
+    #expect(
+        !RealModelInferenceEngine.shouldUseBatchedMetalAttention(
+            policy: enabledPolicy,
+            cachedBindingsAvailable: false,
+            hasMetalRoPEConfig: false,
+            hasCPUExactQKV: false
+        )
+    )
+    #expect(
+        !RealModelInferenceEngine.shouldUseBatchedMetalAttention(
+            policy: enabledPolicy,
+            cachedBindingsAvailable: true,
+            hasMetalRoPEConfig: true,
+            hasCPUExactQKV: false
+        )
+    )
+    #expect(
+        !RealModelInferenceEngine.shouldUseBatchedMetalAttention(
+            policy: enabledPolicy,
+            cachedBindingsAvailable: true,
+            hasMetalRoPEConfig: false,
+            hasCPUExactQKV: true
+        )
     )
 }
 
@@ -3244,6 +3420,66 @@ private func makeMinimalLlamaLayerWeightDirectory(
     return root
 }
 
+private func populateMinimalLlamaWeightDirectory(
+    at root: URL,
+    config: MultiModelConfig
+) throws {
+    try FileManager.default.createDirectory(
+        at: root.appendingPathComponent("embeddings", isDirectory: true),
+        withIntermediateDirectories: true
+    )
+    try writeBlob(
+        repeating: 0.03125,
+        count: config.vocab * config.dModel,
+        to: root.appendingPathComponent("embeddings/token.bin")
+    )
+    try writeBlob(
+        repeating: 1.0,
+        count: config.dModel,
+        to: root.appendingPathComponent("rms_final.bin")
+    )
+    try writeBlob(
+        repeating: 0.0078125,
+        count: config.vocab * config.dModel,
+        to: root.appendingPathComponent("lm_head.bin")
+    )
+
+    let metadata: [String: Any] = [
+        "name": config.name,
+        "nLayer": config.nLayer,
+        "nHead": config.nHead,
+        "nKVHead": config.nKVHead,
+        "dModel": config.dModel,
+        "headDim": config.headDim,
+        "hiddenDim": config.hiddenDim,
+        "vocab": config.vocab,
+        "maxSeq": config.maxSeq,
+        "normEps": config.normEps,
+        "ropeTheta": config.ropeTheta,
+        "architecture": "llama",
+    ]
+    try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]).write(
+        to: root.appendingPathComponent("metadata.json")
+    )
+
+    let layerDir = root
+        .appendingPathComponent("layers", isDirectory: true)
+        .appendingPathComponent("0", isDirectory: true)
+    try FileManager.default.createDirectory(at: layerDir, withIntermediateDirectories: true)
+
+    let qDim = config.attentionDim
+    let kvDim = config.kvDim
+    try writeBlob(repeating: 1.0, count: config.dModel, to: layerDir.appendingPathComponent("rms_att.bin"))
+    try writeBlob(repeating: 0.03125, count: config.dModel * qDim, to: layerDir.appendingPathComponent("wq.bin"))
+    try writeBlob(repeating: 0.015625, count: config.dModel * kvDim, to: layerDir.appendingPathComponent("wk.bin"))
+    try writeBlob(repeating: 0.0234375, count: config.dModel * kvDim, to: layerDir.appendingPathComponent("wv.bin"))
+    try writeBlob(repeating: 0.02734375, count: config.dModel * qDim, to: layerDir.appendingPathComponent("wo.bin"))
+    try writeBlob(repeating: 1.0, count: config.dModel, to: layerDir.appendingPathComponent("rms_ffn.bin"))
+    try writeBlob(repeating: 0.01953125, count: config.hiddenDim * config.dModel, to: layerDir.appendingPathComponent("w1.bin"))
+    try writeBlob(repeating: 0.01171875, count: config.dModel * config.hiddenDim, to: layerDir.appendingPathComponent("w2.bin"))
+    try writeBlob(repeating: 0.017578125, count: config.hiddenDim * config.dModel, to: layerDir.appendingPathComponent("w3.bin"))
+}
+
 private func writeBlob(repeating value: Float, count: Int, to url: URL) throws {
     let data = makeBlobData(repeating: value, count: count)
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -3470,7 +3706,7 @@ private func cpuArtifactLlamaLayerHiddenLineage(
                 cols: config.dModel,
                 vector: attnNormed
             )
-            var k = multiplyRowMajorFlatMatrix(
+            let k = multiplyRowMajorFlatMatrix(
                 matrix: layer.wk,
                 rows: config.kvDim,
                 cols: config.dModel,
