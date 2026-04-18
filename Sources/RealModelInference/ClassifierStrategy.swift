@@ -65,6 +65,9 @@ public enum ClassifierStrategy: Sendable, Equatable {
         if config.architecture == .llama && !hasExactFloat32LMHead {
             return .cpuFP16Tiled
         }
+        if config.architecture == .lfm2 {
+            return .cpuPartitionedFP32
+        }
         return .cpuPartitionedFP32
     }
 }
